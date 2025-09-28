@@ -1,0 +1,219 @@
+Grade 3
+In grade 3, instructional time should focus on four critical areas: (1) developing understanding of multiplication and division  
+and strategies for multiplication and division within 100; (2) developing understanding of fractions, especially unit fractions 
+(fractions with numerator 1); (3) developing understanding of the structure of rectangular arrays and of area; and (4) describing 
+and analyzing two-dimensional shapes. 
+(1) Students develop an understanding of the meanings of multiplication and division of whole numbers through activities and 
+problems involving equal-sized groups, arrays, and area models; multiplication is ﬁnding an unknown product, and division 
+is ﬁnding an unknown factor in these situations. For equal-sized group situations, division can require ﬁnding the unknown 
+number of groups or the unknown group size. Students use properties of operations to calculate products of whole numbers,  
+using increasingly sophisticated strategies based on these properties to solve multiplication and division problems involving 
+single-digit factors. By comparing a variety of solution strategies, students learn the relationship between multiplication and 
+division. 
+(2) Students develop an understanding of fractions, beginning with unit fractions. Students view fractions in general as being 
+built out of unit fractions, and they use fractions along with visual fraction models to represent parts of a whole. Students 
+understand that the size of a fractional part is relative to the size of the whole. For example, 1/2 of the paint in a small 
+bucket could be less paint than 1/3 of the paint in a larger bucket, but 1/3 of a ribbon is longer than 1/5 of the same  
+ribbon because when the ribbon is divided into 3 equal parts, the parts are longer than when the ribbon is divided into  
+5 equal parts. Students are able to use fractions to represent numbers equal to, less than, and greater than one. They  
+solve problems that involve comparing fractions by using visual fraction models and strategies based on noticing equal 
+numerators or denominators. 
+(3) Students recognize area as an attribute of two-dimensional regions. They measure the area of a shape by ﬁnding the total 
+number of same-size units of area required to cover the shape without gaps or overlaps, a square with sides of unit length 
+being the standard unit for measuring area. Students understand that rectangular arrays can be decomposed into identical  
+rows or into identical columns. By decomposing rectangles into rectangular arrays of squares, students connect area to 
+multiplication, and justify using multiplication to determine the area of a rectangle. 
+(4) Students describe, analyze, and compare properties of two-dimensional shapes. They compare and classify shapes by their 
+sides and angles, and connect these with deﬁnitions of shapes. Students also relate their fraction work to geometry by 
+expressing the area of part of a shape as a unit fraction of the whole.
+Grade 3
+K–8 Standards | 23
+
+
+--- Page Break ---
+
+Grade 3 Overview
+Operations and Algebraic Thinking
+ 
+Represent and solve problems involving multiplication and  
+division.
+
+Understand properties of multiplication and the relationship
+between multiplication and division.
+ 
+Multiply and divide within 100.
+
+Solve problems involving the four operations, and identify
+and explain patterns in arithmetic.
+Number and Operations in Base Ten
+ 
+Use place value understanding and properties of operations  
+to perform multi-digit arithmetic.
+Number and Operations—Fractions
+
+Develop understanding of fractions as numbers.
+Measurement and Data
+ 
+Solve problems involving measurement and estimation of  
+intervals of time, liquid volumes, and masses of objects.
+ 
+Represent and interpret data.
+ 
+Geometric measurement: understand concepts of area and relate area to multiplication and to addition.
+ 
+Geometric measurement: recognize perimeter as an attribute of plane ﬁgures and distinguish between linear and area  
+measures.
+Geometry
+ 
+Reason with shapes and their attributes.
+Mathematical Practices
+1.  Make sense of problems and persevere in  
+solving them.
+2.  Reason abstractly and quantitatively.
+3.  Construct viable arguments and critique the 
+reasoning of others.
+4.  Model with mathematics.
+5.  Use appropriate tools strategically.
+6.  Attend to precision.
+7.  Look for and make use of structure.
+8.  Look for and express regularity in repeated 
+reasoning.
+24 | K–8 Standards
+Grade 3
+
+
+--- Page Break ---
+
+K–8 Standards  | 25
+3
+Grade 3 
+Grade 3
+Operations and Algebraic Thinking 
+3.OA
+Represent and solve problems involving multiplication and division.
+1.  Interpret products of whole numbers, e.g., interpret 5 × 7 as the total number of objects in 5 groups of 7 objects each.  
+For example, describe a context in which a total number of objects can be expressed as 5 × 7. 
+2.  Interpret whole-number quotients of whole numbers, e.g., interpret 56 ÷ 8 as the number of objects in each share when 56 
+objects are partitioned equally into 8 shares, or as a number of shares when 56 objects are partitioned into equal shares of 8 
+objects each. For example, describe a context in which a number of shares or a number of groups can be expressed as 56÷8.
+3.  Use multiplication and division within 100 to solve word problems in situations involving equal groups, arrays, and measure-
+ment quantities, e.g., by using drawings and equations with a symbol for the unknown number to represent the problem.1
+4.  Determine the unknown whole number in a multiplication or division equation relating three whole numbers. For example, 
+determine the unknown number that makes the equation true in each of the equations 8 × ? = 48, 5 =  ÷ 3, 6 × 6 = ?.
+Understand properties of multiplication and the relationship between multiplication and division.
+5. Apply properties of operations as strategies to multiply and divide.2 Examples: If 6 × 4 = 24 is known, then 4 × 6 = 24 is 
+also known. (Commutative property of multiplication.) 3 × 5 × 2 can be found by 3 × 5 = 15, then 15 × 2 = 30, or 
+by 5 × 2 = 10, then 3 × 10 = 30. (Associative property of multiplication.) Knowing that 8 × 5 = 40 and 8 × 2 = 16,  
+one can ﬁnd 8 × 7 as 8 × (5 + 2) = (8 × 5) + (8 × 2) = 40 + 16 = 56. (Distributive property.)
+6. Understand division as an unknown-factor problem. For example, ﬁnd 32 ÷ 8 by ﬁnding the number that makes 32 when 
+multiplied by 8.
+Multiply and divide within 100.
+7. Fluently multiply and divide within 100, using strategies such as the relationship between multiplication and division  
+(e.g., knowing that 8 × 5 = 40, one knows 40 ÷ 5 = 8) or properties of operations. By the end of Grade 3, know from 
+memory all products of two one-digit numbers.
+Solve problems involving the four operations, and identify and explain patterns in arithmetic.
+8.  Solve two-step word problems using the four operations. Represent these problems using equations with a letter standing  
+for the unknown quantity. Assess the reasonableness of answers using mental computation and estimation strategies 
+including rounding.32
+9.  Identify arithmetic patterns (including patterns in the addition table or multiplication table), and explain them using  
+properties of operations. For example, observe that 4 times a number is always even, and explain why 4 times a number 
+can be decomposed into two equal addends.
+Number and Operations in Base Ten 
+3.NBT
+Use place value understanding and properties of operations to perform multi-digit arithmetic.4
+1. Use place value understanding to round whole numbers to the nearest 10 or 100.
+1. See Glossary, Table 2.
+2. Students need not use formal terms for these properties.
+3. This standard is limited to problems posed with whole numbers and having whole-number answers; students should know how to perform operations in 
+the conventional order when there are no parentheses to specify a particular order (Order of Operations).
+4. A range of algorithms may be used.
+
+
+--- Page Break ---
+
+3
+Grade 3
+2.  Fluently add and subtract within 1000 using strategies and algorithms based on place value, properties of operations,  
+and/or the relationship between addition and subtraction.
+3.  Multiply one-digit whole numbers by multiples of 10 in the range 10–90 (e.g., 9 × 80, 5 × 60) using strategies based on 
+place value and properties of operations.
+Number and Operations—Fractions5 
+3.NF
+Develop understanding of fractions as numbers.3
+1.  Understand a fraction 1/b as the quantity formed by 1 part when a whole is partitioned into b equal parts; understand a 
+fraction a/b as the quantity formed by a parts of size 1/b.
+2.  Understand a fraction as a number on the number line; represent fractions on a number line diagram.
+a. Represent a fraction 1/b on a number line diagram by deﬁning the interval from 0 to 1 as the whole and partitioning 
+it into b equal parts. Recognize that each part has size 1/b and that the endpoint of the part based at 0 locates the 
+number 1/b on the number line.
+b. Represent a fraction a/b on a number line diagram by marking off a lengths 1/b from 0. Recognize that the resulting 
+interval has size a/b and that its endpoint locates the number a/b on the number line.
+3.  Explain equivalence of fractions in special cases, and compare fractions by reasoning about their size.
+a. Understand two fractions as equivalent (equal) if they are the same size, or the same point on a number line. 
+b. Recognize and generate simple equivalent fractions, e.g., 1/2 = 2/4, 4/6 = 2/3). Explain why the fractions are  
+equivalent, e.g., by using a visual fraction model.
+c. Express whole numbers as fractions, and recognize fractions that are equivalent to whole numbers. Examples:  
+Express 3 in the form 3 = 3/1; recognize that 6/1 = 6; locate 4/4 and 1 at the same point of a number line diagram.
+d.  Compare two fractions with the same numerator or the same denominator by reasoning about their size. Recognize that 
+comparisons are valid only when the two fractions refer to the same whole. Record the results of comparisons with the 
+symbols >, =, or <, and justify the conclusions, e.g., by using a visual fraction model.
+Measurement and Data 
+3.MD
+Solve problems involving measurement and estimation of intervals of time, liquid volumes, and masses of objects.
+1. Tell and write time to the nearest minute and measure time intervals in minutes. Solve word problems involving addition and 
+subtraction of time intervals in minutes, e.g., by representing the problem on a number line diagram.
+2. Measure and estimate liquid volumes and masses of objects using standard units of grams (g), kilograms (kg), and liters 
+(l).6 Add, subtract, multiply, or divide to solve one-step word problems involving masses or volumes that are given in the 
+same units, e.g., by using drawings (such as a beaker with a measurement scale) to represent the problem.74
+5. Grade 3 expectations in this domain are limited to fractions with denominators 2, 3, 4, 6, and 8.
+6. Excludes compound units such as cm3 and ﬁnding the geometric volume of a container.
+7. Excludes multiplicative comparison problems (problems involving notions of “times as much”; see Glossary, Table 2).
+26 | K–8 Standards
+Grade 3
+
+
+--- Page Break ---
+
+Grade 3 3
+Represent and interpret data.
+3.  Draw a scaled picture graph and a scaled bar graph to represent a data set with several categories. Solve one- and two-
+step “how many more” and “how many less” problems using information presented in scaled bar graphs. For example, draw 
+a bar graph in which each square in the bar graph might represent 5 pets.
+4.  Generate measurement data by measuring lengths using rulers marked with halves and fourths of an inch. Show the data by 
+making a line plot, where the horizontal scale is marked off in appropriate units—whole numbers, halves, or quarters.
+Geometric measurement: understand concepts of area and relate area to multiplication and to addition.
+5.  Recognize area as an attribute of plane ﬁgures and understand concepts of area measurement.
+a.  A square with side length 1 unit, called “a unit square,” is said to have “one square unit” of area, and can be used to 
+measure area.
+b.  A plane ﬁgure which can be covered without gaps or overlaps by n unit squares is said to have an area of n square 
+units.
+6.  Measure areas by counting unit squares (square cm, square m, square in, square ft, and improvised units).
+7.  Relate area to the operations of multiplication and addition.
+a.  Find the area of a rectangle with whole-number side lengths by tiling it, and show that the area is the same as would be 
+found by multiplying the side lengths.
+b.  Multiply side lengths to ﬁnd areas of rectangles with whole-number side lengths in the context of solving real-world and 
+mathematical problems, and represent whole-number products as rectangular areas in mathematical reasoning.
+c.  Use tiling to show in a concrete case that the area of a rectangle with whole-number side lengths a and b + c is the 
+sum of a × b and a × c. Use area models to represent the distributive property in mathematical reasoning.
+d.  Recognize area as additive. Find areas of rectilinear ﬁgures by decomposing them into non-overlapping rectangles and 
+adding the areas of the non-overlapping parts, applying this technique to solve real-world problems.
+Geometric measurement: recognize perimeter as an attribute of plane ﬁgures and distinguish between linear 
+and area measures.
+8.  Solve real-world and mathematical problems involving perimeters of polygons, including ﬁnding the perimeter given the side 
+lengths, ﬁnding an unknown side length, and exhibiting rectangles with the same perimeter and different areas or with the 
+same area and different perimeters.
+Geometry 
+3.G
+Reason with shapes and their attributes.
+1.  Understand that shapes in different categories (e.g., rhombuses, rectangles, and others) may share attributes (e.g., having 
+four sides), and that the shared attributes can deﬁne a larger category (e.g., quadrilaterals). Recognize rhombuses,  
+rectangles, and squares as examples of quadrilaterals, and draw examples of quadrilaterals that do not belong to any of 
+these subcategories.
+2.  Partition shapes into parts with equal areas. Express the area of each part as a unit fraction of the whole. For example, 
+partition a shape into 4 parts with equal area, and describe the area of each part as 1/4 of the area of the shape.
+Grade 3
+K–8 Standards  | 27
+
+
+--- Page Break ---
+

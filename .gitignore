@@ -1,0 +1,35 @@
+# Virtual environments
+venv/
+azure-venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment files with secrets
+.env
+*.env
+!.env.example
+
+# Audio files
+*.m4a
+*.wav
+*.mp3
+
+# Windows Zone Identifier files
+*.Zone.Identifier
+
+# Backup/copy files
+*Copy.py
+*- Copy.*
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

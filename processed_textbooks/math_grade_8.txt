@@ -1,0 +1,222 @@
+Grade 8
+In grade 8, instructional time should focus on three critical areas: (1) formulating and reasoning about expressions and  
+equations, including modeling an association in bivariate data with a linear equation, and solving linear equations and systems 
+of linear equations; (2) grasping the concept of a function and using functions to describe quantitative relationships; (3) analyz-
+ing two- and three-dimensional space and ﬁgures using distance, angle, similarity, and congruence, and understanding and 
+applying the Pythagorean Theorem. 
+(1) Students use linear equations and systems of linear equations to represent, analyze, and solve a variety of problems. 
+Students recognize equations for proportions (y/x = m or y = mx) as special linear equations (y = mx + b), understanding 
+that the constant of proportionality (m) is the slope, and the graphs are lines through the origin. They understand that the 
+slope (m) of a line is a constant rate of change, so that if the input or x-coordinate changes by an amount A, the output or 
+y-coordinate changes by the amount m . A. Students also use a linear equation to describe the association between two 
+quantities in bivariate data (such as arm span versus height for students in a classroom). At this grade, ﬁtting the model 
+and assessing its ﬁt to the data are done informally. Interpreting the model in the context of the data requires students 
+to express a relationship between the two quantities in question and to interpret components of the relationship (such as 
+slope and y-intercept) in terms of the situation.
+Students strategically choose and efﬁciently implement procedures to solve linear equations in one variable, understanding  
+that when they use the properties of equality and the concept of logical equivalence, they maintain the solutions of the 
+original equation. Students solve systems of two linear equations in two variables and relate the systems to pairs of lines 
+in the plane; these intersect, are parallel, or are the same line. Students use linear equations, systems of linear equations, 
+linear functions, and their understanding of slope of a line to analyze situations and solve problems.
+(2)  Students grasp the concept of a function as a rule that assigns to each input exactly one output. They understand that 
+functions describe situations where one quantity determines another. They can translate among representations and partial 
+representations of functions (noting that tabular and graphical representations may be partial representations), and they 
+describe how aspects of the function are reﬂected in the different representations.
+(3)  Students use ideas about distance and angles, how they behave under translations, rotations, reﬂections, and dilations, 
+and ideas about congruence and similarity to describe and analyze two-dimensional ﬁgures and to solve problems. Students  
+show that the sum of the angles in a triangle is the angle formed by a straight line, and that various conﬁgurations of lines 
+give rise to similar triangles because of the angles created when a transversal cuts parallel lines. Students understand the 
+statement of the Pythagorean Theorem and its converse, and can explain why the Pythagorean Theorem holds, for example, 
+by decomposing a square in two different ways. They apply the Pythagorean Theorem to ﬁnd distances between points on 
+the coordinate plane, to ﬁnd lengths, and to analyze polygons. Students complete their work on volume by solving problems 
+involving cones, cylinders, and spheres.
+52 | K–8 Standards
+Grade 8
+
+
+--- Page Break ---
+
+ 
+Grade 8 Overview
+The Number System
+ 
+Know that there are numbers that are not rational, and  
+approximate them by rational numbers. 
+Expressions and Equations
+ 
+Work with radicals and integer exponents.
+ 
+Understand the connection between proportional  
+relationships, lines, and linear equations.
+ 
+Analyze and solve linear equations and pairs of simultaneous  
+linear equations.
+Functions
+ 
+Deﬁne, evaluate, and compare functions.
+ 
+Use functions to model relationships between quantities.
+Geometry
+ 
+Understand congruence and similarity using physical models,  
+transparencies, or geometry software.
+ 
+Understand and apply the Pythagorean Theorem.
+ 
+Solve real-world and mathematical problems involving volume of cylinders, cones, and spheres.
+Statistics and Probability
+ 
+Investigate patterns of association in bivariate data.
+Mathematical Practices
+1.  Make sense of problems and persevere in 
+solving them.
+2.  Reason abstractly and quantitatively.
+3.  Construct viable arguments and critique the 
+reasoning of others.
+4.  Model with mathematics.
+5.  Use appropriate tools strategically.
+6.  Attend to precision.
+7.  Look for and make use of structure.
+8.  Look for and express regularity in repeated 
+reasoning.
+Grade 8
+K–8 Standards | 53
+
+
+--- Page Break ---
+
+54 | K–8 Standards
+8
+Grade 8
+The Number System 
+8.NS
+Know that there are numbers that are not rational, and approximate them by rational numbers.
+1.  Know that numbers that are not rational are called irrational. Understand informally that every number has a decimal  
+expansion; for rational numbers show that the decimal expansion repeats eventually, and convert a decimal expansion 
+which repeats eventually into a rational number. 
+2.  Use rational approximations of irrational numbers to compare the size of irrational numbers, locate them approximately on a 
+number line diagram, and estimate the value of expressions (e.g.,π 2). For example, by truncating the decimal expansion of  
+√2, show that √2 is between 1 and 2, then between 1.4 and 1.5, and explain how to continue on to get better approximations.
+Expressions and Equations 
+8.EE
+Work with radicals and integer exponents.
+1.  Know and apply the properties of integer exponents to generate equivalent numerical expressions. For example,  
+32 × 3–5 = 3–3 = 1/33 = 1/27.
+2.  Use square root and cube root symbols to represent solutions to equations of the form x2 = p and x3 = p, where p is a  
+positive rational number. Evaluate square roots of small perfect squares and cube roots of small perfect cubes. Know that 
+√2 is irrational.
+3.  Use numbers expressed in the form of a single digit times an integer power of 10 to estimate very large or very small  
+quantities, and to express how many times as much one is than the other. For example, estimate the population of the 
+United States as 3 × 108 and the population of the world as 7 × 109, and determine that the world population is more  
+than 20 times larger.
+4.  Perform operations with numbers expressed in scientiﬁc notation, including problems where both decimal and scientiﬁc 
+notation are used. Use scientiﬁc notation and choose units of appropriate size for measurements of very large or very small 
+quantities (e.g., use millimeters per year for seaﬂoor spreading). Interpret scientiﬁc notation that has been generated by 
+technology.
+Understand the connections between proportional relationships, lines, and linear equations.
+5.  Graph proportional relationships, interpreting the unit rate as the slope of the graph. Compare two different proportional 
+relationships represented in different ways. For example, compare a distance-time graph to a distance-time equation to 
+determine which of two moving objects has greater speed.
+6.  Use similar triangles to explain why the slope m is the same between any two distinct points on a non-vertical line in the 
+coordinate plane; derive the equation y = mx for a line through the origin and the equation y = mx + b for a line intercepting 
+the vertical axis at b.
+Analyze and solve linear equations and pairs of simultaneous linear equations.
+7. Solve linear equations in one variable.
+a.  Give examples of linear equations in one variable with one solution, inﬁnitely many solutions, or no solutions. Show 
+which of these possibilities is the case by successively transforming the given equation into simpler forms, until an 
+equivalent equation of the form x = a, a = a, or a = b results (where a and b are different numbers).
+b.  Solve linear equations with rational number coefﬁcients, including equations whose solutions require expanding  
+expressions using the distributive property and collecting like terms.
+Grade 8
+
+
+--- Page Break ---
+
+Grade 8 8
+8.  Analyze and solve pairs of simultaneous linear equations.
+a.  Understand that solutions to a system of two linear equations in two variables correspond to points of intersection of 
+their graphs, because points of intersection satisfy both equations simultaneously.
+b.  Solve systems of two linear equations in two variables algebraically, and estimate solutions by graphing the equations. 
+Solve simple cases by inspection. For example, 3x + 2y = 5 and 3x + 2y = 6 have no solution because 3x + 2y cannot 
+simultaneously be 5 and 6.
+c.  Solve real-world and mathematical problems leading to to linear equations in two variables. For example, given  
+coordinates for two pairs of points, determine whether the line through the ﬁrst pair of points intersects the line through 
+the second pair.
+Functions 
+8.F
+Deﬁne, evaluate, and compare functions.
+1.  Understand that a function is a rule that assigns to each input exactly one output. The graph of a function is the set of 
+ordered pairs consisting of an input and the corresponding output.1
+2.  Compare properties of two functions each represented in a different way (algebraically, graphically, numerically in tables,  
+or by verbal descriptions). For example, given a linear function represented by a table of values and a linear function  
+represented by an algebraic expression, determine which function has the greater rate of change.
+3.  Interpret the equation y = mx + b as deﬁning a linear function, whose graph is a straight line; give examples of functions 
+that are not linear. For example, the function A = s2 giving the area of a square as a function of its side length is not linear 
+because its graph contains the points (1,1), (2,4) and (3,9), which are not on a straight line.
+Use functions to model relationships between quantities.
+4.  Construct a function to model a linear relationship between two quantities. Determine the rate of change and initial value 
+of the function from a description of a relationship or from two (x, y) values, including reading these from a table or from a 
+graph. Interpret the rate of change and initial value of a linear function in terms of the situation it models, and in terms of 
+its graph or a table of values.
+5.  Describe qualitatively the functional relationship between two quantities by analyzing a graph (e.g., where the function is 
+increasing or decreasing, linear or nonlinear). Sketch a graph that exhibits the qualitative features of a function that has 
+been described verbally.
+Geometry 
+8.G
+Understand congruence and similarity using physical models, transparencies, or geometry software.
+1.  Verify experimentally the properties of rotations, reﬂections, and translations:
+a.  Lines are taken to lines, and line segments to line segments of the same length.
+b.  Angles are taken to angles of the same measure.
+c.  Parallel lines are taken to parallel lines.
+1. Function notation is not required in grade 8.
+Grade 8
+K–8 Standards  | 55
+
+
+--- Page Break ---
+
+8
+Grade 8
+2.  Understand that a two-dimensional ﬁgure is congruent to another if the second can be obtained from the ﬁrst by a sequence 
+of rotations, reﬂections, and translations; given two congruent ﬁgures, describe a sequence that exhibits the congruence 
+between them.
+3.  Describe the effect of dilations, translations, rotations, and reﬂections on two-dimensional ﬁgures using coordinates.
+4.  Understand that a two-dimensional ﬁgure is similar to another if the second can be obtained from the ﬁrst by a sequence 
+of rotations, reﬂections, translations, and dilations; given two similar two-dimensional ﬁgures, describe a sequence that 
+exhibits the similarity between them.
+5.  Use informal arguments to establish facts about the angle sum and exterior angle of triangles, about the angles created 
+when parallel lines are cut by a transversal, and the angle-angle criterion for similarity of triangles. For example, arrange 
+three copies of the same triangle so that the sum of the three angles appears to form a line, and give an argument in  
+terms of transversals why this is so.
+Understand and apply the Pythagorean Theorem.
+6.  Explain a proof of the Pythagorean Theorem and its converse.
+7.  Apply the Pythagorean Theorem to determine unknown side lengths in right triangles in real-world and mathematical  
+problems in two and three dimensions.
+8.  Apply the Pythagorean Theorem to ﬁnd the distance between two points in a coordinate system.
+Solve real-world and mathematical problems involving volume of cylinders, cones, and spheres.
+9.  Know the formulas for the volumes of cones, cylinders, and spheres and use them to solve real-world and mathematical 
+problems.
+Statistics and Probability 
+8.SP
+Investigate patterns of association in bivariate data.
+1.  Construct and interpret scatter plots for bivariate measurement data to investigate patterns of association between two 
+quantities. Describe patterns such as clustering, outliers, positive or negative association, linear association, and nonlinear 
+association.
+2.  Know that straight lines are widely used to model relationships between two quantitative variables. For scatter plots that 
+suggest a linear association, informally ﬁt a straight line, and informally assess the model ﬁt by judging the closeness of the 
+data points to the line.
+3.  Use the equation of a linear model to solve problems in the context of bivariate measurement data, interpreting the slope 
+and intercept. For example, in a linear model for a biology experiment, interpret a slope of 1.5 cm/hr as meaning that an 
+additional hour of sunlight each day is associated with an additional 1.5 cm in mature plant height.
+4.  Understand that patterns of association can also be seen in bivariate categorical data by displaying frequencies and relative  
+frequencies in a two-way table. Construct and interpret a two-way table summarizing data on two categorical variables 
+collected from the same subjects. Use relative frequencies calculated for rows or columns to describe possible association 
+between the two variables. For example, collect data from students in your class on whether or not they have a curfew on 
+school nights and whether or not they have assigned chores at home. Is there evidence that those who have a curfew also 
+tend to have chores?
+56 | K–8 Standards
+Grade 8
+
+
+--- Page Break ---
+
