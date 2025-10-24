@@ -34,3 +34,15 @@ class Config:
             raise ValueError("AZURE_SPEECH_REGION environment variable is not set")
         
         return True
+        # Voice Activity Detection (VAD) Configuration for Pi
+    VAD_SILENCE_THRESHOLD = float(os.getenv('VAD_SILENCE_THRESHOLD', '0.015'))
+    VAD_SILENCE_DURATION = float(os.getenv('VAD_SILENCE_DURATION', '2.0'))
+    VAD_MIN_SPEECH_DURATION = float(os.getenv('VAD_MIN_SPEECH_DURATION', '0.5'))
+    VAD_PRE_BUFFER = float(os.getenv('VAD_PRE_BUFFER', '0.3'))
+    
+    # Audio Device Configuration
+    AUDIO_DEVICE_INDEX = os.getenv('AUDIO_DEVICE_INDEX')  # None for default
+    # Porcupine Wake Word Detection
+    PORCUPINE_ACCESS_KEY = os.getenv('PORCUPINE_ACCESS_KEY')
+    PORCUPINE_KEYWORD_PATH = os.getenv('PORCUPINE_KEYWORD_PATH')  # Path to custom .ppn file
+    PORCUPINE_SENSITIVITY = float(os.getenv('PORCUPINE_SENSITIVITY', '0.5'))

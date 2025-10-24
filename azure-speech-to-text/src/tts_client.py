@@ -181,65 +181,60 @@ class TextToSpeechClient:
 
     def play_speech(self, audio_file: str) -> None:
         """
-        Play synthesized speech from file with proper WSL compatibility.
+        Play synthesized speech from file on Raspberry Pi.
+        Uses ALSA (aplay) for direct hardware playback.
         
         Args:
             audio_file: Path to audio file
         """
-        import platform
-        import os
         import subprocess
-        import tempfile
-        import shutil
+        import platform
         
-        # Check if we're running in WSL
+        # Check if running on Windows/WSL (for development/testing)
         is_wsl = "microsoft" in platform.release().lower() or os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop")
         
         if is_wsl:
+            # WSL mode - keep existing Windows playback for testing
             try:
-                # Create a temporary file in Windows %TEMP% directory
+                import shutil
                 windows_temp = subprocess.check_output(['wslpath', '-w', '/mnt/c/Windows/Temp']).decode('utf-8').strip()
                 temp_filename = f"chippy_audio_{os.path.basename(audio_file)}"
                 windows_audio_path = os.path.join(windows_temp, temp_filename)
                 
-                # Convert to WSL path for copying
                 wsl_windows_temp = subprocess.check_output(['wslpath', '-u', windows_temp]).decode('utf-8').strip()
                 wsl_temp_path = os.path.join(wsl_windows_temp, temp_filename)
                 
-                # Copy the audio file to Windows temp directory
                 shutil.copy(audio_file, wsl_temp_path)
-                print(f"Copied audio file to Windows-accessible location: {windows_audio_path}")
-                
-                # Use mplayer.exe or other native Windows audio player
-                cmd_command = f'cmd.exe /c start /wait "CHIPPY Audio" "C:\\Windows\\Temp\\{temp_filename}"'
-                print(f"Playing audio with command: {cmd_command}")
+                cmd_command = f'cmd.exe /c start /wait "CHIPPY Audio" "{windows_audio_path}"'
                 os.system(cmd_command)
-                
                 return
             except Exception as e:
-                print(f"WSL Windows playback failed: {e}")
-                print("Falling back to Linux audio methods...")
+                print(f"WSL playback failed: {e}, trying Linux methods...")
         
-        # Standard playback for Linux/Pi
+        # Raspberry Pi / Linux mode - Use ALSA (aplay)
         try:
-            # Try different players in order of preference
-            players = [
-                ["aplay", audio_file],
-                ["paplay", audio_file],
-                ["play", audio_file],
-                ["ffplay", "-nodisp", "-autoexit", audio_file]
-            ]
+            # Try aplay first (standard on Pi)
+            result = subprocess.run(
+                ["aplay", "-q", audio_file],
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE
+            )
             
-            for player_cmd in players:
-                try:
-                    print(f"Trying to play with: {player_cmd[0]}")
-                    result = subprocess.call(player_cmd, stderr=subprocess.PIPE)
-                    if result == 0:
-                        print(f"Successfully played audio with {player_cmd[0]}")
-                        return
-                except:
-                    continue
-                    
-            print("No compatible audio players found in Linux environment.")
+            if result.returncode == 0:
+                return
+            else:
+                print(f"aplay failed: {result.stderr.decode()}")
+                
+                # Try alternative players
+                for player in ["paplay", "play"]:
+                    try:
+                        result = subprocess.run([player, audio_file], stderr=subprocess.PIPE)
+                        if result.returncode == 0:
+                            return
+                    except FileNotFoundError:
+                        continue
+                
+                print("❌ No audio player found. Install alsa-utils: sudo apt-get install alsa-utils")
+                
         except Exception as e:
-            print(f"Error playing audio: {e}")
+            print(f"❌ Error playing audio: {e}")
