@@ -9,6 +9,7 @@ import time
 import signal
 from datetime import datetime
 from dotenv import load_dotenv
+from typing import Optional
 
 # Fix import paths
 current_dir = os.path.dirname(os.path.abspath(__file__))
