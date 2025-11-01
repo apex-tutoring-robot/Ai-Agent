@@ -161,6 +161,7 @@ class ChippyVoiceLoop:
             
             # Step 2: Get AI response
             print("🧠 Thinking...")
+            self.tts_client.animator.set_expression("thinking")
             response_text = self.get_tutor_reply(recognized_text)
             
             # Step 3: Restore privacy if needed
@@ -175,7 +176,9 @@ class ChippyVoiceLoop:
             
             # Step 5: Play response
             print("🎵 Playing response...")
+            self.tts_client.animator.set_expression("talking")
             self.tts_client.play_speech(audio_output)
+            self.tts_client.animator.set_expression("happy")
             
             # Cleanup temporary files
             try:
