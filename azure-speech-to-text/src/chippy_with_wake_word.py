@@ -1,6 +1,7 @@
 """
 CHIPPY with Wake Word Detection - Production Version
-Waits for "Hello CHIPPY" before processing speech.
+Waits for "Porcupine" before processing speech.
+Features conversation mode and interrupt detection.
 """
 
 import os
@@ -30,7 +31,7 @@ import json
 
 
 class ChippyWithWakeWord:
-    """CHIPPY voice assistant with wake word detection."""
+    """CHIPPY voice assistant with wake word detection and conversation mode."""
     
     def __init__(self):
         """Initialize CHIPPY with wake word."""
@@ -41,6 +42,7 @@ class ChippyWithWakeWord:
         self.flow_endpoint = os.getenv("FLOW_ENDPOINT")
         self.flow_api_key = os.getenv("FLOW_API_KEY")
         self.porcupine_access_key = os.getenv("PORCUPINE_ACCESS_KEY")
+        self.conversation_timeout = float(os.getenv("CONVERSATION_TIMEOUT", "45.0"))
         
         # Validate Porcupine access key
         if not self.porcupine_access_key:
@@ -83,6 +85,7 @@ class ChippyWithWakeWord:
         # State
         self.running = False
         self.interaction_count = 0
+        self.device_index = None
         
         # Signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -131,8 +134,16 @@ class ChippyWithWakeWord:
             print(f"⚠️  Flow API error: {e}")
             return "I'm having technical difficulties. Let's continue anyway!"
     
-    def process_speech(self, audio_file: str) -> bool:
-        """Process recorded speech through the complete pipeline."""
+    def process_speech(self, audio_file: str) -> dict:
+        """
+        Process recorded speech through the complete pipeline with interrupt detection.
+        
+        Args:
+            audio_file: Path to audio file
+            
+        Returns:
+            dict with 'success': bool, 'interrupted': bool
+        """
         try:
             # Step 1: Speech-to-Text
             print("📝 Converting speech to text...")
@@ -143,7 +154,7 @@ class ChippyWithWakeWord:
             
             if "error" in stt_result and stt_result["error"]:
                 print(f"❌ STT Error: {stt_result['error']}")
-                return False
+                return {'success': False, 'interrupted': False}
             
             recognized_text = stt_result["recognized_text"]
             print(f"👤 You said: \"{recognized_text}\"")
@@ -162,9 +173,12 @@ class ChippyWithWakeWord:
             print("🔊 Converting to speech...")
             audio_output = self.tts_client.synthesize_speech(response_text)
             
-            # Step 5: Play response
-            print("🎵 Playing response...")
-            self.tts_client.play_speech(audio_output)
+            # Step 5: Play response with interrupt detection
+            print("🎵 Playing response (speak to interrupt)...")
+            playback_result = self.tts_client.play_speech_interruptible(
+                audio_output,
+                device_index=self.device_index
+            )
             
             # Cleanup
             try:
@@ -174,53 +188,110 @@ class ChippyWithWakeWord:
                 pass
             
             self.interaction_count += 1
-            return True
+            
+            return {
+                'success': True,
+                'interrupted': playback_result.get('interrupted', False)
+            }
             
         except Exception as e:
             print(f"❌ Error processing speech: {e}")
-            return False
+            return {'success': False, 'interrupted': False}
+    
+    def conversation_mode(self):
+        """
+        Enter conversation mode - stay active for 30-60 seconds without wake word.
+        """
+        print("\n" + "🗣️ " * 35)
+        print("   CONVERSATION MODE ACTIVE")
+        print(f"   I'll stay active for {self.conversation_timeout} seconds")
+        print(f"   Just speak - no wake word needed!")
+        print("🗣️ " * 35)
+        
+        conversation_start = time.time()
+        last_interaction = time.time()
+        
+        # Start audio stream for conversation
+        if not self.listener.start_stream(self.device_index):
+            print("❌ Failed to start speech listener")
+            return
+        
+        try:
+            while self.running:
+                # Check timeout
+                time_since_last = time.time() - last_interaction
+                
+                if time_since_last > self.conversation_timeout:
+                    print(f"\n⏱️  Conversation timeout ({self.conversation_timeout}s reached)")
+                    print("💤 Returning to wake word mode...")
+                    break
+                
+                # Show countdown
+                time_left = self.conversation_timeout - time_since_last
+                print(f"\r🎧 Listening... (timeout in {int(time_left)}s)  ", end="", flush=True)
+                
+                # Listen for speech with short timeout
+                audio_file = self.listener.listen_for_speech(
+                    callback=lambda msg: print(f"\n  {msg}"),
+                    timeout=5.0  # 5 second timeout per attempt
+                )
+                
+                if audio_file:
+                    print(f"\n📊 Interaction #{self.interaction_count + 1}")
+                    print("-" * 70)
+                    
+                    # Reset interaction timer
+                    last_interaction = time.time()
+                    
+                    # Process the speech
+                    result = self.process_speech(audio_file)
+                    
+                    if result['success']:
+                        if result['interrupted']:
+                            print("-" * 70)
+                            print("⚠️  Interrupted - ready for next question\n")
+                        else:
+                            print("-" * 70)
+                            print("✅ Response complete\n")
+                    else:
+                        print("-" * 70)
+                        print("⚠️  Processing incomplete\n")
+                    
+                    # Small pause
+                    time.sleep(0.3)
+        
+        finally:
+            # Stop speech listener
+            self.listener.stop_stream()
+            print()
     
     def run(self, device_index: Optional[int] = None, test_wake_word: bool = False):
         """
-        Run CHIPPY with wake word detection.
+        Run CHIPPY with wake word detection and conversation mode.
         
         Args:
             device_index: Audio device index (None for default)
             test_wake_word: If True, only test wake word detection
         """
+        self.device_index = device_index
+        
         print("\n" + "=" * 70)
         print("🎤 CHIPPY WITH WAKE WORD DETECTION")
         print("=" * 70)
         print(f"Session: {self.session_id}")
         print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Wake Word: 'Porcupine'")
+        print(f"Conversation Timeout: {self.conversation_timeout}s")
         print()
         
-        # Check for custom wake word file
-        wake_word_path = os.path.join(
-            parent_dir,
-            "azure-speech-to-text/wake_words",
-            "Hey-Chippy_en_raspberry-pi_v3_0_0.ppn"
+        # Initialize wake word detector with built-in "porcupine" keyword
+        print(f"✅ Using built-in wake word: 'Porcupine'")
+        self.wake_word_detector = WakeWordDetector(
+            access_key=self.porcupine_access_key,
+            keywords=["porcupine"],  # Built-in keyword
+            sensitivities=[0.5],
+            device_index=device_index
         )
-        
-        # Initialize wake word detector
-        if os.path.exists(wake_word_path):
-            print(f"✅ Using custom wake word: {wake_word_path}")
-            self.wake_word_detector = WakeWordDetector(
-                access_key=self.porcupine_access_key,
-                keyword_paths=[wake_word_path],
-                sensitivities=[0.5],
-                device_index=device_index
-            )
-        else:
-            print(f"⚠️  Custom wake word not found at: {wake_word_path}")
-            print(f"💡 Using built-in keyword 'porcupine' for testing")
-            print(f"   Train your custom 'Hello CHIPPY' at: https://console.picovoice.ai/")
-            self.wake_word_detector = WakeWordDetector(
-                access_key=self.porcupine_access_key,
-                keywords=["porcupine"],  # Built-in test keyword
-                sensitivities=[0.5],
-                device_index=device_index
-            )
         
         # Test mode
         if test_wake_word:
@@ -239,7 +310,9 @@ class ChippyWithWakeWord:
         print()
         print("=" * 70)
         print("✅ CHIPPY is ready and waiting for wake word!")
-        print("💡 Say 'Hello CHIPPY' (or 'Porcupine' if using test keyword)")
+        print("💡 Say 'Porcupine' to activate")
+        print("💬 After activation: I'll stay active for 45 seconds")
+        print("🔊 You can interrupt me while I'm speaking!")
         print("🛑 Press Ctrl+C to exit")
         print("=" * 70)
         print()
@@ -252,7 +325,7 @@ class ChippyWithWakeWord:
         try:
             while self.running:
                 # Wait for wake word
-                print("🎧 Listening for wake word...")
+                print("🎧 Listening for wake word 'Porcupine'...")
                 keyword_index = self.wake_word_detector.listen(
                     callback=lambda msg: print(f"  {msg}")
                 )
@@ -261,42 +334,12 @@ class ChippyWithWakeWord:
                     print("\n" + "🎉" * 35)
                     print("   WAKE WORD DETECTED - CHIPPY ACTIVATED!")
                     print("🎉" * 35)
-                    print(f"\n📊 Interaction #{self.interaction_count + 1}")
-                    print("-" * 70)
                     
-                    # Stop wake word detector temporarily
+                    # Stop wake word detector
                     self.wake_word_detector.stop()
                     
-                    # Start VAD listener for speech
-                    if not self.listener.start_stream(device_index):
-                        print("❌ Failed to start speech listener")
-                        self.wake_word_detector.start()
-                        continue
-                    
-                    # Listen for actual speech
-                    print("🎤 Listening for your question...")
-                    audio_file = self.listener.listen_for_speech(
-                        callback=lambda msg: print(f"  {msg}"),
-                        timeout=30  # 30 second timeout
-                    )
-                    
-                    # Stop speech listener
-                    self.listener.stop_stream()
-                    
-                    if audio_file:
-                        # Process the speech
-                        success = self.process_speech(audio_file)
-                        
-                        if success:
-                            print("-" * 70)
-                            print("✅ Response complete")
-                        else:
-                            print("-" * 70)
-                            print("⚠️  Processing incomplete")
-                    else:
-                        print("⚠️  No speech detected, timeout reached")
-                    
-                    print()
+                    # Enter conversation mode
+                    self.conversation_mode()
                     
                     # Restart wake word detector
                     time.sleep(0.5)
@@ -332,8 +375,29 @@ def main():
         action="store_true",
         help="Test wake word detection only"
     )
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="List available audio devices and exit"
+    )
     
     args = parser.parse_args()
+    
+    # List devices only
+    if args.list_devices:
+        import pyaudio
+        pa = pyaudio.PyAudio()
+        print("\n🎤 Available Audio Devices:")
+        print("-" * 60)
+        for i in range(pa.get_device_count()):
+            info = pa.get_device_info_by_index(i)
+            if info['maxInputChannels'] > 0:
+                print(f"Device {i}: {info['name']}")
+                print(f"  Channels: {info['maxInputChannels']}")
+                print(f"  Sample Rate: {int(info['defaultSampleRate'])} Hz")
+                print()
+        pa.terminate()
+        return
     
     # Run CHIPPY
     chippy = ChippyWithWakeWord()

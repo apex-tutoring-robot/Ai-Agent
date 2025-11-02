@@ -1,27 +1,29 @@
 """
 Text-to-Speech client for CHIPPY.
 Handles converting text responses to speech using Azure Cognitive Services.
+Now with interruptible playback for natural conversation flow.
 """
 
 import os
 import time
 import requests
 import tempfile
-from typing import Optional
+import threading
+import numpy as np
+import pyaudio
+import wave
+from typing import Optional, Callable
 
 class TextToSpeechClient:
     """Client for Azure Text-to-Speech service using REST API for Pi compatibility."""
     
-    # def __init__(self, config, voice_name="en-US-AriaNeural"):
-    # def __init__(self, config, voice_name="en-US-SaraNeural"):
-    # def __init__(self, config, voice_name="en-US-JennyNeural"):
     def __init__(self, config, voice_name="en-US-DavisNeural"):
         """
         Initialize the Text-to-Speech client.
         
         Args:
             config: Configuration object with Azure credentials
-            voice_name: Name of the voice to use (default: en-US-AriaNeural)
+            voice_name: Name of the voice to use (default: en-US-DavisNeural)
         """
         # API endpoints
         self.region = config.SPEECH_REGION
@@ -35,6 +37,10 @@ class TextToSpeechClient:
         # Get access token
         self.access_token = self._get_token()
         self.token_expiry = time.time() + 540  # Tokens valid for ~10 minutes
+        
+        # Interrupt detection settings
+        self.interrupt_threshold = float(os.getenv("INTERRUPT_SENSITIVITY", "0.015"))
+        self.min_playback_time = float(os.getenv("MIN_PLAYBACK_TIME", "0.5"))
     
     def _get_token(self) -> str:
         """Get authentication token for Speech service."""
@@ -137,55 +143,36 @@ class TextToSpeechClient:
         
         raise Exception("Speech synthesis failed after multiple attempts")
     
-    # def play_speech(self, audio_file: str) -> None:
-    #     """
-    #     Play synthesized speech from file.
-        
-    #     Args:
-    #         audio_file: Path to audio file
-    #     """
-    #     # Use platform-independent approach to play audio
-    #     try:
-    #         import platform
-    #         system = platform.system()
-            
-    #         if system == "Windows":
-    #             # Windows
-    #             import winsound
-    #             winsound.PlaySound(audio_file, winsound.SND_FILENAME)
-                
-    #         elif system == "Darwin":
-    #             # macOS
-    #             import subprocess
-    #             subprocess.call(["afplay", audio_file])
-                
-    #         else:
-    #             # Linux (including WSL and Raspberry Pi)
-    #             import subprocess
-                
-    #             # First try aplay (ALSA - works on Pi and many Linux systems)
-    #             try:
-    #                 subprocess.call(["aplay", audio_file])
-    #             except:
-    #                 # Fall back to other players
-    #                 players = ["paplay", "play"]
-    #                 for player in players:
-    #                     try:
-    #                         subprocess.call([player, audio_file])
-    #                         break
-    #                     except:
-    #                         continue
-    #     except Exception as e:
-    #         print(f"Error playing audio: {e}")
-    #         print("Please install audio playback software appropriate for your system.")
-
-    def play_speech(self, audio_file: str) -> None:
+    def calculate_rms(self, audio_chunk: bytes) -> float:
         """
-        Play synthesized speech from file on Raspberry Pi.
-        Uses ALSA (aplay) for direct hardware playback.
+        Calculate RMS (Root Mean Square) energy of audio chunk.
+        
+        Args:
+            audio_chunk: Raw audio bytes
+            
+        Returns:
+            Normalized RMS value (0.0 to 1.0)
+        """
+        audio_data = np.frombuffer(audio_chunk, dtype=np.int16)
+        rms = np.sqrt(np.mean(np.square(audio_data.astype(np.float32))))
+        normalized_rms = rms / 32768.0  # Normalize to 0-1 range
+        return normalized_rms
+    
+    def play_speech_interruptible(self, 
+                                  audio_file: str, 
+                                  interrupt_check: Optional[Callable[[], bool]] = None,
+                                  device_index: Optional[int] = None) -> dict:
+        """
+        Play synthesized speech with interrupt detection.
+        Monitors microphone and stops playback if speech is detected.
         
         Args:
             audio_file: Path to audio file
+            interrupt_check: Optional callback that returns True if interrupted
+            device_index: Input device index for interrupt detection
+            
+        Returns:
+            dict with 'interrupted': bool, 'played_duration': float
         """
         import subprocess
         import platform
@@ -194,7 +181,7 @@ class TextToSpeechClient:
         is_wsl = "microsoft" in platform.release().lower() or os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop")
         
         if is_wsl:
-            # WSL mode - keep existing Windows playback for testing
+            # WSL mode - use Windows playback (no interrupt detection)
             try:
                 import shutil
                 windows_temp = subprocess.check_output(['wslpath', '-w', '/mnt/c/Windows/Temp']).decode('utf-8').strip()
@@ -207,34 +194,139 @@ class TextToSpeechClient:
                 shutil.copy(audio_file, wsl_temp_path)
                 cmd_command = f'cmd.exe /c start /wait "CHIPPY Audio" "{windows_audio_path}"'
                 os.system(cmd_command)
-                return
+                return {'interrupted': False, 'played_duration': 0.0}
             except Exception as e:
-                print(f"WSL playback failed: {e}, trying Linux methods...")
+                print(f"WSL playback failed: {e}")
+                return {'interrupted': False, 'played_duration': 0.0}
         
-        # Raspberry Pi / Linux mode - Use ALSA (aplay)
+        # Raspberry Pi / Linux mode - Interruptible playback
+        return self._play_with_interrupt_detection(audio_file, interrupt_check, device_index)
+    
+    def _play_with_interrupt_detection(self, 
+                                      audio_file: str,
+                                      interrupt_check: Optional[Callable[[], bool]] = None,
+                                      device_index: Optional[int] = None) -> dict:
+        """
+        Play audio with real-time interrupt detection via microphone monitoring.
+        
+        Args:
+            audio_file: Path to WAV file to play
+            interrupt_check: Optional external interrupt check function
+            device_index: Input device for microphone
+            
+        Returns:
+            dict with 'interrupted': bool, 'played_duration': float
+        """
+        interrupted = False
+        played_duration = 0.0
+        start_time = time.time()
+        
+        # Shared flag for interrupt detection
+        interrupt_flag = threading.Event()
+        
+        # Open audio file
         try:
-            # Try aplay first (standard on Pi)
-            result = subprocess.run(
-                ["aplay", "-q", audio_file],
-                stderr=subprocess.PIPE,
-                stdout=subprocess.PIPE
+            wf = wave.open(audio_file, 'rb')
+        except Exception as e:
+            print(f"❌ Error opening audio file: {e}")
+            return {'interrupted': False, 'played_duration': 0.0}
+        
+        # Initialize PyAudio
+        p = pyaudio.PyAudio()
+        
+        # Open output stream for playback
+        try:
+            output_stream = p.open(
+                format=p.get_format_from_width(wf.getsampwidth()),
+                channels=wf.getnchannels(),
+                rate=wf.getframerate(),
+                output=True
+            )
+        except Exception as e:
+            print(f"❌ Error opening output stream: {e}")
+            wf.close()
+            p.terminate()
+            return {'interrupted': False, 'played_duration': 0.0}
+        
+        # Open input stream for interrupt detection
+        input_stream = None
+        monitor_thread = None
+        
+        try:
+            input_stream = p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=16000,
+                input=True,
+                input_device_index=device_index,
+                frames_per_buffer=1024
             )
             
-            if result.returncode == 0:
-                return
-            else:
-                print(f"aplay failed: {result.stderr.decode()}")
+            # Start monitoring thread
+            def monitor_microphone():
+                """Monitor microphone for speech during playback."""
+                time.sleep(self.min_playback_time)  # Allow minimum playback time
                 
-                # Try alternative players
-                for player in ["paplay", "play"]:
+                while not interrupt_flag.is_set():
                     try:
-                        result = subprocess.run([player, audio_file], stderr=subprocess.PIPE)
-                        if result.returncode == 0:
-                            return
-                    except FileNotFoundError:
-                        continue
-                
-                print("❌ No audio player found. Install alsa-utils: sudo apt-get install alsa-utils")
-                
+                        # Read from microphone
+                        audio_chunk = input_stream.read(1024, exception_on_overflow=False)
+                        rms = self.calculate_rms(audio_chunk)
+                        
+                        # Check if speech detected
+                        if rms > self.interrupt_threshold:
+                            print("\n⚠️  Interrupt detected! Stopping playback...")
+                            interrupt_flag.set()
+                            break
+                        
+                        # Check external interrupt
+                        if interrupt_check and interrupt_check():
+                            interrupt_flag.set()
+                            break
+                            
+                    except Exception as e:
+                        break
+            
+            monitor_thread = threading.Thread(target=monitor_microphone, daemon=True)
+            monitor_thread.start()
+            
         except Exception as e:
-            print(f"❌ Error playing audio: {e}")
+            print(f"⚠️  Could not start interrupt detection: {e}")
+            print("Playing without interrupt detection...")
+        
+        # Play audio in chunks
+        chunk_size = 1024
+        data = wf.readframes(chunk_size)
+        
+        while data and not interrupt_flag.is_set():
+            output_stream.write(data)
+            data = wf.readframes(chunk_size)
+            played_duration = time.time() - start_time
+        
+        interrupted = interrupt_flag.is_set()
+        
+        # Cleanup
+        output_stream.stop_stream()
+        output_stream.close()
+        
+        if input_stream:
+            input_stream.stop_stream()
+            input_stream.close()
+        
+        wf.close()
+        p.terminate()
+        
+        if interrupted:
+            print(f"🛑 Playback interrupted after {played_duration:.2f}s")
+        
+        return {'interrupted': interrupted, 'played_duration': played_duration}
+    
+    def play_speech(self, audio_file: str) -> None:
+        """
+        Play synthesized speech from file (non-interruptible, legacy method).
+        
+        Args:
+            audio_file: Path to audio file
+        """
+        result = self.play_speech_interruptible(audio_file, interrupt_check=None)
+        # Legacy method doesn't return anything

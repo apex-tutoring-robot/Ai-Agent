@@ -1,6 +1,7 @@
 """
-CHIPPY Raspberry Pi Voice Loop - Continuous Speech Interaction
+CHIPPY Raspberry Pi Voice Loop - Continuous Speech Interaction with Conversation Mode
 Runs continuously on Raspberry Pi, listening and responding to student queries.
+Features interrupt detection and conversation mode (stays active 30-60 seconds).
 """
 
 import os
@@ -30,7 +31,7 @@ import json
 
 
 class ChippyVoiceLoop:
-    """Main voice interaction loop for CHIPPY on Raspberry Pi."""
+    """Main voice interaction loop for CHIPPY on Raspberry Pi with conversation mode."""
     
     def __init__(self):
         """Initialize CHIPPY voice loop."""
@@ -40,6 +41,7 @@ class ChippyVoiceLoop:
         # Configuration
         self.flow_endpoint = os.getenv("FLOW_ENDPOINT")
         self.flow_api_key = os.getenv("FLOW_API_KEY")
+        self.conversation_timeout = float(os.getenv("CONVERSATION_TIMEOUT", "45.0"))
         
         # Generate or load session ID
         self.session_id = os.getenv("CHIPPY_SESSION_ID") or Config.generate_session_id()
@@ -74,6 +76,7 @@ class ChippyVoiceLoop:
         # State
         self.running = False
         self.interaction_count = 0
+        self.device_index = None
         
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -136,7 +139,7 @@ class ChippyVoiceLoop:
     
     def process_speech(self, audio_file: str) -> bool:
         """
-        Process recorded speech through the complete pipeline.
+        Process recorded speech through the complete pipeline with interrupt detection.
         
         Args:
             audio_file: Path to audio file
@@ -173,9 +176,12 @@ class ChippyVoiceLoop:
             print("🔊 Converting to speech...")
             audio_output = self.tts_client.synthesize_speech(response_text)
             
-            # Step 5: Play response
-            print("🎵 Playing response...")
-            self.tts_client.play_speech(audio_output)
+            # Step 5: Play response with interrupt detection
+            print("🎵 Playing response (speak to interrupt)...")
+            playback_result = self.tts_client.play_speech_interruptible(
+                audio_output,
+                device_index=self.device_index
+            )
             
             # Cleanup temporary files
             try:
@@ -185,7 +191,9 @@ class ChippyVoiceLoop:
                 pass
             
             self.interaction_count += 1
-            return True
+            
+            # Return interrupt status for conversation flow
+            return not playback_result.get('interrupted', False)
             
         except Exception as e:
             print(f"❌ Error processing speech: {e}")
@@ -193,17 +201,20 @@ class ChippyVoiceLoop:
     
     def run(self, device_index: Optional[int] = None, test_mode: bool = False):
         """
-        Run the continuous voice loop.
+        Run the continuous voice loop with conversation mode.
         
         Args:
             device_index: Audio device index (None for default)
             test_mode: If True, run test mode with microphone check
         """
+        self.device_index = device_index
+        
         print("\n" + "=" * 70)
         print("🎤 CHIPPY CONTINUOUS VOICE INTERACTION - RASPBERRY PI MODE")
         print("=" * 70)
         print(f"Session: {self.session_id}")
         print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Conversation Timeout: {self.conversation_timeout}s")
         print()
         
         # Show flow configuration
@@ -234,22 +245,44 @@ class ChippyVoiceLoop:
         # Main loop
         print("\n✅ CHIPPY is ready!")
         print("💡 Speak naturally - I'll respond when you're done talking")
+        print("💬 Conversation mode: I'll stay active for 45 seconds")
+        print("🔊 You can interrupt me while I'm speaking!")
         print("🛑 Press Ctrl+C to exit")
         print("\n" + "=" * 70 + "\n")
         
         self.running = True
+        conversation_active = True
+        last_interaction_time = time.time()
         
         while self.running:
             try:
-                # Listen for speech
+                # Check if conversation timeout reached
+                time_since_last = time.time() - last_interaction_time
+                
+                if conversation_active and time_since_last > self.conversation_timeout:
+                    print(f"\n⏱️  Conversation timeout ({self.conversation_timeout}s)")
+                    print("💤 Going to sleep... Say something to wake me!")
+                    conversation_active = False
+                
+                # Show timeout countdown
+                if conversation_active:
+                    time_left = self.conversation_timeout - time_since_last
+                    print(f"\r🎧 Listening... (timeout in {int(time_left)}s)  ", end="", flush=True)
+                
+                # Listen for speech with shorter timeout during conversation
+                listen_timeout = 5.0 if conversation_active else None
                 audio_file = self.listener.listen_for_speech(
-                    callback=lambda msg: print(f"  {msg}"),
-                    timeout=None  # Wait indefinitely
+                    callback=lambda msg: print(f"\n  {msg}"),
+                    timeout=listen_timeout
                 )
                 
                 if audio_file:
                     print(f"\n📊 Interaction #{self.interaction_count + 1}")
                     print("-" * 70)
+                    
+                    # Reset conversation timer
+                    last_interaction_time = time.time()
+                    conversation_active = True
                     
                     # Process the speech
                     success = self.process_speech(audio_file)
@@ -259,10 +292,15 @@ class ChippyVoiceLoop:
                         print("✅ Response complete\n")
                     else:
                         print("-" * 70)
-                        print("⚠️  Processing incomplete\n")
+                        print("⚠️  Interrupted by user - ready for next question\n")
                     
                     # Small pause before listening again
-                    time.sleep(0.5)
+                    time.sleep(0.3)
+                else:
+                    # Timeout during listening
+                    if conversation_active:
+                        # Continue conversation
+                        continue
                 
             except KeyboardInterrupt:
                 break
