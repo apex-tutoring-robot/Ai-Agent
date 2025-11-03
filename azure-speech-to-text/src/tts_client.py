@@ -2,6 +2,7 @@
 Text-to-Speech client for CHIPPY.
 Handles converting text responses to speech using Azure Cognitive Services.
 Now with interruptible playback for natural conversation flow.
+Includes fixes for ALSA underruns and audio feedback rejection.
 """
 
 import os
@@ -39,8 +40,8 @@ class TextToSpeechClient:
         self.token_expiry = time.time() + 540  # Tokens valid for ~10 minutes
         
         # Interrupt detection settings
-        self.interrupt_threshold = float(os.getenv("INTERRUPT_SENSITIVITY", "0.015"))
-        self.min_playback_time = float(os.getenv("MIN_PLAYBACK_TIME", "0.5"))
+        self.interrupt_threshold = float(os.getenv("INTERRUPT_SENSITIVITY", "0.020"))
+        self.min_playback_time = float(os.getenv("MIN_PLAYBACK_TIME", "1.0"))
     
     def _get_token(self) -> str:
         """Get authentication token for Speech service."""
@@ -208,6 +209,7 @@ class TextToSpeechClient:
                                       device_index: Optional[int] = None) -> dict:
         """
         Play audio with real-time interrupt detection via microphone monitoring.
+        Fixed for ALSA underruns and audio feedback rejection.
         
         Args:
             audio_file: Path to WAV file to play
@@ -231,16 +233,22 @@ class TextToSpeechClient:
             print(f"❌ Error opening audio file: {e}")
             return {'interrupted': False, 'played_duration': 0.0}
         
+        # Get audio file parameters
+        sample_rate = wf.getframerate()
+        channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        
         # Initialize PyAudio
         p = pyaudio.PyAudio()
         
-        # Open output stream for playback
+        # Open output stream for playback with larger buffer to prevent underruns
         try:
             output_stream = p.open(
-                format=p.get_format_from_width(wf.getsampwidth()),
-                channels=wf.getnchannels(),
-                rate=wf.getframerate(),
-                output=True
+                format=p.get_format_from_width(sample_width),
+                channels=channels,
+                rate=sample_rate,
+                output=True,
+                frames_per_buffer=2048  # Larger buffer to prevent underruns
             )
         except Exception as e:
             print(f"❌ Error opening output stream: {e}")
@@ -259,32 +267,50 @@ class TextToSpeechClient:
                 rate=16000,
                 input=True,
                 input_device_index=device_index,
-                frames_per_buffer=1024
+                frames_per_buffer=2048  # Larger buffer
             )
             
             # Start monitoring thread
             def monitor_microphone():
                 """Monitor microphone for speech during playback."""
-                time.sleep(self.min_playback_time)  # Allow minimum playback time
+                # Wait for minimum playback time + extra buffer to avoid audio feedback
+                # This prevents the microphone from hearing the robot's own voice
+                time.sleep(self.min_playback_time + 0.3)
+                
+                # Use higher threshold to reject audio feedback from speaker
+                # Real human speech from close range will still be detected
+                feedback_rejection_multiplier = 2.5
+                interrupt_threshold = self.interrupt_threshold * feedback_rejection_multiplier
+                
+                # Require multiple consecutive chunks of speech to confirm real interrupt
+                # This filters out brief noise spikes and echo
+                consecutive_speech_chunks = 0
+                required_consecutive = 3  # Need 3 consecutive chunks (~150ms) to confirm
                 
                 while not interrupt_flag.is_set():
                     try:
                         # Read from microphone
-                        audio_chunk = input_stream.read(1024, exception_on_overflow=False)
+                        audio_chunk = input_stream.read(2048, exception_on_overflow=False)
                         rms = self.calculate_rms(audio_chunk)
                         
-                        # Check if speech detected
-                        if rms > self.interrupt_threshold:
-                            print("\n⚠️  Interrupt detected! Stopping playback...")
-                            interrupt_flag.set()
-                            break
+                        # Check if speech detected (with higher threshold)
+                        if rms > interrupt_threshold:
+                            consecutive_speech_chunks += 1
+                            if consecutive_speech_chunks >= required_consecutive:
+                                print(f"\n⚠️  Interrupt detected! (RMS: {rms:.4f}) Stopping playback...")
+                                interrupt_flag.set()
+                                break
+                        else:
+                            # Reset counter if silence detected
+                            consecutive_speech_chunks = 0
                         
-                        # Check external interrupt
+                        # Check external interrupt callback
                         if interrupt_check and interrupt_check():
                             interrupt_flag.set()
                             break
                             
                     except Exception as e:
+                        # Handle any audio read errors
                         break
             
             monitor_thread = threading.Thread(target=monitor_microphone, daemon=True)
@@ -294,24 +320,35 @@ class TextToSpeechClient:
             print(f"⚠️  Could not start interrupt detection: {e}")
             print("Playing without interrupt detection...")
         
-        # Play audio in chunks
-        chunk_size = 1024
+        # Play audio in chunks with proper buffer handling
+        chunk_size = 2048  # Match buffer size to prevent underruns
         data = wf.readframes(chunk_size)
         
         while data and not interrupt_flag.is_set():
-            output_stream.write(data)
-            data = wf.readframes(chunk_size)
-            played_duration = time.time() - start_time
+            try:
+                output_stream.write(data)
+                data = wf.readframes(chunk_size)
+                played_duration = time.time() - start_time
+            except Exception as e:
+                # Handle any playback errors gracefully
+                print(f"⚠️  Playback error: {e}")
+                break
         
         interrupted = interrupt_flag.is_set()
         
-        # Cleanup
-        output_stream.stop_stream()
-        output_stream.close()
+        # Cleanup streams
+        try:
+            output_stream.stop_stream()
+            output_stream.close()
+        except:
+            pass
         
         if input_stream:
-            input_stream.stop_stream()
-            input_stream.close()
+            try:
+                input_stream.stop_stream()
+                input_stream.close()
+            except:
+                pass
         
         wf.close()
         p.terminate()
