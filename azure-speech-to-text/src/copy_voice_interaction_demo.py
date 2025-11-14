@@ -25,7 +25,9 @@ from src.utils.audio_converter import AudioConverter
 
 # Import the REST client for STT and TTS client
 try:
-    from src.rest_speech_client import RestSpeechClient
+    # from src.rest_speech_client import RestSpeechClient
+    from streaming_speech_client import StreamingSpeechClient
+
 except ImportError:
     # Fall back to dash-named file if that's what exists
     from importlib.machinery import SourceFileLoader
@@ -159,7 +161,8 @@ def complete_voice_interaction_demo():
     # Initialize speech-to-text client with consistent session ID
     print("\nInitializing Speech-to-Text client...")
     try:
-        stt_client = RestSpeechClient(Config, privacy_manager, CHIPPY_SESSION_ID)
+        # stt_client = RestSpeechClient(Config, privacy_manager, CHIPPY_SESSION_ID)
+        stt_client = StreamingSpeechClient(Config, privacy_manager, CHIPPY_SESSION_ID)
         print("✓ Speech-to-Text client initialized successfully")
     except Exception as e:
         print(f"Error initializing Speech-to-Text client: {e}")
@@ -203,14 +206,32 @@ def complete_voice_interaction_demo():
         recognized_text = stt_result["recognized_text"]
         print(f"\nRecognized text: \"{recognized_text}\"")
         
-        # Step 2: Call Azure Flow endpoint with consistent session ID
-        print("\n2. AZURE FLOW PROCESSING PHASE")
+        # Step 2: Get AI response (NEW - WITH STREAMING!)
+        print("\n2. AZURE FLOW PROCESSING PHASE (STREAMING)")
         print("------------------------------")
-        print(f"Sending text to Azure Flow endpoint with session ID: {CHIPPY_SESSION_ID}")
         
-        # Get response from Flow (using consistent session ID)
-        response_text = get_tutor_reply(recognized_text, FLOW_ENDPOINT, FLOW_API_KEY, CHIPPY_SESSION_ID)
-        print(f"\n🤖 Flow response: \"{response_text[:100]}...\"")
+        # Import streaming components
+        from streaming_flow_client import StreamingFlowClient, stream_and_speak
+        
+        # Create streaming client
+        streaming_flow = StreamingFlowClient(FLOW_ENDPOINT, FLOW_API_KEY, CHIPPY_SESSION_ID)
+        
+        # Stream and speak!
+        print("🧠 Getting streaming response and speaking in real-time...")
+        result = stream_and_speak(
+            streaming_flow_client=streaming_flow,
+            tts_client=tts_client,
+            privacy_manager=privacy_manager,
+            user_text=recognized_text,
+            device_index=None,  # Use default
+            verbose=True
+        )
+        
+        print(f"\n✅ Streaming complete!")
+        print(f"📄 Full response: \"{result['full_response'][:200]}...\"")
+        
+        if result['interrupted']:
+            print("⚠️  Playback was interrupted")
         
         # Step 3: Restore privacy before TTS (in a real system, this would happen after LLM)
         if stt_result.get("anonymized", False):

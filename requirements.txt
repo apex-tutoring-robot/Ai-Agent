@@ -10,3 +10,4 @@ PyMuPDF
 azure-functions>=1.18.0
 requests>=2.31.0
 pvporcupine
+sseclient-py>=1.8.0

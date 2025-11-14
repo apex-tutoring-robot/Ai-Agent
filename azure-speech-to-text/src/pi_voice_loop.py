@@ -21,9 +21,12 @@ if parent_dir not in sys.path:
 # Import required modules
 from src.config import Config
 from src.privacy_manager import PrivacyManager
-from src.rest_speech_client import RestSpeechClient
+# from src.rest_speech_client import RestSpeechClient
+from streaming_speech_client import StreamingSpeechClient
 from src.tts_client import TextToSpeechClient
 from src.continuous_listener import ContinuousListener
+
+from streaming_flow_client import StreamingFlowClient, stream_and_speak
 
 # Import the flow handler
 import requests
@@ -59,8 +62,18 @@ class ChippyVoiceLoop:
         print(f"🆔 Session ID: {self.session_id}")
         
         self.privacy_manager = PrivacyManager(self.session_id)
-        self.stt_client = RestSpeechClient(Config, self.privacy_manager, self.session_id)
+        # self.stt_client = RestSpeechClient(Config, self.privacy_manager, self.session_id)
+        self.stt_client = StreamingSpeechClient(Config, self.privacy_manager, self.session_id)
         self.tts_client = TextToSpeechClient(Config)
+        
+        if self.flow_endpoint and self.flow_api_key:
+            self.streaming_flow_client = StreamingFlowClient(
+                self.flow_endpoint,
+                self.flow_api_key,
+                self.session_id
+            )
+        else:
+            self.streaming_flow_client = None
         
         # Initialize continuous listener with Pi-optimized settings
         self.listener = ContinuousListener(
@@ -139,7 +152,8 @@ class ChippyVoiceLoop:
     
     def process_speech(self, audio_file: str) -> bool:
         """
-        Process recorded speech through the complete pipeline with interrupt detection.
+        Process recorded speech through the complete pipeline with streaming responses.
+        NOW WITH PARALLEL TTS - speaks while thinking!
         
         Args:
             audio_file: Path to audio file
@@ -162,41 +176,56 @@ class ChippyVoiceLoop:
             recognized_text = stt_result["recognized_text"]
             print(f"👤 You said: \"{recognized_text}\"")
             
-            # Step 2: Get AI response
-            print("🧠 Thinking...")
-            response_text = self.get_tutor_reply(recognized_text)
+            # Step 2 & 3 & 4: Stream AI response + TTS + Play (ALL IN PARALLEL!)
+            print("🧠 Thinking and speaking...")
             
-            # Step 3: Restore privacy if needed
-            if stt_result.get("anonymized", False):
-                response_text = self.privacy_manager.restore_personal_response(response_text)
+            if self.streaming_flow_client:
+                # Use streaming (NEW - MUCH FASTER!)
+                result = stream_and_speak(
+                    streaming_flow_client=self.streaming_flow_client,
+                    tts_client=self.tts_client,
+                    privacy_manager=self.privacy_manager,
+                    user_text=recognized_text,
+                    device_index=self.device_index,
+                    verbose=True
+                )
+                
+                if result['interrupted']:
+                    print("⚠️  Response was interrupted by user")
+                    return True  # Still successful, just interrupted
+                
+                print(f"\n✅ Complete response delivered!")
+            else:
+                # Fallback to old method if streaming not configured
+                print("⚠️  Streaming not available, using legacy method")
+                response_text = self.get_tutor_reply(recognized_text)
+                
+                if stt_result.get("anonymized", False):
+                    response_text = self.privacy_manager.restore_personal_response(response_text)
+                
+                print(f"🤖 CHIPPY: \"{response_text[:100]}...\"")
+                
+                audio_output = self.tts_client.synthesize_speech(response_text)
+                playback_result = self.tts_client.play_speech_interruptible(
+                    audio_output,
+                    device_index=self.device_index
+                )
             
-            print(f"🤖 CHIPPY: \"{response_text[:100]}{'...' if len(response_text) > 100 else ''}\"")
-            
-            # Step 4: Text-to-Speech
-            print("🔊 Converting to speech...")
-            audio_output = self.tts_client.synthesize_speech(response_text)
-            
-            # Step 5: Play response with interrupt detection
-            print("🎵 Playing response (speak to interrupt)...")
-            playback_result = self.tts_client.play_speech_interruptible(
-                audio_output,
-                device_index=self.device_index
-            )
-            
-            # Cleanup temporary files
+            # Cleanup
             try:
-                os.remove(audio_file)
-                os.remove(audio_output)
+                import os
+                if os.path.exists(audio_file):
+                    os.remove(audio_file)
             except:
                 pass
             
             self.interaction_count += 1
-            
-            # Return interrupt status for conversation flow
-            return not playback_result.get('interrupted', False)
+            return True
             
         except Exception as e:
             print(f"❌ Error processing speech: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def run(self, device_index: Optional[int] = None, test_mode: bool = False):
