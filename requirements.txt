@@ -1,13 +1,16 @@
-azure-cognitiveservices-speech==1.32.1
-python-dotenv==1.0.0
-langchain>=0.1.0
-numpy>=1.22.0
-pyaudio==0.2.13
-pytest==7.4.0
-typing-extensions>=4.5.0
-openai
-PyMuPDF
-azure-functions>=1.18.0
-requests>=2.31.0
-pvporcupine
-sseclient-py>=1.8.0
+# Azure AI Services
+azure-cognitiveservices-speech==1.40.0
+openai>=1.12.0
+
+# Wake Word Detection
+pvporcupine==4.0.1
+
+# Audio Processing
+pyaudio==0.2.14
+webrtcvad==2.0.10
+
+# Configuration & Utilities
+python-dotenv==1.0.1
+
+# Async Support
+aiofiles==24.1.0
