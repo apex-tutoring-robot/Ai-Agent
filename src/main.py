@@ -1,5 +1,5 @@
 """
-Chippy - Main Orchestrator
+Jarvis - Main Orchestrator
 Coordinates all components for the LLM-powered tutoring robot.
 """
 
@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 # Import components
 from audio.wake_word import WakeWordDetector
-from audio.vad_capture import VADAudioCapture
+from audio.single_turn_vad import VADAudioCapture
 from audio.continuous_vad import ContinuousVADCapture
 from audio.playback import AudioPlayer
 from azure_services.stt_client import SpeechToTextClient
@@ -27,7 +27,7 @@ from privacy.privacy_manager import PrivacyManager
 from conversation.state_manager import ConversationStateManager
 
 # Load environment
-load_dotenv("/home/pi/Desktop/Ai-Agent 2.0/chippy/config/.env")
+load_dotenv("/home/pi/Desktop/Ai-Agent 2.0/Jarvis/config/.env")
 logging.basicConfig(
     level=os.getenv('LOG_LEVEL', 'INFO'),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -35,12 +35,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class ChippyBot:
-    """Main orchestrator for Chippy tutoring robot."""
+class JarvisBot:
+    """Main orchestrator for Jarvis tutoring robot."""
     
     def __init__(self):
-        """Initialize Chippy with all components."""
-        logger.info("Initializing Chippy...")
+        """Initialize Jarvis with all components."""
+        logger.info("Initializing Jarvis...")
         
         # Initialize components
         self.wake_word_detector = WakeWordDetector()
@@ -57,7 +57,7 @@ class ChippyBot:
         self._is_running = False
         self._interaction_lock = threading.Lock()
         
-        logger.info("Chippy initialized successfully!")
+        logger.info("Jarvis initialized successfully!")
     
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
@@ -174,7 +174,7 @@ class ChippyBot:
                 
                 # Combine collected chunks into full response
                 response_text = ''.join(response_chunks)
-                logger.info(f"🤖 Chippy: {response_text}")
+                logger.info(f"🤖 Jarvis: {response_text}")
                 
                 # Add assistant response to conversation
                 self.conversation_manager.add_assistant_message(response_text)
@@ -215,11 +215,11 @@ class ChippyBot:
         wake_thread.start()
     
     def run(self):
-        """Start Chippy and run the main loop."""
+        """Start Jarvis and run the main loop."""
         logger.info("\n" + "🤖 "*20)
-        logger.info("CHIPPY TUTORING ROBOT STARTED")
+        logger.info("Jarvis TUTORING ROBOT STARTED")
         logger.info("🤖 "*20 + "\n")
-        logger.info("Listening for wake word: 'Hey CHIPPY'")
+        logger.info("Listening for wake word: 'Hey Jarvis'")
         logger.info("Press Ctrl+C to stop\n")
         
         self._is_running = True
@@ -238,8 +238,8 @@ class ChippyBot:
             self.stop()
     
     def stop(self):
-        """Stop Chippy and cleanup resources."""
-        logger.info("Shutting down Chippy...")
+        """Stop Jarvis and cleanup resources."""
+        logger.info("Shutting down Jarvis...")
         
         self._is_running = False
         
@@ -254,14 +254,14 @@ class ChippyBot:
         # Show conversation summary
         logger.info(f"\nFinal conversation state: {self.conversation_manager}")
         
-        logger.info("Chippy shutdown complete. Goodbye! 👋\n")
+        logger.info("Jarvis shutdown complete. Goodbye! 👋\n")
 
 
 def main():
     """Main entry point."""
     try:
-        chippy = ChippyBot()
-        chippy.run()
+        Jarvis = JarvisBot()
+        Jarvis.run()
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         return 1

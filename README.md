@@ -1,10 +1,10 @@
-# Chippy 🤖 - AI-Powered Raspberry Pi Tutoring Robot
+# Jarvis 🤖 - AI-Powered Raspberry Pi Tutoring Robot
 
-Chippy is a voice-activated AI tutoring assistant that runs on Raspberry Pi. It uses wake word detection, Azure AI services, and streaming audio for natural, low-latency conversations.
+Jarvis is a voice-activated AI tutoring assistant that runs on Raspberry Pi. It uses wake word detection, Azure AI services, and streaming audio for natural, low-latency conversations.
 
 ## 🌟 Features
 
-- **Wake Word Detection**: Always listening for "Hey CHIPPY" using Porcupine (low CPU usage ~3%)
+- **Wake Word Detection**: Always listening for "Hey [wakeword]" (low CPU usage ~3%)
 - **Voice Activity Detection**: Smart audio capture using WebRTC VAD
 - **Azure AI Integration**: 
   - Speech-to-Text for accurate transcription
@@ -36,7 +36,7 @@ Chippy is a voice-activated AI tutoring assistant that runs on Raspberry Pi. It 
 ### 1. Clone the Repository
 ```bash
 cd ~/Documents/apex-code/Ai-Agent 2.0
-cd chippy
+cd Jarvis
 ```
 
 ### 2. Install System Dependencies
@@ -77,25 +77,25 @@ Update `AUDIO_INPUT_DEVICE_INDEX` and `AUDIO_OUTPUT_DEVICE_INDEX` in `.env` with
 ### 6. Create Wake Word Model
 
 1. Go to [Picovoice Console](https://console.picovoice.ai/)
-2. Create a new wake word: "Hey CHIPPY"
+2. Create a new wake word: "Hey Jarvis"
 3. Select platform: Raspberry Pi
 4. Download the `.ppn` file
-5. Save it to `config/Hey-CHIPPY_en_raspberry-pi_v3_0_0.ppn`
+5. Save it to `config/Hey-Jarvis_en_raspberry-pi_v3_0_0.ppn`
 
 ### 7. Configure System Prompt
 
-Edit `config/system_prompt.txt` to define Chippy's tutoring behavior and personality.
+Edit `config/system_prompt.txt` to define Jarvis's tutoring behavior and personality.
 
 Example:
 ```
-You are Chippy, a patient and encouraging AI tutor. Your goal is to help students 
+You are Jarvis, a patient and encouraging AI tutor. Your goal is to help students 
 learn through guided questions rather than giving direct answers. Be friendly, 
 supportive, and adapt your explanations to the student's level.
 ```
 
 ## 🎯 Usage
 
-### Run Chippy
+### Run Jarvis
 ```bash
 cd src
 python main.py
@@ -103,23 +103,23 @@ python main.py
 
 ### Interaction Flow
 1. Wait for "Listening for wake word..." message
-2. Say "Hey CHIPPY"
+2. Say "Hey Jarvis"
 3. Speak your question or request
 4. Pause when finished speaking (VAD will detect silence)
-5. Chippy will respond with audio
-6. Continue the conversation by saying "Hey CHIPPY" again
+5. Jarvis will respond with audio
+6. Continue the conversation by saying "Hey Jarvis" again
 
-### Stop Chippy
+### Stop Jarvis
 Press `Ctrl+C` to gracefully shutdown.
 
 ## 🏗️ Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        CHIPPY DATA FLOW                      │
+│                        Jarvis DATA FLOW                      │
 └─────────────────────────────────────────────────────────────┘
 
-🔊 Wake Word Detection (Porcupine)
+🔊 Wake Word Detection
            ↓
 🎤 Audio Capture (VAD)
            ↓
@@ -138,11 +138,11 @@ Press `Ctrl+C` to gracefully shutdown.
 
 ### Project Structure
 ```
-chippy/
+Jarvis/
 ├── src/
 │   ├── audio/
-│   │   ├── wake_word.py          # Porcupine wake word detection
-│   │   ├── vad_capture.py        # VAD-based audio capture
+│   │   ├── wake_word.py          # Wake word detection
+│   │   ├── single_turn_vad.py    # VAD-based audio capture
 │   │   └── playback.py           # Streaming audio playback
 │   ├── azure_services/
 │   │   ├── stt_client.py         # Speech-to-Text
@@ -203,7 +203,7 @@ Each component can be tested individually:
 python src/audio/wake_word.py
 
 # Test VAD audio capture
-python src/audio/vad_capture.py
+python src/audio/single_turn_vad.py
 
 # Test audio playback
 python src/audio/playback.py

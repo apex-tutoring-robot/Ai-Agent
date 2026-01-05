@@ -1,6 +1,7 @@
 """
 Continuous Voice Activity Detection for conversation mode.
 Listens continuously with idle timeout for multi-turn conversations.
+Supports multiple utterances in a conversation session
 """
 
 import os
@@ -48,7 +49,7 @@ class ContinuousVADCapture:
         self.sample_rate = sample_rate or int(os.getenv('SAMPLE_RATE', 16000))
         self.frame_duration_ms = frame_duration_ms or int(os.getenv('VAD_FRAME_DURATION_MS', 20))
         self.vad_aggressiveness = vad_aggressiveness or int(os.getenv('VAD_AGGRESSIVENESS', 3))
-        self.silence_timeout_ms = silence_timeout_ms or int(os.getenv('SILENCE_TIMEOUT_MS', 1500))
+        self.silence_timeout_ms = silence_timeout_ms or int(os.getenv('SILENCE_TIMEOUT_MS', 2000))
         self.idle_timeout_seconds = idle_timeout_seconds or int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
         self.input_device_index = input_device_index or int(os.getenv('AUDIO_INPUT_DEVICE_INDEX', 1))
         
@@ -94,7 +95,7 @@ class ContinuousVADCapture:
             )
             
             logger.info("🎤 CONVERSATION MODE - Listening continuously...")
-            logger.info(f"⏱️  Will end after {self.idle_timeout_seconds} seconds of silence")
+            logger.info(f"⏱️  Will end if there is no speech for {self.idle_timeout_seconds} seconds")
             
             self.last_speech_time = time.time()
             

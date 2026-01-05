@@ -1,6 +1,7 @@
 """
 Voice Activity Detection (VAD) based audio capture.
 Captures student speech after wake word detection using WebRTC VAD.
+Captures ONE utterance after a wake word is detected
 """
 
 import os

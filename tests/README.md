@@ -1,6 +1,6 @@
-# Chippy Hardware Test Scripts
+# Jarvis Hardware Test Scripts
 
-This directory contains test scripts to verify your Raspberry Pi audio hardware setup (ReSpeaker 2-Mic Pi HAT and USB speaker) before running the full Chippy application.
+This directory contains test scripts to verify your Raspberry Pi audio hardware setup (ReSpeaker 2-Mic Pi HAT and USB speaker) before running the full Jarvis application.
 
 ## Test Scripts
 
@@ -72,7 +72,7 @@ python test_audio_pipeline.py
 - Captures speech using VAD (Voice Activity Detection)
 - Automatically stops on silence
 - Plays back captured audio (both blocking and streaming modes)
-- Simulates Chippy's actual audio pipeline
+- Simulates Jarvis's actual audio pipeline
 
 **Expected result:** Speak when prompted, pause, then hear your voice played back twice (regular and streaming)
 
@@ -112,7 +112,7 @@ python test_microphone.py
 python test_audio_pipeline.py
 ```
 
-✅ If VAD captures and plays back correctly → Hardware is ready for Chippy!
+✅ If VAD captures and plays back correctly → Hardware is ready for Jarvis!
 
 ---
 
@@ -225,7 +225,7 @@ Once all tests pass:
 3. ✅ Microphone working
 4. ✅ Full pipeline working
 
-→ **Ready to run Chippy!**
+→ **Ready to run Jarvis!**
 ```bash
 cd ../src
 python main.py

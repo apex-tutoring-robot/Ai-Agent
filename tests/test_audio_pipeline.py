@@ -1,7 +1,7 @@
 """
 Full Audio Pipeline Test
 Tests the complete audio pipeline: microphone input → processing → speaker output
-Simulates the actual Chippy data flow without requiring Azure services.
+Simulates the actual Jarvis data flow without requiring Azure services.
 """
 
 import sys
@@ -11,7 +11,7 @@ import time
 # Add parent directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from audio.vad_capture import VADAudioCapture
+from audio.single_turn_vad import VADAudioCapture
 from audio.playback import AudioPlayer
 from dotenv import load_dotenv
 
@@ -24,7 +24,7 @@ def test_audio_pipeline():
     print("\n" + "="*70)
     print("FULL AUDIO PIPELINE TEST")
     print("="*70)
-    print("\nThis test simulates Chippy's audio flow:")
+    print("\nThis test simulates Jarvis's audio flow:")
     print("  1. VAD-based audio capture from ReSpeaker")
     print("  2. Audio processing (echo back)")
     print("  3. Playback through USB speaker")
@@ -123,11 +123,11 @@ def test_audio_pipeline():
     print("  ✓ VAD-based speech capture from ReSpeaker")
     print("  ✓ Audio playback through USB speaker")
     print("  ✓ Streaming audio architecture")
-    print("\nIf all tests passed, your hardware is ready for Chippy!")
+    print("\nIf all tests passed, your hardware is ready for Jarvis!")
     print("\nNext steps:")
     print("  1. Configure Azure credentials in .env")
     print("  2. Set up Picovoice wake word")
-    print("  3. Run full Chippy: python src/main.py")
+    print("  3. Run full Jarvis: python src/main.py")
     
     print("\n" + "="*70 + "\n")
 

@@ -1,6 +1,8 @@
 """
 Audio playback module for Raspberry Pi.
 Supports streaming audio playback with USB audio devices.
+Audio playback the process of reproducing previously recorded sound, converting digital data
+into audible sound waves that come out of speakers
 """
 
 import os

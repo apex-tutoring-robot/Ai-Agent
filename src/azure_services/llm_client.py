@@ -65,10 +65,10 @@ class LLMClient:
                     return prompt
             else:
                 logger.warning(f"System prompt file not found at {self.system_prompt_path}, using default")
-                return "You are Chippy, a helpful AI tutoring assistant."
+                return "You are Jarvis, a helpful AI tutoring assistant."
         except Exception as e:
             logger.error(f"Error loading system prompt: {e}")
-            return "You are Chippy, a helpful AI tutoring assistant."
+            return "You are Jarvis, a helpful AI tutoring assistant."
     
     def generate_response_stream(
         self,

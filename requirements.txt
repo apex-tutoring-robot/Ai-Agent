@@ -2,8 +2,11 @@
 azure-cognitiveservices-speech==1.40.0
 openai>=1.12.0
 
-# Wake Word Detection
-pvporcupine==4.0.1
+# Wake Word Detection (open-source, no API key required)
+openwakeword>=0.6.0
+# Note: For Speex noise suppression on Raspberry Pi, run after pip install:
+# sudo apt-get install libspeexdsp-dev
+# pip install https://github.com/dscripka/openWakeWord/releases/download/v0.1.1/speexdsp_ns-0.1.2-cp313-cp313-linux_aarch64.whl
 
 # Audio Processing
 pyaudio==0.2.14

@@ -135,13 +135,20 @@ class TextToSpeechClient:
             
             # Synthesize any remaining text
             if sentence_buffer.strip():
-                logger.info("Synthesizing remaining text buffer")
+                logger.info(f"📝 Synthesizing remaining text buffer ({len(sentence_buffer)} chars): '{sentence_buffer.strip()[:100]}...'")
                 audio_data = self.synthesize_to_audio(sentence_buffer.strip())
                 if audio_data:
+                    logger.info(f"✓ Final buffer synthesized: {len(audio_data)} bytes")
                     yield audio_data
+                else:
+                    logger.warning("⚠️  Final buffer synthesis returned no audio!")
+            else:
+                logger.info("✓ No remaining text in buffer (all sentences complete)")
         
         except Exception as e:
             logger.error(f"Error in streaming synthesis: {e}")
+            if sentence_buffer:
+                logger.error(f"Lost text in buffer: '{sentence_buffer}'")
             raise
     
     def synthesize_sentences(self, sentences: list[str]) -> Iterator[bytes]:
@@ -172,7 +179,7 @@ if __name__ == "__main__":
         player = AudioPlayer()
         
         # Test non-streaming synthesis
-        test_text = "Hello! I am Chippy, your AI tutoring assistant. How can I help you today?"
+        test_text = "Hello! I am Jarvis, your AI tutoring assistant. How can I help you today?"
         print(f"Synthesizing: {test_text}\n")
         
         audio_data = client.synthesize_to_audio(test_text)
