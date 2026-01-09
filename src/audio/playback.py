@@ -31,6 +31,8 @@ class AudioPlayer:
         
         Args:
             sample_rate: Audio sample rate (default 16000 for Azure TTS)
+             - sampling rate means the system is recording or reproducing audio by taking 16,000 snapshots of the sound wave every second.
+             - A higher sampling rate generally results in a higher quality, more accurate digital representation of the original sound,
             channels: Number of audio channels
             output_device_index: Index of audio output device
         """
@@ -46,6 +48,7 @@ class AudioPlayer:
         self.playback_thread = None
         self._is_playing = False
         self._stop_event = threading.Event()
+        self._critical_error = False  # Track critical errors requiring PyAudio reinit
     
     def play_audio(self, audio_data: bytes) -> None:
         """
@@ -103,6 +106,9 @@ class AudioPlayer:
             time.sleep(0.1)
             
             # Use a larger buffer to prevent underruns
+            # 1024 specifies that the audio stream's internal buffer will hold 1024 frames of audio data before handing them off to the audio device.
+            # An underrun happens when the speaker tries to play audio but the buffer is empty, causing clicks, pops, or stuttering.
+            # Using a larger chunk size (like 1024) increases the stability of playback (less likely to stutter) but slightly increases the latency (the delay between data being queued and the sound being played).
             chunk_size = 1024
             
             # Open new audio stream
@@ -155,9 +161,10 @@ class AudioPlayer:
                         # PyAudio write errors can be fatal, log and continue
                         logger.error(f"Error writing audio chunk: {write_error}")
                         self.audio_queue.task_done()
-                        # If it's a critical error, stop playback
-                        if "Unanticipated host error" in str(write_error):
-                            logger.error("Critical audio error detected, stopping playback")
+                        # If it's a critical error, mark for PyAudio reinitialization
+                        if "Unanticipated host error" in str(write_error) or "alsa" in str(write_error).lower():
+                            logger.error("Critical ALSA/audio error detected, will reinitialize PyAudio")
+                            self._critical_error = True
                             break
                 
                 except queue.Empty:
@@ -225,12 +232,18 @@ class AudioPlayer:
         if cleared > 0:
             logger.warning(f"Cleared {cleared} unprocessed audio chunks")
         
-        self.cleanup()
+        # Clean up stream only (don't call cleanup() to avoid redundant operations)
+        self._close_stream()
+        
+        # If critical error occurred, force PyAudio reinitialization
+        if self._critical_error:
+            logger.warning("Critical error detected, reinitializing PyAudio")
+            self._reinitialize_pyaudio()
+        
         logger.info("Streaming playback stopped")
     
-    def cleanup(self) -> None:
-        """Clean up audio stream (but keep PyAudio instance for reuse)."""
-        # Clean up stream only
+    def _close_stream(self) -> None:
+        """Internal method to close audio stream safely."""
         try:
             if self.audio_stream:
                 try:
@@ -244,8 +257,31 @@ class AudioPlayer:
                     pass
                 self.audio_stream = None
         except Exception as e:
-            logger.error(f"Error cleaning up audio stream: {e}")
-        
+            logger.error(f"Error closing audio stream: {e}")
+    
+    def _reinitialize_pyaudio(self) -> None:
+        """Reinitialize PyAudio after critical errors."""
+        try:
+            if self.pa:
+                try:
+                    self.pa.terminate()
+                except:
+                    pass
+                self.pa = None
+            
+            # Small delay for ALSA to recover
+            time.sleep(0.5)
+            
+            # Reinitialize
+            self.pa = pyaudio.PyAudio()
+            self._critical_error = False
+            logger.info("PyAudio reinitialized successfully")
+        except Exception as e:
+            logger.error(f"Error reinitializing PyAudio: {e}")
+    
+    def cleanup(self) -> None:
+        """Clean up audio stream (but keep PyAudio instance for reuse)."""
+        self._close_stream()
         # DON'T terminate PyAudio - reuse it for next conversation
         # Only terminate in __exit__ or explicit shutdown
     

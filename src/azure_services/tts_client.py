@@ -112,33 +112,52 @@ class TextToSpeechClient:
         sentence_buffer = ""
         
         # Sentence boundary patterns
-        sentence_endings = re.compile(r'[.!?]\s+|[.!?]$')
+        # sentence_endings = re.compile(r'[.!?]\s+|[.!?]$')
         
         try:
             for text_chunk in text_stream:
                 sentence_buffer += text_chunk
                 
-                # Check for sentence boundaries
-                match = sentence_endings.search(sentence_buffer)
-                
-                if match:
+                if len(sentence_buffer) > 50:
                     # Extract complete sentence(s)
-                    end_pos = match.end()
-                    complete_text = sentence_buffer[:end_pos].strip()
-                    sentence_buffer = sentence_buffer[end_pos:]
+                    complete_text = sentence_buffer.strip()
                     
-                    if complete_text:
-                        # Synthesize the complete sentence(s)
-                        audio_data = self.synthesize_to_audio(complete_text)
-                        if audio_data:
-                            yield audio_data
+                    # Synthesize the complete sentence(s)
+                    audio_data = self.synthesize_to_audio(complete_text)
+                    if audio_data:
+                        yield audio_data
             
-            # Synthesize any remaining text
-            if sentence_buffer.strip():
-                logger.info("Synthesizing remaining text buffer")
-                audio_data = self.synthesize_to_audio(sentence_buffer.strip())
-                if audio_data:
-                    yield audio_data
+                    sentence_buffer = ""
+
+            # for text_chunk in text_stream:
+            #     sentence_buffer += text_chunk
+                
+            #     # Check for sentence boundaries
+            #     match = sentence_endings.search(sentence_buffer)
+                
+            #     if match:
+            #         # Extract complete sentence(s)
+            #         end_pos = match.end()
+            #         complete_text = sentence_buffer[:end_pos].strip()
+            #         sentence_buffer = sentence_buffer[end_pos:]
+                    
+            #         if complete_text:
+            #             # Synthesize the complete sentence(s)
+            #             audio_data = self.synthesize_to_audio(complete_text)
+            #             if audio_data:
+            #                 yield audio_data
+            
+            # # Synthesize any remaining text
+            # if sentence_buffer.strip():
+            #     logger.info(f"📝 Synthesizing remaining text buffer ({len(sentence_buffer)} chars): '{sentence_buffer.strip()[:100]}...'")
+            #     audio_data = self.synthesize_to_audio(sentence_buffer.strip())
+            #     if audio_data:
+            #         logger.info(f"✓ Final buffer synthesized: {len(audio_data)} bytes")
+            #         yield audio_data
+            #     else:
+            #         logger.warning("⚠️  Final buffer synthesis returned no audio!")
+            # else:
+            #     logger.info("✓ No remaining text in buffer (all sentences complete)")
         
         except Exception as e:
             logger.error(f"Error in streaming synthesis: {e}")

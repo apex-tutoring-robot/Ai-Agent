@@ -56,6 +56,8 @@ class ChippyBot:
         
         self._is_running = False
         self._interaction_lock = threading.Lock()
+        self.start_time = None
+        self.end_time = None
         
         logger.info("Chippy initialized successfully!")
     
@@ -67,6 +69,7 @@ class ChippyBot:
             return
         
         try:
+            self.start_time = time.time()
             logger.info("\n" + "="*60)
             logger.info("🎤 WAKE WORD DETECTED - CONVERSATION MODE ACTIVATED")
             logger.info("="*60)
@@ -89,11 +92,13 @@ class ChippyBot:
                 logger.info(f"\n💬 Turn {turn_count}")
                 
                 # Process this turn
-                interrupted = self._process_turn(audio_data, continuous_vad)
-                
-                if interrupted:
-                    logger.info("🛑 Conversation interrupted by wake word")
-                    break
+                self.end_time = time.time()
+                logger.info(f"⏱️ latency to start STT upon detection of wake word : {(self.end_time - self.start_time):.3f}s")
+                # interrupted = self._process_turn(audio_data, continuous_vad)
+                self._process_turn(audio_data, continuous_vad)
+                # if interrupted:
+                #     logger.info("🛑 Conversation interrupted by wake word")
+                #     break
             
             logger.info(f"\n👋 Conversation ended ({turn_count} turns)")
             logger.info(f"📊 {self.conversation_manager}")
@@ -128,57 +133,74 @@ class ChippyBot:
         try:
             # Step 1: Convert speech to text
             logger.info("☁️  Converting speech to text...")
+            stt_start = time.perf_counter()
             user_text = self.stt_client.recognize_from_audio_data(audio_data)
-            
+            stt_end = time.perf_counter()
+            stt_latency = stt_end - stt_start
+            logger.info(f"⏱️  STT latency: {stt_latency:.3f}s")
+
             if not user_text:
                 logger.warning("No speech recognized")
                 return False
-            
+
             logger.info(f"📝 Student: {user_text}")
-            
+
             # Step 2: Anonymize PII
             anonymized_text = self.privacy_manager.anonymize(user_text)
-            
+
             # Step 3: Add to conversation history
             self.conversation_manager.add_user_message(anonymized_text)
-            
+
             # Step 4: Generate LLM response with streaming
             logger.info("🧠 Generating response...")
             messages = self.conversation_manager.get_messages()
-            
+
             # Start audio player streaming
             self.audio_player.start_streaming()
-            
+
             # Collect response text chunks as they stream
             response_chunks = []
-            
+
             try:
                 # Create a wrapper that collects chunks while streaming
                 def text_chunk_collector(llm_stream):
                     """Collect text chunks while passing them through."""
                     for chunk in llm_stream:
                         response_chunks.append(chunk)
+                        if len(response_chunks) == 1:
+                            llm_end = time.perf_counter()
+
                         yield chunk
                 
                 # Stream LLM output through collector to TTS
                 llm_stream = self.llm_client.generate_response_stream(messages)
-                collected_stream = text_chunk_collector(llm_stream)
-                tts_stream = self.tts_client.synthesize_stream(collected_stream)
-                
+
+                llm_latency = llm_end - llm_start
+                logger.info(f"⏱️  LLM TTFT: {llm_latency:.3f}s")
+
+                # Now synthesize TTS from collected text
+                tts_start = time.perf_counter()
+                response_text_stream = text_chunk_collector(response_chunks)  # Iterator over chunks
+                tts_stream = self.tts_client.synthesize_stream(response_text_stream)
+
                 # Stream audio to player
                 for audio_chunk in tts_stream:
                     self.audio_player.queue_audio(audio_chunk)
-                
+
+                tts_end = time.perf_counter()
+                tts_latency = tts_end - tts_start
+                logger.info(f"⏱️  TTS latency: {tts_latency:.3f}s")
+
                 # Wait for playback to complete
                 self.audio_player.stop_streaming()
-                
+
                 # Combine collected chunks into full response
                 response_text = ''.join(response_chunks)
                 logger.info(f"🤖 Chippy: {response_text}")
-                
+
                 # Add assistant response to conversation
                 self.conversation_manager.add_assistant_message(response_text)
-                
+
                 # Reset idle timer after our response
                 continuous_vad.reset_idle_timer()
                 

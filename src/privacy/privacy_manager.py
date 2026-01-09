@@ -5,6 +5,7 @@ Placeholder implementation for user to populate with privacy logic.
 
 import logging
 from typing import Dict, Optional
+import re
 
 logging.basicConfig(level='INFO')
 logger = logging.getLogger(__name__)
@@ -12,21 +13,16 @@ logger = logging.getLogger(__name__)
 
 class PrivacyManager:
     """
-    Privacy manager for anonymizing and de-anonymizing personal information.
+    Privacy manager for anonymizing PII and optionally deanonymizing.
     
-    This is a placeholder implementation. Users should implement their own
-    logic for detecting and masking PII (Personally Identifiable Information)
-    such as names, addresses, phone numbers, email addresses, etc.
     """
-    
     def __init__(self):
         """Initialize privacy manager."""
-        self._anonymization_map: Dict[str, str] = {}
-        logger.info("Privacy Manager initialized (placeholder implementation)")
+        logger.info("Privacy Manager initialized")
     
     def anonymize(self, text: str) -> str:
         """
-        Anonymize personal information in text.
+        Apply regex-based safety net for critical PII types (SSN, credit cards, emails, phone numbers)
         
         Args:
             text: Input text potentially containing PII
@@ -34,16 +30,30 @@ class PrivacyManager:
         Returns:
             Text with PII anonymized/masked
         
-        Example implementation ideas:
-        - Detect and replace names with [NAME]
-        - Detect and replace email addresses with [EMAIL]
-        - Detect and replace phone numbers with [PHONE]
-        - Detect and replace addresses with [ADDRESS]
-        - Store mappings for potential de-anonymization
         """
         # TODO: Implement PII detection and anonymization logic
         # For now, return text as-is
-        logger.debug("Anonymize called (no-op in placeholder)")
+        logger.debug("Anonymize called")
+        # Email pattern
+        text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', 
+                    'your email address', text)
+        
+        # Phone numbers (various formats)
+        text = re.sub(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b', 
+                    'your phone number', text)
+        
+        # SSN
+        text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', 
+                    'your identification number', text)
+
+        # Credit card numbers (13-19 digits with optional spaces/dashes)
+        text = re.sub(r'\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4,7}\b', 
+                      'your card number', text)
+    
+        # Alternative: just long sequences of digits (13-19) without separators
+        text = re.sub(r'\b\d{13,19}\b', 
+                      'your card number', text)
+        
         return text
     
     def deanonymize(self, text: str) -> str:
@@ -64,36 +74,7 @@ class PrivacyManager:
         logger.debug("Deanonymize called (no-op in placeholder)")
         return text
     
-    def clear_mappings(self) -> None:
-        """Clear stored anonymization mappings."""
-        self._anonymization_map.clear()
-        logger.info("Anonymization mappings cleared")
-    
-    def get_anonymization_count(self) -> int:
-        """Get count of stored anonymization mappings."""
-        return len(self._anonymization_map)
-
 
 if __name__ == "__main__":
-    # Example usage
-    print("Privacy Manager - Placeholder Implementation\n")
-    print("=" * 60)
-    print("This is a placeholder. Implement your own PII detection logic.")
-    print("=" * 60)
+    pass
     
-    manager = PrivacyManager()
-    
-    # Example text with PII
-    test_text = "Hi, my name is John Doe and my email is john.doe@example.com"
-    
-    print(f"\nOriginal text: {test_text}")
-    
-    anonymized = manager.anonymize(test_text)
-    print(f"Anonymized text: {anonymized}")
-    
-    deanonymized = manager.deanonymize(anonymized)
-    print(f"De-anonymized text: {deanonymized}")
-    
-    print("\n" + "=" * 60)
-    print("REMINDER: Implement actual PII detection before production use!")
-    print("=" * 60)
