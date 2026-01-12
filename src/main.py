@@ -9,6 +9,7 @@ import logging
 import time
 import asyncio
 import threading
+import numpy as np
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -25,6 +26,9 @@ from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
 from privacy.privacy_manager import PrivacyManager
 from conversation.state_manager import ConversationStateManager
+from face_animator import FaceAnimator
+
+face_animator = FaceAnimator(face_dir="faces")
 
 # Load environment
 load_dotenv("/home/pi/Desktop/Ai-Agent 2.0/chippy/config/.env")
@@ -145,47 +149,57 @@ class ChippyBot:
             # Step 4: Generate LLM response with streaming
             logger.info("🧠 Generating response...")
             messages = self.conversation_manager.get_messages()
-            
-            # Start audio player streaming
-            self.audio_player.start_streaming()
-            
-            # Collect response text chunks as they stream
+
+            # Thinking face while LLM works
+            face_animator.set_emotion("thinking")
+            face_animator.render_step()
+
             response_chunks = []
-            
+
             try:
-                # Create a wrapper that collects chunks while streaming
                 def text_chunk_collector(llm_stream):
-                    """Collect text chunks while passing them through."""
                     for chunk in llm_stream:
                         response_chunks.append(chunk)
                         yield chunk
-                
-                # Stream LLM output through collector to TTS
+
+                # Create streams
                 llm_stream = self.llm_client.generate_response_stream(messages)
                 collected_stream = text_chunk_collector(llm_stream)
                 tts_stream = self.tts_client.synthesize_stream(collected_stream)
-                
-                # Stream audio to player
+
+                # Switch to speaking face BEFORE audio
+                face_animator.set_emotion("neutral")
+                face_animator.render_step()
+
+                # Start audio playback ONCE
+                self.audio_player.start_streaming()
+
                 for audio_chunk in tts_stream:
                     self.audio_player.queue_audio(audio_chunk)
-                
-                # Wait for playback to complete
+
+                    audio_np = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32)
+                    audio_np /= 32768.0
+                    rms = np.sqrt(np.mean(audio_np ** 2))
+
+                    face_animator.update_mouth(rms)
+                    face_animator.render_step()
+
+                # End of speech
                 self.audio_player.stop_streaming()
-                
-                # Combine collected chunks into full response
+                face_animator.mouth_open = 0.0
+                face_animator.set_emotion("neutral")
+                face_animator.render_step()
+
                 response_text = ''.join(response_chunks)
                 logger.info(f"🤖 Chippy: {response_text}")
-                
-                # Add assistant response to conversation
                 self.conversation_manager.add_assistant_message(response_text)
-                
-                # Reset idle timer after our response
                 continuous_vad.reset_idle_timer()
-                
+
             except Exception as e:
                 logger.error(f"Error in streaming pipeline: {e}")
                 self.audio_player.stop_streaming()
                 raise
+
             
             return False  # No interruption possible in continuous mode
         

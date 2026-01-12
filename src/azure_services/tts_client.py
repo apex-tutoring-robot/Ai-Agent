@@ -9,8 +9,10 @@ import re
 from typing import Iterator, Optional
 import azure.cognitiveservices.speech as speechsdk
 from dotenv import load_dotenv
+import numpy as np
 
-load_dotenv()
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
 
@@ -23,8 +25,9 @@ class TextToSpeechClient:
         speech_key: Optional[str] = None,
         speech_region: Optional[str] = None,
         voice: Optional[str] = None,
-        speech_rate: float = None
+        speech_rate: Optional[float] = None
     ):
+
         """
         Initialize Text-to-Speech client.
         

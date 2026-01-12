@@ -8,8 +8,10 @@ import logging
 from typing import Optional
 import azure.cognitiveservices.speech as speechsdk
 from dotenv import load_dotenv
+import numpy as np
 
-load_dotenv()
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
 
