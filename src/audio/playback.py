@@ -48,6 +48,10 @@ class AudioPlayer:
         self.playback_thread = None
         self._is_playing = False
         self._stop_event = threading.Event()
+        
+        # Latency tracking for TTFAS
+        self.first_token_time = None
+        self.first_audio_played = False
     
     def play_audio(self, audio_data: bytes) -> None:
         """
@@ -84,6 +88,9 @@ class AudioPlayer:
         
         self._stop_event.clear()
         self._is_playing = True
+        
+        # Reset latency tracking
+        self.first_audio_played = False
         
         try:
             # Initialize PyAudio only once (reuse if exists)
@@ -147,11 +154,25 @@ class AudioPlayer:
                     
                     if audio_chunk is None:
                         # None signals end of stream
+                        self.audio_queue.task_done()
+                        break
+                    
+                    # CRITICAL: Check if stream still exists before writing
+                    if not self.audio_stream or not self._is_playing:
+                        self.audio_queue.task_done()
                         break
                     
                     # Play the chunk with error handling
                     try:
                         self.audio_stream.write(audio_chunk)
+                        
+                        # LATENCY: Track first audio playback for TTFAS
+                        if not self.first_audio_played and self.first_token_time:
+                            first_audio_time = time.perf_counter()
+                            ttfas = first_audio_time - self.first_token_time
+                            logger.info(f"⏱️  TTFAS (Time To First Audio Spoken): {ttfas:.3f}s")
+                            self.first_audio_played = True
+                        
                         self.audio_queue.task_done()
                     except Exception as write_error:
                         # PyAudio write errors can be fatal, log and continue
@@ -160,6 +181,7 @@ class AudioPlayer:
                         # If it's a critical error, stop playback
                         if "Unanticipated host error" in str(write_error):
                             logger.error("Critical audio error detected, stopping playback")
+                            self._is_playing = False  # Signal main thread
                             break
                 
                 except queue.Empty:
@@ -188,45 +210,35 @@ class AudioPlayer:
         if not self._is_playing:
             return
         
-        # Wait for the queue to be fully processed before stopping
-        logger.info("Waiting for audio queue to finish...")
+        logger.info("Stopping playback...")
         
-        # Use a loop with timeout instead of indefinite join
-        max_wait = 10.0  # Maximum 10 seconds wait
-        start_time = time.time()
-        
-        while not self.audio_queue.empty():
-            elapsed = time.time() - start_time
-            if elapsed > max_wait:
-                logger.warning(f"Audio queue didn't empty after {max_wait}s, forcing cleanup")
-                break
-            time.sleep(0.1)
-        
-        # Signal end of stream
-        self.audio_queue.put(None)
-        self._stop_event.set()
+        # Signal stop FIRST (before touching queue)
         self._is_playing = False
+        self._stop_event.set()
         
-        # Wait for playback thread to finish
+        # Wait for playback thread to finish FIRST
         if self.playback_thread:
-            self.playback_thread.join(timeout=2.0)
+            logger.info("Waiting for playback thread to finish...")
+            self.playback_thread.join(timeout=3.0)
             if self.playback_thread.is_alive():
-                logger.warning("Playback thread didn't stop, continuing anyway")
+                logger.warning("Playback thread didn't stop within timeout")
             self.playback_thread = None
         
-        # Clear any remaining items in queue
+        # NOW safely clear the queue (thread is stopped)
         cleared = 0
         while not self.audio_queue.empty():
             try:
-                self.audio_queue.get_nowait()
+                item = self.audio_queue.get_nowait()
+                if item is not None:  # Don't count None sentinels
+                    cleared += 1
                 self.audio_queue.task_done()
-                cleared += 1
             except queue.Empty:
                 break
         
         if cleared > 0:
-            logger.warning(f"Cleared {cleared} unprocessed audio chunks")
+            logger.info(f"Cleared {cleared} unprocessed audio chunks from queue")
         
+        # Finally, cleanup audio resources
         self.cleanup()
         logger.info("Streaming playback stopped")
     

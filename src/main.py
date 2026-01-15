@@ -25,6 +25,7 @@ from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
 from privacy.privacy_manager import PrivacyManager
 from conversation.state_manager import ConversationStateManager
+import pyaudio
 
 # Load environment
 load_dotenv("/home/pi/Desktop/Ai-Agent 2.0/Jarvis/config/.env")
@@ -78,25 +79,46 @@ class JarvisBot:
             # Enter continuous conversation mode
             idle_timeout = int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
             continuous_vad = ContinuousVADCapture(idle_timeout_seconds=idle_timeout)
-            
             turn_count = 0
-            for audio_data in continuous_vad.listen_continuous():
-                if audio_data is None:
-                    # Timeout reached
+            continuous_vad.last_speech_time = time.time()
+            while True:
+                # Check if idle timeout exceeded
+                idle_duration = time.time() - continuous_vad.last_speech_time
+                if idle_duration >= idle_timeout:
+                    logger.info(f"⏱️  {idle_timeout}s idle timeout reached - ending conversation")
                     break
                 
                 turn_count += 1
                 logger.info(f"\n💬 Turn {turn_count}")
+                self.end_time = time.time()
                 
-                # Process this turn
-                interrupted = self._process_turn(audio_data, continuous_vad)
+                # Process this turn with streaming STT
+                success = self._process_turn_streaming(continuous_vad)
                 
-                if interrupted:
-                    logger.info("🛑 Conversation interrupted by wake word")
-                    break
-            
+                if not success:
+                    # No speech detected, continue waiting
+                    continue
             logger.info(f"\n👋 Conversation ended ({turn_count} turns)")
-            logger.info(f"📊 {self.conversation_manager}")
+            # for audio_data in continuous_vad.listen_continuous():
+            #     if audio_data is None:
+            #         # Timeout reached
+            #         break
+                
+            #     turn_count += 1
+            #     logger.info(f"\n💬 Turn {turn_count}")
+                
+            #     # Process this turn
+            #     self.end_time = time.time()
+            #     if turn_count == 1:
+            #         logger.info(f"⏱️ latency to start STT upon detection of wake word : {(self.end_time - self.start_time):.3f}s")
+            #     # interrupted = self._process_turn(audio_data, continuous_vad)
+            #     self._process_turn(audio_data, continuous_vad)
+            #     # if interrupted:
+            #     #     logger.info("🛑 Conversation interrupted by wake word")
+            #     #     break
+            
+            # logger.info(f"\n👋 Conversation ended ({turn_count} turns)")
+            # logger.info(f"📊 {self.conversation_manager}")
             
         except Exception as e:
             logger.error(f"Error in conversation: {e}")
@@ -151,20 +173,27 @@ class JarvisBot:
             
             # Collect response text chunks as they stream
             response_chunks = []
-            
             try:
                 # Create a wrapper that collects chunks while streaming
                 def text_chunk_collector(llm_stream):
                     """Collect text chunks while passing them through."""
+
                     for chunk in llm_stream:
                         response_chunks.append(chunk)
+                        if len(response_chunks) == 1:
+                            logger.info(f"⏱️  LLM TTFT: {(time.time() - llm_start):.3f}s")
+
                         yield chunk
                 
                 # Stream LLM output through collector to TTS
+                llm_start = time.time()
                 llm_stream = self.llm_client.generate_response_stream(messages)
-                collected_stream = text_chunk_collector(llm_stream)
-                tts_stream = self.tts_client.synthesize_stream(collected_stream)
-                
+
+                # Now synthesize TTS from collected text
+                tts_start = time.perf_counter()
+                response_text_stream = text_chunk_collector(llm_stream)  # Iterator over chunks
+                tts_stream = self.tts_client.synthesize_stream(response_text_stream)
+
                 # Stream audio to player
                 for audio_chunk in tts_stream:
                     self.audio_player.queue_audio(audio_chunk)
@@ -193,7 +222,118 @@ class JarvisBot:
             logger.error(f"Error processing turn: {e}")
             return False
     
-    
+    def _process_turn_streaming(self, continuous_vad: ContinuousVADCapture) -> bool:
+        """ Process one turn of the conversation using streaming STT.
+        Args:
+            continuous_vad: Continuous VAD instance
+            
+        Returns:
+            True if speech was processed, False otherwise
+        """
+        try:
+            # Step 1: Stream audio chunks to STT
+            logger.info("☁️  Starting streaming speech recognition...")
+            stt_start = time.perf_counter()
+            
+            # Get streaming audio chunks from VAD
+            audio_stream = continuous_vad.stream_audio_chunks()
+            
+            # Stream to Azure STT
+            user_text = ""
+            first_text_time = None
+            for result_tuple in self.stt_client.recognize_streaming(audio_stream):
+                # Unpack tuple: (text, first_recognition_time)
+                text_result, first_text_time = result_tuple
+                user_text = text_result  # Get the complete text
+            
+            # Check if we got any speech after all recognition events
+            if not user_text.strip():
+                    logger.warning("No speech recognized")
+                    return False
+            
+            # LATENCY METRICS
+            # 1. STT Latency: User starts speaking → First text recognized
+            if continuous_vad.speech_start_time and first_text_time:
+                stt_latency = first_text_time - continuous_vad.speech_start_time
+                logger.info(f"⏱️  STT Latency: {stt_latency:.3f}s")
+            
+            # 2. End-to-TTFT: Will be calculated when first LLM token arrives
+
+            logger.info(f"📝 Student: {user_text}")
+            
+            # Reset idle timer NOW (before bot speaks) to prevent timeout during bot's response
+            continuous_vad.reset_idle_timer()
+            
+            # Step 2: Anonymize PII
+            anonymized_text = self.privacy_manager.anonymize(user_text)
+            # Step 3: Add to conversation history
+            self.conversation_manager.add_user_message(anonymized_text)
+            # Step 4: Generate LLM response with streaming
+            logger.info("🧠 Generating response...")
+            llm_start = time.perf_counter()
+            messages = self.conversation_manager.get_messages()
+            # Start audio player streaming
+            self.audio_player.start_streaming()
+            # Collect response text chunks as they stream
+            response_chunks = []
+            first_token = True
+            try:
+                # Create a wrapper that collects chunks while streaming
+                def text_chunk_collector(llm_stream):
+                    """Collect text chunks while passing them through."""
+                    nonlocal first_token
+                    first_token_time = None
+                    for chunk in llm_stream:
+                        response_chunks.append(chunk)
+                        if first_token:
+                            first_token_time = time.perf_counter()
+                            llm_latency = first_token_time - llm_start
+                            
+                            # LATENCY: End-to-TTFT (Silence detected → First LLM token)
+                            if continuous_vad.silence_detected_time:
+                                end_to_ttft = first_token_time - continuous_vad.silence_detected_time
+                                logger.info(f"⏱️  End-to-TTFT: {end_to_ttft:.3f}s")
+                            
+                            logger.info(f"⏱️  LLM TTFT: {llm_latency:.3f}s")
+                            
+                            # Track for TTFAS calculation
+                            self.audio_player.first_token_time = first_token_time
+                            first_token = False
+                        yield chunk
+                
+                # Stream LLM output through collector to TTS
+                llm_stream = self.llm_client.generate_response_stream(messages)
+                collected_stream = text_chunk_collector(llm_stream)
+                tts_stream = self.tts_client.synthesize_stream(collected_stream)
+                
+                # Stream audio to player
+                for audio_chunk in tts_stream:
+                    self.audio_player.queue_audio(audio_chunk)
+                
+                # Wait for playback to complete
+                self.audio_player.stop_streaming()
+                
+                # CRITICAL: Add delay to ensure bot fully finishes speaking
+                # This prevents the mic from picking up the bot's own voice
+                time.sleep(0.5)
+                
+                # Combine collected chunks into full response
+                response_text = ''.join(response_chunks)
+                logger.info(f"🤖 Chippy: {response_text}")
+                # Add assistant response to conversation
+                self.conversation_manager.add_assistant_message(response_text)
+                
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error in streaming pipeline: {e}")
+                self.audio_player.stop_streaming()
+                raise
+            
+        except Exception as e:
+            logger.error(f"Error processing turn: {e}")
+            return False
+        
     def _restart_wake_word(self):
         """Restart wake word detection in a non-blocking way."""
         if not self._is_running:
