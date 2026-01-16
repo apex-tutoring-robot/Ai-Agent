@@ -216,8 +216,8 @@ class ContinuousVADCapture:
             silence_start = None
             
             # Two separate timeouts for different purposes
-            initial_speech_timeout = 1.5  # Wait 1.5s for user to START speaking
-            post_speech_silence_timeout = 0.8  # End utterance after 800ms of silence
+            initial_speech_timeout = 1  # Wait 1.5s for user to START speaking
+            post_speech_silence_timeout = 1  # End utterance after 800ms of silence
             
             listen_start = time.time()
             
@@ -316,6 +316,9 @@ class ContinuousVADCapture:
         if self.pa:
             self.pa.terminate()
             self.pa = None
+        
+        # Give ALSA time to release the input device
+        time.sleep(0.2)
     
     def __enter__(self):
         """Context manager entry."""

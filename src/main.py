@@ -252,17 +252,14 @@ class JarvisBot:
                     return False
             
             # LATENCY METRICS
-            # 1. STT Latency: User starts speaking → First text recognized
-            if continuous_vad.speech_start_time and first_text_time:
-                stt_latency = first_text_time - continuous_vad.speech_start_time
+            # 1. STT Latency: User stops speaking (silence detected) → First text recognized
+            if continuous_vad.silence_detected_time and first_text_time:
+                stt_latency = first_text_time - continuous_vad.silence_detected_time
                 logger.info(f"⏱️  STT Latency: {stt_latency:.3f}s")
             
             # 2. End-to-TTFT: Will be calculated when first LLM token arrives
 
             logger.info(f"📝 Student: {user_text}")
-            
-            # Reset idle timer NOW (before bot speaks) to prevent timeout during bot's response
-            continuous_vad.reset_idle_timer()
             
             # Step 2: Anonymize PII
             anonymized_text = self.privacy_manager.anonymize(user_text)
@@ -272,12 +269,14 @@ class JarvisBot:
             logger.info("🧠 Generating response...")
             llm_start = time.perf_counter()
             messages = self.conversation_manager.get_messages()
-            # Start audio player streaming
-            self.audio_player.start_streaming()
+            
             # Collect response text chunks as they stream
             response_chunks = []
             first_token = True
             try:
+                # Start audio player BEFORE first audio arrives for lower latency
+                self.audio_player.start_streaming()
+                
                 # Create a wrapper that collects chunks while streaming
                 def text_chunk_collector(llm_stream):
                     """Collect text chunks while passing them through."""
@@ -306,22 +305,22 @@ class JarvisBot:
                 collected_stream = text_chunk_collector(llm_stream)
                 tts_stream = self.tts_client.synthesize_stream(collected_stream)
                 
-                # Stream audio to player
+                # Stream audio to player (player already started, audio plays immediately)
                 for audio_chunk in tts_stream:
                     self.audio_player.queue_audio(audio_chunk)
                 
                 # Wait for playback to complete
                 self.audio_player.stop_streaming()
                 
-                # CRITICAL: Add delay to ensure bot fully finishes speaking
-                # This prevents the mic from picking up the bot's own voice
-                time.sleep(0.5)
-                
                 # Combine collected chunks into full response
                 response_text = ''.join(response_chunks)
                 logger.info(f"🤖 Chippy: {response_text}")
                 # Add assistant response to conversation
                 self.conversation_manager.add_assistant_message(response_text)
+                
+                # Reset idle timer AFTER bot finishes speaking
+                # This ensures we don't timeout while bot is generating/speaking
+                continuous_vad.reset_idle_timer()
                 
                 return True
                 

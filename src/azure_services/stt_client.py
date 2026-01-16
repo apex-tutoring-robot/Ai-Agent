@@ -9,6 +9,7 @@ from typing import Optional, Iterator, Generator
 import azure.cognitiveservices.speech as speechsdk
 from dotenv import load_dotenv
 import threading
+import time
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))

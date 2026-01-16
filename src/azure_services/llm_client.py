@@ -117,7 +117,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int = 500
+        max_tokens: int = 15
     ) -> str:
         """
         Generate complete response (non-streaming).

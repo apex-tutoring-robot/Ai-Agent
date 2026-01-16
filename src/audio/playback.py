@@ -111,8 +111,8 @@ class AudioPlayer:
             # Small delay to let ALSA settle
             time.sleep(0.1)
             
-            # Use a larger buffer to prevent underruns
-            chunk_size = 1024
+            # Use a larger buffer to prevent underruns and ALSA issues
+            chunk_size = 2048
             
             # Open new audio stream
             self.audio_stream = self.pa.open(
@@ -147,7 +147,8 @@ class AudioPlayer:
     def _playback_worker(self) -> None:
         """Worker thread for streaming playback."""
         try:
-            while self._is_playing and not self._stop_event.is_set():
+            # Keep looping until explicitly told to stop AND queue is empty
+            while True:
                 try:
                     # Get audio chunk from queue (timeout to check stop event)
                     audio_chunk = self.audio_queue.get(timeout=0.1)
@@ -158,13 +159,31 @@ class AudioPlayer:
                         break
                     
                     # CRITICAL: Check if stream still exists before writing
-                    if not self.audio_stream or not self._is_playing:
+                    if not self.audio_stream:
                         self.audio_queue.task_done()
                         break
                     
                     # Play the chunk with error handling
                     try:
-                        self.audio_stream.write(audio_chunk)
+                        # Double-check we should still be playing (stop could have been called)
+                        # But still play this chunk we already dequeued
+                        if self._stop_event.is_set() and not self.audio_stream:
+                            self.audio_queue.task_done()
+                            break
+                        
+                        # Write audio with exception handling
+                        # This can block if ALSA has issues, so wrap tightly
+                        try:
+                            self.audio_stream.write(audio_chunk, exception_on_underflow=False)
+                        except OSError as os_err:
+                            # ALSA device errors - log but try to continue
+                            logger.warning(f"OSError writing chunk (continuing): {os_err}")
+                            # Don't break - maybe next chunk will work
+                            # Set flag so we know there were issues
+                            self.audio_stream = None  # Mark stream as bad
+                            self.audio_queue.task_done()
+                            self._is_playing = False
+                            break  # Exit on first error to prevent cascade
                         
                         # LATENCY: Track first audio playback for TTFAS
                         if not self.first_audio_played and self.first_token_time:
@@ -178,13 +197,18 @@ class AudioPlayer:
                         # PyAudio write errors can be fatal, log and continue
                         logger.error(f"Error writing audio chunk: {write_error}")
                         self.audio_queue.task_done()
-                        # If it's a critical error, stop playback
-                        if "Unanticipated host error" in str(write_error):
+                        # If it's a critical error, stop playback gracefully
+                        if "Unanticipated host error" in str(write_error) or "Invalid" in str(write_error):
                             logger.error("Critical audio error detected, stopping playback")
                             self._is_playing = False  # Signal main thread
                             break
                 
                 except queue.Empty:
+                    # Queue is empty - check if we should exit
+                    if not self._is_playing or self._stop_event.is_set():
+                        # Stop signaled and queue empty, safe to exit
+                        break
+                    # Otherwise keep looping (waiting for more audio)
                     continue
         
         except Exception as e:
@@ -205,42 +229,67 @@ class AudioPlayer:
         
         self.audio_queue.put(audio_chunk)
     
-    def stop_streaming(self) -> None:
-        """Stop streaming playback and clean up."""
+    def stop_streaming(self) -> bool:
+        """
+        Stop streaming playback and clean up.
+        
+        Returns:
+            True if worker stopped cleanly, False if worker stuck (device may be locked)
+        """
         if not self._is_playing:
-            return
+            return True
         
         logger.info("Stopping playback...")
         
-        # Signal stop FIRST (before touching queue)
+        # Signal stop FIRST
         self._is_playing = False
         self._stop_event.set()
         
-        # Wait for playback thread to finish FIRST
+        # DON'T put None sentinels - let worker finish all queued chunks
+        # Worker will exit naturally after processing everything
+        
+        # Wait for playback thread to finish all queued audio
+        thread_stopped = False
         if self.playback_thread:
             logger.info("Waiting for playback thread to finish...")
-            self.playback_thread.join(timeout=3.0)
-            if self.playback_thread.is_alive():
-                logger.warning("Playback thread didn't stop within timeout")
+            self.playback_thread.join(timeout=20.0)
+            thread_stopped = not self.playback_thread.is_alive()
+            
+            if not thread_stopped:
+                logger.error("❌ Worker thread STUCK after 10s")
+                logger.error("   CANNOT cleanup - would cause memory corruption crash")
+                logger.error("   Device will remain locked until next turn attempts recovery")
+                logger.error("   This indicates ALSA/hardware issue with audio device")
+                # Don't touch PyAudio or stream - worker thread may still be using them
+                # Just mark everything as abandoned
+                self.audio_stream = None
+                # Don't set pa to None - worker might still be using it
+                self.playback_thread = None
+                self._is_playing = False
+                return False  # Indicate worker didn't stop cleanly
+            
             self.playback_thread = None
         
-        # NOW safely clear the queue (thread is stopped)
+        logger.info("✅ Worker stopped cleanly")
+        
+        # Clear the queue (should be empty if worker finished properly)
         cleared = 0
         while not self.audio_queue.empty():
             try:
                 item = self.audio_queue.get_nowait()
-                if item is not None:  # Don't count None sentinels
+                if item is not None:
                     cleared += 1
                 self.audio_queue.task_done()
             except queue.Empty:
                 break
         
         if cleared > 0:
-            logger.info(f"Cleared {cleared} unprocessed audio chunks from queue")
+            logger.warning(f"⚠️ Cleared {cleared} chunks from queue after worker stopped")
         
-        # Finally, cleanup audio resources
+        # ONLY cleanup if thread stopped cleanly
         self.cleanup()
         logger.info("Streaming playback stopped")
+        return True  # Worker stopped cleanly
     
     def cleanup(self) -> None:
         """Clean up audio stream (but keep PyAudio instance for reuse)."""
@@ -257,6 +306,10 @@ class AudioPlayer:
                 except:
                     pass
                 self.audio_stream = None
+                
+                # CRITICAL: Give ALSA time to fully release the device
+                # Without this, the next mic stream open fails with "Unanticipated host error"
+                time.sleep(0.3)
         except Exception as e:
             logger.error(f"Error cleaning up audio stream: {e}")
         
