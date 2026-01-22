@@ -138,7 +138,7 @@ class ContinuousVADCapture:
             silence_start = None
             
             # Two separate timeouts for different purposes
-            initial_speech_timeout = 1.5  # Wait 1.5s for user to START speaking
+            initial_speech_timeout = 0.5  # Wait 1.5s for user to START speaking
             post_speech_silence_timeout_ms = 800  # End utterance after 800ms of silence
             
             listen_start = time.time()
@@ -216,8 +216,8 @@ class ContinuousVADCapture:
             silence_start = None
             
             # Two separate timeouts for different purposes
-            initial_speech_timeout = 1  # Wait 1.5s for user to START speaking
-            post_speech_silence_timeout = 1  # End utterance after 800ms of silence
+            initial_speech_timeout = 1.0  # Wait 1.5s for user to START speaking
+            post_speech_silence_timeout = 0.8  # End utterance after 800ms of silence
             
             listen_start = time.time()
             

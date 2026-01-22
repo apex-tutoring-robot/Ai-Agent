@@ -5,11 +5,11 @@ Converts captured audio to text using Azure Cognitive Services.
 
 import os
 import logging
+import time
 from typing import Optional, Iterator, Generator
 import azure.cognitiveservices.speech as speechsdk
 from dotenv import load_dotenv
 import threading
-import time
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -43,9 +43,37 @@ class SpeechToTextClient:
         # Configure speech
         self.speech_config = speechsdk.SpeechConfig(
             subscription=self.speech_key,
-            region=self.speech_region
+            region=self.speech_region,
+            speech_recognition_language=self.language
         )
-        self.speech_config.speech_recognition_language = self.language
+        
+        # Warm-start the STT service
+        self.warm_up()
+    
+    def warm_up(self):
+        """
+        Warm-start the Azure STT service to reduce first-call latency.
+        Performs a dummy recognition to pre-load models and establish connections.
+        """
+        try:
+            logger.info("Warming up Azure STT service...")
+            
+            # Create a dummy audio config with a silence file
+            # You'll need a small silence.wav file (even 0.5 seconds is enough)
+            audio_config = speechsdk.audio.AudioConfig(filename="silence.wav")
+            
+            # Create a temporary recognizer
+            recognizer = speechsdk.SpeechRecognizer(
+                speech_config=self.speech_config,
+                audio_config=audio_config
+            )
+            
+            # Trigger recognition (this preloads everything)
+            result = recognizer.recognize_once_async().get()
+            
+            logger.info("Azure STT warm-up complete")
+        except Exception as e:
+            logger.warning(f"STT warm-up failed (non-critical): {e}")
     
     def recognize_from_audio_data(self, audio_data: bytes, sample_rate: int = 16000) -> str:
         """
@@ -127,6 +155,8 @@ class SpeechToTextClient:
                 audio_config=audio_config
             )
             
+            # recognize_once() is a blocking call, it waits for the user to finish speaking
+            # and then Azure's internal VAD (Voice Activity Detection) will trigger the end of speech
             logger.info("Listening from microphone...")
             result = speech_recognizer.recognize_once()
             
@@ -250,9 +280,6 @@ class SpeechToTextClient:
                         break
                     push_stream.write(audio_chunk)
                     chunk_count += 1
-                    if chunk_count % 50 == 0:  # Log every 50 chunks
-                        logger.info(f"📊 Processed {chunk_count} audio chunks...")
-                
                 logger.info(f"✅ Finished feeding {chunk_count} chunks, closing push stream...")
                 # Close the push stream to signal end of audio
                 push_stream.close()

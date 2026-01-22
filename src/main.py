@@ -390,6 +390,10 @@ class JarvisBot:
         if self.audio_player:
             self.audio_player.cleanup()
         
+        # Cleanup TTS client
+        if self.tts_client:
+            self.tts_client.cleanup()
+        
         # Show conversation summary
         logger.info(f"\nFinal conversation state: {self.conversation_manager}")
         
