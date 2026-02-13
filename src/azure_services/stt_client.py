@@ -48,7 +48,7 @@ class SpeechToTextClient:
         )
         
         # Warm-start the STT service
-        self.warm_up()
+        logger.info("Skipping STT warm-up on Raspberry Pi")
     
     def warm_up(self):
         """
@@ -132,51 +132,50 @@ class SpeechToTextClient:
             logger.error(f"Error in speech recognition: {e}")
             raise
     
-    def recognize_from_microphone(self, device_id: Optional[str] = None) -> str:
-        """
-        Recognize speech directly from microphone (alternative method).
+    #def recognize_from_microphone(self, device_id: Optional[str] = None) -> str:
+     #   """
+      #  Recognize speech directly from microphone (alternative method).
+       # Args:
+        #    device_id: Microphone device ID
         
-        Args:
-            device_id: Microphone device ID
-        
-        Returns:
-            Transcribed text
-        """
-        try:
-            # Create audio config from microphone
-            if device_id:
-                audio_config = speechsdk.audio.AudioConfig(device_name=device_id)
-            else:
-                audio_config = speechsdk.audio.AudioConfig(use_default_microphone=True)
+        #Returns:
+         #   Transcribed text
+        #"""
+        #try:
+         #   # Create audio config from microphone
+          #  if device_id:
+           #     audio_config = speechsdk.audio.AudioConfig(device_name=device_id)
+            #else:
+             #   audio_config = speechsdk.audio.AudioConfig(use_default_microphone=True)
             
             # Create recognizer
-            speech_recognizer = speechsdk.SpeechRecognizer(
-                speech_config=self.speech_config,
-                audio_config=audio_config
-            )
+            #speech_recognizer = speechsdk.SpeechRecognizer(
+             #   speech_config=self.speech_config,
+              #  audio_config=audio_config
+            #)
             
             # recognize_once() is a blocking call, it waits for the user to finish speaking
             # and then Azure's internal VAD (Voice Activity Detection) will trigger the end of speech
-            logger.info("Listening from microphone...")
-            result = speech_recognizer.recognize_once()
+            #logger.info("Listening from microphone...")
+            #result = speech_recognizer.recognize_once()
             
             # Check result
-            if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                logger.info(f"Recognized: {result.text}")
-                return result.text
-            elif result.reason == speechsdk.ResultReason.NoMatch:
-                logger.warning("No speech could be recognized")
-                return ""
-            elif result.reason == speechsdk.ResultReason.Canceled:
-                cancellation = result.cancellation_details
-                logger.error(f"Speech recognition canceled: {cancellation.reason}")
-                return ""
+           # if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+            #    logger.info(f"Recognized: {result.text}")
+             #   return result.text
+            #elif result.reason == speechsdk.ResultReason.NoMatch:
+             #   logger.warning("No speech could be recognized")
+              #  return ""
+            #elif result.reason == speechsdk.ResultReason.Canceled:
+             #   cancellation = result.cancellation_details
+              #  logger.error(f"Speech recognition canceled: {cancellation.reason}")
+               # return ""
             
-            return ""
+            #return ""
         
-        except Exception as e:
-            logger.error(f"Error in microphone recognition: {e}")
-            raise
+        #except Exception as e:
+         #   logger.error(f"Error in microphone recognition: {e}")
+          #  raise
     
     def recognize_streaming(self, audio_stream: Iterator[bytes], sample_rate: int = 16000) -> Generator[str, None, None]:
         """

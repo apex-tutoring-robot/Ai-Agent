@@ -216,8 +216,8 @@ class ContinuousVADCapture:
             silence_start = None
             
             # Two separate timeouts for different purposes
-            initial_speech_timeout = 1.0  # Wait 1.5s for user to START speaking
-            post_speech_silence_timeout = 0.8  # End utterance after 800ms of silence
+            initial_speech_timeout = 1.5  # Wait 1.5s for user to START speaking
+            post_speech_silence_timeout = 1.2  # End utterance after 800ms of silence
             
             listen_start = time.time()
             
@@ -229,7 +229,7 @@ class ContinuousVADCapture:
             
             # Debouncing: count consecutive speech chunks to avoid noise triggering
             consecutive_speech_chunks = 0
-            min_speech_chunks_to_cancel_silence = 10  # Need 10 consecutive chunks (200ms) to cancel silence
+            min_speech_chunks_to_cancel_silence = 15  # Need 10 consecutive chunks (200ms) to cancel silence
             
             while True:
                 # Give up if no speech detected within initial timeout
@@ -254,21 +254,9 @@ class ContinuousVADCapture:
                         self.speech_start_time = time.perf_counter()
                         logger.info("💬 Speech detected - streaming chunks...")
                         speech_started = True
-                        yield audio_chunk
-                        silence_start = None
-                    elif silence_start is None:
-                        # Normal speech, not in silence period
-                        yield audio_chunk
-                    else:
-                        # We're in silence period, but detected speech
-                        # Only cancel silence if we get sustained speech (debouncing)
-                        if consecutive_speech_chunks >= min_speech_chunks_to_cancel_silence:
-                            logger.info(f"🔊 Sustained speech detected during silence ({consecutive_speech_chunks} chunks), canceling silence timer")
-                            silence_start = None  # Reset silence timer
-                            silence_chunk_count = 0
-                        else:
-                            logger.debug(f"Brief speech blip #{consecutive_speech_chunks} during silence, ignoring...")
-                        yield audio_chunk
+                    yield audio_chunk
+                    silence_start = None
+                
                 
                 else:
                     # Not speech (silence)

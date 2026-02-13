@@ -166,6 +166,15 @@ class TextToSpeechClient:
                 audio_data = self.synthesize_to_audio(sentence.strip())
                 if audio_data:
                     yield audio_data
+                    
+    def cleanup(self):
+        """Cleanup TTS resources (safe no-op for Azure SDK)."""
+        try:
+            if hasattr(self, "audio_player"):
+                self.audio_player.stop_streaming()
+        except Exception:
+            pass
+
 
 
 if __name__ == "__main__":
