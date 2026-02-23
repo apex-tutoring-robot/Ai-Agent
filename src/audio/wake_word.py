@@ -175,8 +175,10 @@ import os
 import logging
 import time
 import numpy as np
-from typing import Callable, Optional
+from typing import Callable, Optional, Union, Awaitable
 import pyaudio
+import asyncio
+import inspect
 from openwakeword.model import Model
 from dotenv import load_dotenv
 
@@ -229,7 +231,7 @@ class WakeWordDetector:
         logger.info(f"Wake word detector initialized: model='{self.model_name or 'all'}', "
                    f"threshold={self.threshold}, vad={self.vad_threshold}, speex={self.enable_speex}")
     
-    def start(self, callback: Callable[[], None]) -> None:
+    async def start(self, callback: Union[Callable[[], None], Callable[[], Awaitable[None]]]) -> None:
         """
         Start listening for wake word.
         
@@ -329,7 +331,10 @@ class WakeWordDetector:
                             if current_time - self.last_detection_time >= cooldown_period:
                                 logger.info(f"✓ Wake word detected! (model: {self.model_name}, score: {score:.3f})")
                                 self.last_detection_time = current_time
-                                callback()
+                                if inspect.iscoroutinefunction(callback):
+                                    await callback()
+                                else:
+                                    callback()
                 else:
                     # Check all models if no specific model name
                     for model_name, score in predictions.items():
@@ -338,7 +343,10 @@ class WakeWordDetector:
                             if current_time - self.last_detection_time >= cooldown_period:
                                 logger.info(f"✓ Wake word detected! (model: {model_name}, score: {score:.3f})")
                                 self.last_detection_time = current_time
-                                callback()
+                                if inspect.iscoroutinefunction(callback):
+                                    await callback()
+                                else:
+                                    callback()
                                 break
         
         except Exception as e:

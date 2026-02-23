@@ -48,6 +48,7 @@ class AudioPlayer:
         self.playback_thread = None
         self._is_playing = False
         self._stop_event = threading.Event()
+        self._interrupt_event = threading.Event()
         
         # Latency tracking for TTFAS
         self.first_token_time = None
@@ -87,6 +88,7 @@ class AudioPlayer:
             return
         
         self._stop_event.clear()
+        self._interrupt_event.clear()
         self._is_playing = True
         
         # Reset latency tracking
@@ -167,7 +169,11 @@ class AudioPlayer:
                     try:
                         # Double-check we should still be playing (stop could have been called)
                         # But still play this chunk we already dequeued
-                        if self._stop_event.is_set() and not self.audio_stream:
+                        if (self._stop_event.is_set() or self._interrupt_event.is_set()) and not self.audio_stream:
+                            self.audio_queue.task_done()
+                            break
+                        
+                        if self._interrupt_event.is_set():
                             self.audio_queue.task_done()
                             break
                         
@@ -205,8 +211,8 @@ class AudioPlayer:
                 
                 except queue.Empty:
                     # Queue is empty - check if we should exit
-                    if not self._is_playing or self._stop_event.is_set():
-                        # Stop signaled and queue empty, safe to exit
+                    if not self._is_playing or self._stop_event.is_set() or self._interrupt_event.is_set():
+                        # Stop or interrupt signaled and queue empty, safe to exit
                         break
                     # Otherwise keep looping (waiting for more audio)
                     continue
@@ -228,6 +234,37 @@ class AudioPlayer:
             raise RuntimeError("Streaming not started. Call start_streaming() first.")
         
         self.audio_queue.put(audio_chunk)
+    
+    def interrupt(self) -> None:
+        """
+        Immediately interrupt playback, clearing the queue and signaling the worker to stop.
+        """
+        if not self._is_playing:
+            return
+            
+        logger.info("Interrupting playback...")
+        self._interrupt_event.set()
+        self._is_playing = False
+        
+        # Clear the queue immediately
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+                self.audio_queue.task_done()
+            except queue.Empty:
+                break
+        
+        # Close the stream to stop hardware playback buffer
+        if self.audio_stream:
+            try:
+                # Use a flag to avoid worker race conditions if needed
+                self.audio_stream.stop_stream()
+                self.audio_stream.close()
+            except:
+                pass
+            self.audio_stream = None
+        
+        logger.info("Playback interrupted and queue cleared")
     
     def stop_streaming(self) -> bool:
         """

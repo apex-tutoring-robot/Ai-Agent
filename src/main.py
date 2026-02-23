@@ -23,6 +23,7 @@ from audio.playback import AudioPlayer
 from azure_services.stt_client import SpeechToTextClient
 from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
+from google_services.gemini_live_client import GeminiLiveClient
 from privacy.privacy_manager import PrivacyManager
 from conversation.state_manager import ConversationStateManager
 import pyaudio
@@ -50,6 +51,9 @@ class JarvisBot:
         self.stt_client = SpeechToTextClient()
         self.llm_client = LLMClient()
         self.tts_client = TextToSpeechClient()
+        self.gemini_client = GeminiLiveClient(
+            system_instruction=self.llm_client.system_prompt
+        )
         self.privacy_manager = PrivacyManager()
         self.conversation_manager = ConversationStateManager(
             max_history=int(os.getenv('MAX_CONVERSATION_HISTORY', 20))
@@ -60,7 +64,7 @@ class JarvisBot:
         
         logger.info("Jarvis initialized successfully!")
     
-    def _handle_wake_word(self):
+    async def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
         # Prevent concurrent interactions
         if not self._interaction_lock.acquire(blocking=False):
@@ -92,12 +96,11 @@ class JarvisBot:
                 logger.info(f"\n💬 Turn {turn_count}")
                 self.end_time = time.time()
                 
-                # Process this turn with streaming STT
-                success = self._process_turn_streaming(continuous_vad)
+                # Process this turn with Gemini Live (Full-Duplex)
+                success = await self._run_gemini_live_loop(continuous_vad, idle_timeout)
                 
                 if not success:
-                    # No speech detected, continue waiting
-                    continue
+                    break
             logger.info(f"\n👋 Conversation ended ({turn_count} turns)")
             # for audio_data in continuous_vad.listen_continuous():
             #     if audio_data is None:
@@ -135,6 +138,66 @@ class JarvisBot:
             logger.info("▶️  Resuming wake word detection...")
             self._restart_wake_word()
             self._interaction_lock.release()
+
+    async def _run_gemini_live_loop(self, continuous_vad: ContinuousVADCapture, idle_timeout: int):
+        """Runs the Gemini Live full-duplex loop."""
+        
+        # Define callbacks
+        def on_audio(audio_data):
+            self.audio_player.queue_audio(audio_data)
+            continuous_vad.reset_idle_timer() # Reset idle timer when bot speaks
+
+        def on_interrupt():
+            self.audio_player.interrupt()
+            continuous_vad.reset_idle_timer()
+
+        self.gemini_client.set_callbacks(on_audio, on_interrupt)
+        
+        # Start audio player playback
+        self.audio_player.start_streaming()
+        
+        # Start Gemini session in a task
+        gemini_task = asyncio.create_task(self.gemini_client.start())
+        
+        try:
+            # Mic streaming loop
+            async for audio_chunk in self._mic_stream_generator(continuous_vad):
+                if audio_chunk is None: # Utterance ended or idle
+                    break
+                await self.gemini_client.send_audio(audio_chunk)
+                
+            # Wait for gemini to finish or idle timeout
+            # In a true full-duplex, we'd stay in the loop until idle timeout
+            # For now, let's keep it simple: one session per "interaction block"
+            
+        except Exception as e:
+            logger.error(f"Error in Gemini Live loop: {e}")
+        finally:
+            self.gemini_client.stop()
+            await gemini_task
+            self.audio_player.stop_streaming()
+            return True
+
+    async def _mic_stream_generator(self, continuous_vad: ContinuousVADCapture):
+        """Generator that yields audio chunks from the microphone asynchronously."""
+        loop = asyncio.get_event_loop()
+        queue = asyncio.Queue()
+
+        def producer():
+            for chunk in continuous_vad.stream_audio_chunks():
+                loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                if chunk is None:
+                    break
+
+        # Run the blocking generator in a separate thread
+        producer_thread = threading.Thread(target=producer, daemon=True)
+        producer_thread.start()
+
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                break
+            yield chunk
     
     def _process_turn(self, audio_data: bytes, continuous_vad: ContinuousVADCapture) -> bool:
         """
@@ -346,9 +409,11 @@ class JarvisBot:
         
         # Start wake word detector in a new thread
         logger.info("Starting new wake word detection thread...")
+        def start_wrapper():
+            asyncio.run(self.wake_word_detector.start(self._handle_wake_word))
+            
         wake_thread = threading.Thread(
-            target=self.wake_word_detector.start,
-            args=(self._handle_wake_word,),
+            target=start_wrapper,
             daemon=True
         )
         wake_thread.start()
@@ -365,7 +430,7 @@ class JarvisBot:
         
         try:
             # Start wake word detection (blocking call)
-            self.wake_word_detector.start(self._handle_wake_word)
+            asyncio.run(self.wake_word_detector.start(self._handle_wake_word))
         
         except KeyboardInterrupt:
             logger.info("\nShutdown requested by user")
