@@ -180,6 +180,27 @@ import pyaudio
 from openwakeword.model import Model
 from dotenv import load_dotenv
 
+# Install shim for Python 3.13 compatibility with SpeexDSP
+try:
+    from utils import imp_shim
+    imp_shim.install_shim()
+    import speexdsp
+    import sys
+    
+    # Satisfy openWakeWord by providing a dummy NoiseSuppression if missing
+    if not hasattr(speexdsp, 'NoiseSuppression'):
+        class DummyNS:
+            def __init__(self, *args, **kwargs): pass
+            @staticmethod
+            def create(*args, **kwargs): return DummyNS()
+            def process(self, chunk): return chunk
+        speexdsp.NoiseSuppression = DummyNS
+        
+    # Alias speexdsp to speexdsp_ns for openWakeWord compatibility
+    sys.modules['speexdsp_ns'] = speexdsp
+except ImportError:
+    pass
+
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
@@ -195,7 +216,8 @@ class WakeWordDetector:
         threshold: float = None,
         vad_threshold: float = None,
         enable_speex_noise_suppression: bool = True,
-        input_device_index: Optional[int] = None
+        input_device_index: Optional[int] = None,
+        pa: Optional[pyaudio.PyAudio] = None
     ):
         """
         Initialize wake word detector.
@@ -218,7 +240,8 @@ class WakeWordDetector:
         
         self.model = None
         self.audio_stream = None
-        self.pa = None
+        self.pa = pa
+        self._owns_pa = (pa is None)
         self._is_running = False
         self.last_detection_time = 0  # For debouncing multiple detections
         
@@ -281,18 +304,45 @@ class WakeWordDetector:
                 logger.info(f"Will respond to any wake word")
                 self.model_name = None
             
-            # Initialize PyAudio
-            self.pa = pyaudio.PyAudio()
+            # Initialize PyAudio if not provided
+            if not self.pa:
+                self.pa = pyaudio.PyAudio()
+                self._owns_pa = True
+                logger.info("PyAudio initialized (owned by WakeWordDetector)")
+            else:
+                logger.info("♻️  Reusing shared PyAudio instance in WakeWordDetector")
             
-            # Open audio stream
-            self.audio_stream = self.pa.open(
-                rate=self.sample_rate,
-                channels=1,
-                format=pyaudio.paInt16,
-                input=True,
-                frames_per_buffer=self.chunk_size,
-                input_device_index=self.input_device_index
-            )
+            # Open audio stream with robust fallback (Channels 1 -> 2 -> Default Device)
+            self.audio_stream = None
+            self._actual_channels = 1
+            
+            # List of (channels, device_index) to try
+            configs_to_try = [
+                (1, self.input_device_index),
+                (2, self.input_device_index),
+                (1, None), # System Default
+                (2, None)  # System Default Stereo
+            ]
+            
+            for channels, dev_index in configs_to_try:
+                try:
+                    self.audio_stream = self.pa.open(
+                        rate=self.sample_rate,
+                        channels=channels,
+                        format=pyaudio.paInt16,
+                        input=True,
+                        frames_per_buffer=self.chunk_size,
+                        input_device_index=dev_index
+                    )
+                    self._actual_channels = channels
+                    logger.info(f"✓ Audio stream opened: {channels} channels, device index: {dev_index}")
+                    break
+                except Exception as e:
+                    logger.debug(f"Failed configuration ({channels} channels, index {dev_index}): {e}")
+                    continue
+            
+            if not self.audio_stream:
+                raise RuntimeError("Could not open audio input stream after all fallbacks failed.")
             
             logger.info(f"Wake word detection started (device index: {self.input_device_index})")
             if self.model_name:
@@ -312,6 +362,10 @@ class WakeWordDetector:
                 
                 # Convert bytes to numpy array (int16)
                 audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                
+                # Mix down to mono if device is stereo
+                if self._actual_channels == 2:
+                    audio_array = audio_array.reshape(-1, 2)[:, 0]
                 
                 # Get predictions from model
                 predictions = self.model.predict(audio_array)
@@ -347,6 +401,28 @@ class WakeWordDetector:
         finally:
             self.stop()
     
+    def pause(self) -> None:
+        """
+        Pause wake word detection but keep audio stream alive.
+        This allows the stream to be reused by continuous VAD without recreation.
+        """
+        self._is_running = False
+        
+        if self.audio_stream:
+            try:
+                self.audio_stream.stop_stream()
+                logger.info("Wake word detection paused (stream stopped but kept alive)")
+            except Exception as e:
+                logger.warning(f"Error stopping stream during pause: {e}")
+    
+    def get_audio_stream(self):
+        """Get the active audio stream for reuse."""
+        return self.audio_stream
+    
+    def get_pyaudio_instance(self):
+        """Get the PyAudio instance for reuse."""
+        return self.pa
+    
     def stop(self) -> None:
         """Stop wake word detection and clean up resources."""
         self._is_running = False
@@ -361,7 +437,11 @@ class WakeWordDetector:
         
         if self.pa:
             try:
-                self.pa.terminate()
+                if self._owns_pa:
+                    self.pa.terminate()
+                    logger.info("PyAudio terminated (owned by WakeWordDetector)")
+                else:
+                    logger.info("♻️  Keeping shared PyAudio instance alive")
             except:
                 pass
             self.pa = None

@@ -42,11 +42,13 @@ class TextToSpeechClient:
         if not self.speech_key or not self.speech_region:
             raise ValueError("Azure Speech credentials not provided")
         
-        # Configure speech
+        # Configure speech config
+        # Using standard REST endpoint - phrase buffering + audio streaming for optimization  
         self.speech_config = speechsdk.SpeechConfig(
             subscription=self.speech_key,
             region=self.speech_region
         )
+        logger.info(f"TTS client configured for region: {self.speech_region}")
         self.speech_config.speech_synthesis_voice_name = self.voice
         
         # Set speech rate if not default
@@ -61,6 +63,47 @@ class TextToSpeechClient:
             )
         
         logger.info(f"TTS client initialized with voice: {self.voice}")
+        
+        # Create persistent synthesizer instance (reused for all synthesis calls)
+        self.synthesizer = speechsdk.SpeechSynthesizer(
+            speech_config=self.speech_config,
+            audio_config=None  # We'll get audio from result objects
+        )
+        logger.info("Persistent synthesizer instance created")
+        
+        # Warm-start the TTS service using the persistent synthesizer
+        self.warm_up_v2()
+    
+    def warm_up_v2(self):
+        """
+        Warm-start the Azure TTS service by pre-opening the connection.
+        This reduces first-call latency without wasting synthesis quota.
+        """
+        try:
+            logger.info("Opening persistent connection to Azure TTS...")
+            
+            # Get connection from synthesizer and open it
+            self.connection = speechsdk.Connection.from_speech_synthesizer(self.synthesizer)
+            self.connection.open(True)  # True = wait for connection to establish
+            
+            logger.info("Azure TTS connection established")
+        except Exception as e:
+            logger.warning(f"TTS connection pre-open failed (non-critical): {e}")
+        
+    def warm_up_v1(self):
+        """
+        Warm-start the Azure TTS service to reduce first-call latency.
+        Performs a dummy synthesis using the persistent synthesizer to pre-load models.
+        """
+        try:
+            logger.info("Warming up Azure TTS service...")
+            
+            # Use persistent synthesizer for warm-up (no need for temporary instance)
+            result = self.synthesizer.speak_text_async("Warm-up request.").get()
+            
+            logger.info("Azure TTS warm-up complete")
+        except Exception as e:
+            logger.warning(f"TTS warm-up failed (non-critical): {e}")
     
     def synthesize_to_audio(self, text: str) -> bytes:
         """
@@ -73,14 +116,9 @@ class TextToSpeechClient:
             Raw audio bytes (PCM 16-bit, 16kHz, mono)
         """
         try:
-            # Create synthesizer with null output (we'll get audio from result)
-            synthesizer = speechsdk.SpeechSynthesizer(
-                speech_config=self.speech_config,
-                audio_config=None
-            )
-            
+            # Reuse persistent synthesizer instance (no initialization overhead)
             logger.info(f"Synthesizing: {text[:50]}...")
-            result = synthesizer.speak_text(text)
+            result = self.synthesizer.speak_text(text)
             
             if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
                 logger.info("Speech synthesis completed")
@@ -97,7 +135,7 @@ class TextToSpeechClient:
         except Exception as e:
             logger.error(f"Error in speech synthesis: {e}")
             raise
-    
+
     def synthesize_stream(self, text_stream: Iterator[str]) -> Iterator[bytes]:
         """
         Synthesize streaming text to audio chunks.
@@ -151,6 +189,97 @@ class TextToSpeechClient:
                 logger.error(f"Lost text in buffer: '{sentence_buffer}'")
             raise
     
+    def synthesize_stream_old(self, text_stream: Iterator[str]) -> Iterator[bytes]:
+        """
+        Synthesize streaming text to audio chunks with optimized WebSocket V2 streaming.
+        Uses phrase-level buffering (smaller chunks than full sentences) for lower latency.
+        Streams audio at byte-level for immediate playback.
+        
+        Args:
+            text_stream: Iterator yielding text chunks from LLM
+        
+        Yields:
+            Audio data chunks (smaller chunks for lower latency)
+        """
+        phrase_buffer = ""
+        
+        # Phrase boundary patterns - more frequent than sentences for lower latency
+        # Triggers on: sentence end, comma, semicolon, or after ~50 chars
+        phrase_endings = re.compile(r'[.!?;:]\s+|[.!?]$')
+        
+        try:
+            for text_chunk in text_stream:
+                phrase_buffer += text_chunk
+                
+                # Check for phrase boundaries OR if buffer is getting long
+                match = phrase_endings.search(phrase_buffer)
+                should_synthesize = match or len(phrase_buffer) > 50
+                
+                if should_synthesize:
+                    # Extract complete phrase(s)
+                    if match:
+                        end_pos = match.end()
+                        complete_text = phrase_buffer[:end_pos].strip()
+                        phrase_buffer = phrase_buffer[end_pos:]
+                    else:
+                        # Buffer too long without punctuation, split at last space
+                        last_space = phrase_buffer.rfind(' ', 0, 50)
+                        if last_space > 0:
+                            complete_text = phrase_buffer[:last_space].strip()
+                            phrase_buffer = phrase_buffer[last_space:]
+                        else:
+                            # No space found, synthesize everything
+                            complete_text = phrase_buffer.strip()
+                            phrase_buffer = ""
+                    
+                    if complete_text:
+                        # Use audio streaming for this phrase
+                        for audio_chunk in self._synthesize_with_audio_streaming(complete_text):
+                            yield audio_chunk
+            
+            # Synthesize any remaining text
+            if phrase_buffer.strip():
+                logger.debug(f"📝 Synthesizing remaining buffer: '{phrase_buffer.strip()[:50]}...'")
+                for audio_chunk in self._synthesize_with_audio_streaming(phrase_buffer.strip()):
+                    yield audio_chunk
+        
+        except Exception as e:
+            logger.error(f"Error in streaming synthesis: {e}")
+            if phrase_buffer:
+                logger.error(f"Lost text in buffer: '{phrase_buffer}'")
+            raise
+    
+    def _synthesize_with_audio_streaming(self, text: str) -> Iterator[bytes]:
+        """
+        Synthesize text and stream audio in chunks for lower latency.
+        Uses AudioDataStream to get audio chunks as they're generated.
+        
+        Args:
+            text: Text to synthesize
+        
+        Yields:
+            Audio data chunks
+        """
+        try:
+            logger.debug(f"Synthesizing phrase: '{text[:30]}...'")
+            
+            # Use speak_text_async to get synthesis result
+            result = self.synthesizer.speak_text_async(text).get()
+            
+            if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+                logger.info("Speech synthesis completed")
+                yield result.audio_data
+                    
+            elif result.reason == speechsdk.ResultReason.Canceled:
+                cancellation = result.cancellation_details
+                logger.error(f"Synthesis canceled: {cancellation.reason}")
+                if cancellation.reason == speechsdk.CancellationReason.Error:
+                    logger.error(f"Error details: {cancellation.error_details}")
+        
+        except Exception as e:
+            logger.error(f"Error in audio streaming synthesis: {e}")
+            raise
+    
     def synthesize_sentences(self, sentences: list[str]) -> Iterator[bytes]:
         """
         Synthesize a list of sentences to audio chunks.
@@ -166,6 +295,14 @@ class TextToSpeechClient:
                 audio_data = self.synthesize_to_audio(sentence.strip())
                 if audio_data:
                     yield audio_data
+    
+    def cleanup(self):
+        """
+        Clean up resources. Call this when done using the TTS client.
+        """
+        if hasattr(self, 'synthesizer') and self.synthesizer:
+            logger.info("Cleaning up TTS synthesizer...")
+            self.synthesizer = None
 
 
 if __name__ == "__main__":

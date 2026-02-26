@@ -26,7 +26,9 @@ class AudioPlayer:
         self,
         sample_rate: int = 16000,  # Azure TTS outputs 16kHz audio
         channels: int = None,
-        output_device_index: Optional[int] = None
+        output_device_index: Optional[int] = None,
+        pa: Optional[pyaudio.PyAudio] = None,
+        on_audio_played: Optional[callable] = None
     ):
         """
         Initialize audio player.
@@ -42,17 +44,21 @@ class AudioPlayer:
         
         logger.info(f"AudioPlayer initialized: {self.sample_rate}Hz, {self.channels} channel(s), device {self.output_device_index}")
         
-        self.pa = None
+        self.pa = pa
+        self._owns_pa = (pa is None)
         self.audio_stream = None
         self.audio_queue = queue.Queue()
         self.playback_thread = None
         self._is_playing = False
         self._stop_event = threading.Event()
+        self.on_audio_played = on_audio_played
+        self.has_fatal_error = False
+        self._owns_stream = True
         
-        # Latency tracking for TTFAS
+        # Latency tracking and real-time state
         self.first_token_time = None
         self.first_audio_played = False
-    
+        self.last_heartbeat = 0.0  # Real-time timestamp of local playback
     def play_audio(self, audio_data: bytes) -> None:
         """
         Play audio data (blocking).
@@ -64,7 +70,8 @@ class AudioPlayer:
             if not self.pa:
                 self.pa = pyaudio.PyAudio()
             
-            if not self.audio_stream or not self.audio_stream.is_active():
+            # If we don't have a stream, open a managed one
+            if not self.audio_stream:
                 self.audio_stream = self.pa.open(
                     format=pyaudio.paInt16,
                     channels=self.channels,
@@ -72,6 +79,7 @@ class AudioPlayer:
                     output=True,
                     output_device_index=self.output_device_index
                 )
+                self._owns_stream = True
             
             # Play audio
             self.audio_stream.write(audio_data)
@@ -80,142 +88,138 @@ class AudioPlayer:
             logger.error(f"Error playing audio: {e}")
             raise
     
-    def start_streaming(self) -> None:
-        """Start streaming playback thread."""
+    # Frames per callback buffer: 320 frames @ 16kHz = 20ms
+    # Matches VAD and Speex AEC frame size for perfect synchronization.
+    _FRAMES_PER_BUFFER = 320
+
+    def start_streaming(self, output_device_index: int = None) -> None:
+        """
+        Start the audio stream for playback using PortAudio callback mode.
+        No blocking write() calls — PortAudio calls _audio_callback every 64ms.
+        """
         if self._is_playing:
             logger.warning("Streaming already active")
             return
-        
+
         self._stop_event.clear()
         self._is_playing = True
-        
-        # Reset latency tracking
         self.first_audio_played = False
-        
+        self.has_fatal_error = False
+        self._callback_buf = bytearray()  # leftover bytes between callback calls
+
         try:
-            # Initialize PyAudio only once (reuse if exists)
             if not self.pa:
                 self.pa = pyaudio.PyAudio()
-                logger.info("PyAudio initialized")
-            
-            # Close old stream if exists
+                self._owns_pa = True
+
+            target_device_index = output_device_index if output_device_index is not None else self.output_device_index
+
+            # Close any stale stream (safe here — no worker thread is running yet)
             if self.audio_stream:
                 try:
-                    if self.audio_stream.is_active():
-                        self.audio_stream.stop_stream()
+                    self.audio_stream.stop_stream()
                     self.audio_stream.close()
-                except Exception as e:
-                    logger.warning(f"Error closing old stream: {e}")
+                except Exception:
+                    pass
                 self.audio_stream = None
-            
-            # Small delay to let ALSA settle
-            time.sleep(0.1)
-            
-            # Use a larger buffer to prevent underruns and ALSA issues
-            chunk_size = 2048
-            
-            # Open new audio stream
+
+            # Open in CALLBACK mode — PortAudio drives timing, no Python write() blocks
             self.audio_stream = self.pa.open(
                 format=pyaudio.paInt16,
                 channels=self.channels,
                 rate=self.sample_rate,
                 output=True,
-                output_device_index=self.output_device_index,
-                frames_per_buffer=chunk_size
+                output_device_index=target_device_index,
+                frames_per_buffer=self._FRAMES_PER_BUFFER,
+                stream_callback=self._audio_callback,
             )
-            
-            logger.info(f"Audio stream opened: {self.sample_rate}Hz, buffer={chunk_size}")
-            
-            # Start playback thread
-            self.playback_thread = threading.Thread(target=self._playback_worker, daemon=True)
-            self.playback_thread.start()
-            
+            self.audio_stream.start_stream()
+            self.playback_thread = None  # No worker thread — callback drives everything
+
+            logger.info(f"🔊 Audio stream opened (callback mode): {self.sample_rate}Hz, "
+                        f"buffer={self._FRAMES_PER_BUFFER}, device={target_device_index}")
             logger.info("Streaming playback started")
-        
+
         except Exception as e:
             logger.error(f"Error starting streaming playback: {e}")
             self._is_playing = False
-            # Don't call cleanup here - preserve PyAudio instance
             if self.audio_stream:
                 try:
                     self.audio_stream.close()
-                except:
+                except Exception:
                     pass
                 self.audio_stream = None
             raise
     
-    def _playback_worker(self) -> None:
-        """Worker thread for streaming playback."""
-        try:
-            # Keep looping until explicitly told to stop AND queue is empty
-            while True:
-                try:
-                    # Get audio chunk from queue (timeout to check stop event)
-                    audio_chunk = self.audio_queue.get(timeout=0.1)
-                    
-                    if audio_chunk is None:
-                        # None signals end of stream
-                        self.audio_queue.task_done()
-                        break
-                    
-                    # CRITICAL: Check if stream still exists before writing
-                    if not self.audio_stream:
-                        self.audio_queue.task_done()
-                        break
-                    
-                    # Play the chunk with error handling
-                    try:
-                        # Double-check we should still be playing (stop could have been called)
-                        # But still play this chunk we already dequeued
-                        if self._stop_event.is_set() and not self.audio_stream:
-                            self.audio_queue.task_done()
-                            break
-                        
-                        # Write audio with exception handling
-                        # This can block if ALSA has issues, so wrap tightly
-                        try:
-                            self.audio_stream.write(audio_chunk, exception_on_underflow=False)
-                        except OSError as os_err:
-                            # ALSA device errors - log but try to continue
-                            logger.warning(f"OSError writing chunk (continuing): {os_err}")
-                            # Don't break - maybe next chunk will work
-                            # Set flag so we know there were issues
-                            self.audio_stream = None  # Mark stream as bad
-                            self.audio_queue.task_done()
-                            self._is_playing = False
-                            break  # Exit on first error to prevent cascade
-                        
-                        # LATENCY: Track first audio playback for TTFAS
-                        if not self.first_audio_played and self.first_token_time:
-                            first_audio_time = time.perf_counter()
-                            ttfas = first_audio_time - self.first_token_time
-                            logger.info(f"⏱️  TTFAS (Time To First Audio Spoken): {ttfas:.3f}s")
-                            self.first_audio_played = True
-                        
-                        self.audio_queue.task_done()
-                    except Exception as write_error:
-                        # PyAudio write errors can be fatal, log and continue
-                        logger.error(f"Error writing audio chunk: {write_error}")
-                        self.audio_queue.task_done()
-                        # If it's a critical error, stop playback gracefully
-                        if "Unanticipated host error" in str(write_error) or "Invalid" in str(write_error):
-                            logger.error("Critical audio error detected, stopping playback")
-                            self._is_playing = False  # Signal main thread
-                            break
-                
-                except queue.Empty:
-                    # Queue is empty - check if we should exit
-                    if not self._is_playing or self._stop_event.is_set():
-                        # Stop signaled and queue empty, safe to exit
-                        break
-                    # Otherwise keep looping (waiting for more audio)
-                    continue
-        
-        except Exception as e:
-            logger.error(f"Error in playback worker: {e}")
-        
-        finally:
-            logger.info("Playback worker stopped")
+    def _audio_callback(self, in_data, frame_count, time_info, status):
+        """
+        PortAudio callback — runs in PortAudio's internal C thread every 64ms.
+
+        Rules:
+        - Must be fast and non-blocking (no Python I/O, no locks that might block)
+        - Queue.get_nowait() is safe (very brief lock, never sleeps)
+        - Returns (audio_bytes, flag) where flag is paContinue / paComplete / paAbort
+
+        Stop semantics:
+        - immediate=True  → _stop_event is set → return paAbort  (silent, instant)
+        - graceful        → None sentinel in queue → return paComplete (drain then stop)
+        """
+        required = frame_count * 2  # mono int16: 2 bytes per sample
+
+        # Immediate abort path — check first, fastest exit
+        if self._stop_event.is_set():
+            self._is_playing = False
+            return (b'\x00' * required, pyaudio.paAbort)
+
+        # Update heartbeat: we are actively processing audio for the speaker
+        self.last_heartbeat = time.time()
+
+        output = self._callback_buf  # pick up leftover from previous call
+
+        while len(output) < required:
+            try:
+                chunk = self.audio_queue.get_nowait()
+            except queue.Empty:
+                # No data yet
+                if not self._is_playing:
+                    # Done — fill remaining with silence and complete
+                    output.extend(b'\x00' * (required - len(output)))
+                    return (bytes(output), pyaudio.paComplete)
+                # Still playing but queue is momentarily empty — output silence (underrun guard)
+                output.extend(b'\x00' * (required - len(output)))
+                self._callback_buf = bytearray()
+                return (bytes(output), pyaudio.paContinue)
+
+            if chunk is None:
+                # Graceful-stop sentinel
+                self._is_playing = False
+                output.extend(b'\x00' * (required - len(output)))
+                self._callback_buf = bytearray()
+                return (bytes(output), pyaudio.paComplete)
+
+            # TTFAS latency tracking
+            if not self.first_audio_played and self.first_token_time:
+                ttfas = time.perf_counter() - self.first_token_time
+                logger.info(f"⏱️  TTFAS (Time To First Audio Spoken): {ttfas:.3f}s")
+                self.first_audio_played = True
+
+            output.extend(chunk)
+
+        # We have at least `required` bytes — save the overflow for next call
+        original_output = bytes(output[:required])
+        self._callback_buf = output[required:]
+
+        # CRITICAL AEC FIX: Notify VAD ONLY about the EXACT samples being played NOW.
+        # This ensures the Reference Buffer in AEC is perfectly aligned with the Speakers.
+        if self.on_audio_played and original_output != b'\x00' * len(original_output):
+            try:
+                self.on_audio_played(original_output)
+            except Exception as e:
+                # Use a flag to avoid log spamming if VAD is not ready
+                pass
+
+        return (original_output, pyaudio.paContinue)
+
     
     def queue_audio(self, audio_chunk: bytes) -> None:
         """
@@ -229,71 +233,67 @@ class AudioPlayer:
         
         self.audio_queue.put(audio_chunk)
     
-    def stop_streaming(self) -> bool:
+    def stop_streaming(self, immediate: bool = False) -> bool:
         """
-        Stop streaming playback and clean up.
-        
-        Returns:
-            True if worker stopped cleanly, False if worker stuck (device may be locked)
+        Stop streaming playback.
+
+        immediate=True  → paAbort via _stop_event; audio cuts off within one callback cycle (~64ms)
+        immediate=False → None sentinel into queue; PortAudio drains naturally then paComplete
+
+        Returns True if stream stopped cleanly.
         """
-        if not self._is_playing:
+        if not self._is_playing and not self.audio_stream:
             return True
-        
-        logger.info("Stopping playback...")
-        
-        # Signal stop FIRST
+
+        logger.info(f"Stopping playback (immediate={immediate})...")
         self._is_playing = False
-        self._stop_event.set()
-        
-        # DON'T put None sentinels - let worker finish all queued chunks
-        # Worker will exit naturally after processing everything
-        
-        # Wait for playback thread to finish all queued audio
-        thread_stopped = False
-        if self.playback_thread:
-            logger.info("Waiting for playback thread to finish...")
-            self.playback_thread.join(timeout=20.0)
-            thread_stopped = not self.playback_thread.is_alive()
-            
-            if not thread_stopped:
-                logger.error("❌ Worker thread STUCK after 10s")
-                logger.error("   CANNOT cleanup - would cause memory corruption crash")
-                logger.error("   Device will remain locked until next turn attempts recovery")
-                logger.error("   This indicates ALSA/hardware issue with audio device")
-                # Don't touch PyAudio or stream - worker thread may still be using them
-                # Just mark everything as abandoned
-                self.audio_stream = None
-                # Don't set pa to None - worker might still be using it
-                self.playback_thread = None
-                self._is_playing = False
-                return False  # Indicate worker didn't stop cleanly
-            
-            self.playback_thread = None
-        
-        logger.info("✅ Worker stopped cleanly")
-        
-        # Clear the queue (should be empty if worker finished properly)
-        cleared = 0
-        while not self.audio_queue.empty():
+
+        if immediate:
+            # 1. Discard all queued audio
+            logger.info("Clearing playback queue for immediate stop")
+            while not self.audio_queue.empty():
+                try:
+                    self.audio_queue.get_nowait()
+                except queue.Empty:
+                    break
+            # 2. Signal callback to return paAbort on its next invocation
+            self._stop_event.set()
+        else:
+            # Graceful: push sentinel so callback returns paComplete after draining
+            self.audio_queue.put(None)
+
+        # Wait for PortAudio to acknowledge the stop (polls is_active())
+        # In callback mode there is NO Python blocking write() here — completely safe
+        timeout = 2.0 if immediate else 30.0
+        deadline = time.time() + timeout
+        stream = self.audio_stream  # local ref — safe to read, we're the only closer
+        if stream:
+            while stream.is_active() and time.time() < deadline:
+                time.sleep(0.02)
+
+        # Close the stream safely
+        if self.audio_stream:
             try:
-                item = self.audio_queue.get_nowait()
-                if item is not None:
-                    cleared += 1
-                self.audio_queue.task_done()
-            except queue.Empty:
-                break
-        
-        if cleared > 0:
-            logger.warning(f"⚠️ Cleared {cleared} chunks from queue after worker stopped")
-        
-        # ONLY cleanup if thread stopped cleanly
-        self.cleanup()
-        logger.info("Streaming playback stopped")
-        return True  # Worker stopped cleanly
+                if stream.is_active():
+                    stream.stop_stream()
+                # On Pi 5 / ALSA, closing the stream inside a callback-triggered
+                # path can cause assertion failures. We'll stop it here and 
+                # let start_streaming or cleanup handle the full close.
+                # self.audio_stream.close() 
+            except Exception:
+                pass
+            # Set to None so we know it needs reopening, but don't close() yet
+            # self.audio_stream = None
+
+        self.playback_thread = None
+        logger.info("✅ Streaming playback stopped")
+        return True
+
+
     
     def cleanup(self) -> None:
         """Clean up audio stream (but keep PyAudio instance for reuse)."""
-        # Clean up stream only
+        # Clean up stream
         try:
             if self.audio_stream:
                 try:
@@ -308,8 +308,7 @@ class AudioPlayer:
                 self.audio_stream = None
                 
                 # CRITICAL: Give ALSA time to fully release the device
-                # Without this, the next mic stream open fails with "Unanticipated host error"
-                time.sleep(0.3)
+                time.sleep(0.5)
         except Exception as e:
             logger.error(f"Error cleaning up audio stream: {e}")
         
@@ -320,12 +319,14 @@ class AudioPlayer:
         """Complete shutdown including PyAudio termination."""
         self.cleanup()
         
-        # Now terminate PyAudio
+        # Now terminate PyAudio only if we own it
         try:
-            if self.pa:
+            if self._owns_pa and self.pa:
                 self.pa.terminate()
                 self.pa = None
-                logger.info("PyAudio terminated")
+                logger.info("PyAudio terminated (owned by AudioPlayer)")
+            elif not self._owns_pa:
+                logger.info("♻️  Keeping shared PyAudio instance alive")
         except Exception as e:
             logger.error(f"Error terminating PyAudio: {e}")
     

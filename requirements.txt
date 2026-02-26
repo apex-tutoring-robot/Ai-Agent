@@ -1,19 +1,45 @@
+# ==============================================================================
+# SYSTEM DEPENDENCIES - INSTALL THESE FIRST (Raspberry Pi / Linux)
+# ==============================================================================
+# Before running 'pip install -r requirements.txt', install these system packages:
+#
+# sudo apt-get update
+# sudo apt-get install -y \
+#     portaudio19-dev \
+#     libasound2-dev \
+#     libportaudio2 \
+#     libportaudiocpp0 \
+#     libspeexdsp-dev
+#
+# These are required for PyAudio, webrtcvad, and openwakeword to compile.
+# ==============================================================================
+
 # Azure AI Services
 azure-cognitiveservices-speech==1.40.0
 openai>=1.12.0
 
+# NeMo Guardrails for topic control
+# nemoguardrails>=0.9.0
+
+# LangChain integration
+langchain-openai>=0.1.0
+langchain-core>=0.1.0
+
 # Wake Word Detection (open-source, no API key required)
-openwakeword>=0.6.0
-# Note: For Speex noise suppression on Raspberry Pi, run after pip install:
-# sudo apt-get install libspeexdsp-dev
+# openwakeword>=0.6.0
+# Note: For Speex noise suppression on Raspberry Pi, install the wheel after pip install:
 # pip install https://github.com/dscripka/openWakeWord/releases/download/v0.1.1/speexdsp_ns-0.1.2-cp313-cp313-linux_aarch64.whl
 
 # Audio Processing
+# IMPORTANT: Requires portaudio19-dev and libasound2-dev to be installed via apt-get (see top of file)
 pyaudio==0.2.14
-webrtcvad==2.0.10
+webrtcvad-wheels>=2.0.11  # Drop-in replacement for webrtcvad, Python 3.13 compatible
 
 # Configuration & Utilities
 python-dotenv==1.0.1
 
 # Async Support
 aiofiles==24.1.0
+
+# Noise Cancellation (Requires libspeexdsp-dev)
+# speexdsp

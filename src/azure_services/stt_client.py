@@ -10,6 +10,7 @@ from typing import Optional, Iterator, Generator
 import azure.cognitiveservices.speech as speechsdk
 from dotenv import load_dotenv
 import threading
+from queue import Queue
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -53,28 +54,74 @@ class SpeechToTextClient:
     def warm_up(self):
         """
         Warm-start the Azure STT service to reduce first-call latency.
-        Performs a dummy recognition to pre-load models and establish connections.
+        Performs a dummy recognition with in-memory silence to pre-load models
+        and establish connections, avoiding file I/O.
         """
         try:
-            logger.info("Warming up Azure STT service...")
+            logger.info("Warming up Azure STT service with in-memory silence...")
+
+            # Define audio format for silence
+            sample_rate = 16000
+            duration = 0.5  # 0.5 seconds of silence
+            num_samples = int(sample_rate * duration)
             
-            # Create a dummy audio config with a silence file
-            # You'll need a small silence.wav file (even 0.5 seconds is enough)
-            audio_config = speechsdk.audio.AudioConfig(filename="silence.wav")
+            # Generate silent audio data (PCM 16-bit)
+            silence_data = b'\x00' * (num_samples * 2)  # 2 bytes per 16-bit sample
             
+            # Create an in-memory audio stream
+            audio_format = speechsdk.audio.AudioStreamFormat(
+                samples_per_second=sample_rate,
+                bits_per_sample=16,
+                channels=1
+            )
+            push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
+            push_stream.write(silence_data)
+            push_stream.close()
+            
+            # Create audio config from the in-memory stream
+            audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
+
             # Create a temporary recognizer
             recognizer = speechsdk.SpeechRecognizer(
                 speech_config=self.speech_config,
                 audio_config=audio_config
             )
-            
+
             # Trigger recognition (this preloads everything)
             result = recognizer.recognize_once_async().get()
             
-            logger.info("Azure STT warm-up complete")
+            logger.info(f"Azure STT warm-up complete. Result: {result.reason}")
+
         except Exception as e:
             logger.warning(f"STT warm-up failed (non-critical): {e}")
-    
+
+    def _recognize_once_from_config(self, audio_config: speechsdk.audio.AudioConfig) -> str:
+        """
+        Private helper to perform a single recognition from a given audio config.
+        """
+        speech_recognizer = speechsdk.SpeechRecognizer(
+            speech_config=self.speech_config,
+            audio_config=audio_config
+        )
+        
+        logger.info("Performing single-shot recognition...")
+        result = speech_recognizer.recognize_once()
+        
+        if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+            logger.info(f"Recognized: {result.text}")
+            return result.text
+        elif result.reason == speechsdk.ResultReason.NoMatch:
+            logger.warning("No speech could be recognized")
+            return ""
+        elif result.reason == speechsdk.ResultReason.Canceled:
+            cancellation = result.cancellation_details
+            logger.error(f"Speech recognition canceled: {cancellation.reason}")
+            if cancellation.reason == speechsdk.CancellationReason.Error:
+                logger.error(f"Error details: {cancellation.error_details}")
+            return ""
+        
+        return ""
+
     def recognize_from_audio_data(self, audio_data: bytes, sample_rate: int = 16000) -> str:
         """
         Recognize speech from raw audio data.
@@ -87,54 +134,25 @@ class SpeechToTextClient:
             Transcribed text
         """
         try:
-            # Create audio stream from bytes
             audio_format = speechsdk.audio.AudioStreamFormat(
                 samples_per_second=sample_rate,
                 bits_per_sample=16,
                 channels=1
             )
-            
-            # Create push stream
             push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
             push_stream.write(audio_data)
             push_stream.close()
             
-            # Create audio config
             audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
-            
-            # Create recognizer
-            speech_recognizer = speechsdk.SpeechRecognizer(
-                speech_config=self.speech_config,
-                audio_config=audio_config
-            )
-            
-            # Perform recognition
-            logger.info("Recognizing speech...")
-            result = speech_recognizer.recognize_once()
-            
-            # Check result
-            if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                logger.info(f"Recognized: {result.text}")
-                return result.text
-            elif result.reason == speechsdk.ResultReason.NoMatch:
-                logger.warning("No speech could be recognized")
-                return ""
-            elif result.reason == speechsdk.ResultReason.Canceled:
-                cancellation = result.cancellation_details
-                logger.error(f"Speech recognition canceled: {cancellation.reason}")
-                if cancellation.reason == speechsdk.CancellationReason.Error:
-                    logger.error(f"Error details: {cancellation.error_details}")
-                return ""
-            
-            return ""
+            return self._recognize_once_from_config(audio_config)
         
         except Exception as e:
-            logger.error(f"Error in speech recognition: {e}")
+            logger.error(f"Error in speech recognition from data: {e}")
             raise
     
     def recognize_from_microphone(self, device_id: Optional[str] = None) -> str:
         """
-        Recognize speech directly from microphone (alternative method).
+        Recognize speech directly from microphone.
         
         Args:
             device_id: Microphone device ID
@@ -143,170 +161,117 @@ class SpeechToTextClient:
             Transcribed text
         """
         try:
-            # Create audio config from microphone
             if device_id:
                 audio_config = speechsdk.audio.AudioConfig(device_name=device_id)
             else:
                 audio_config = speechsdk.audio.AudioConfig(use_default_microphone=True)
             
-            # Create recognizer
-            speech_recognizer = speechsdk.SpeechRecognizer(
-                speech_config=self.speech_config,
-                audio_config=audio_config
-            )
-            
-            # recognize_once() is a blocking call, it waits for the user to finish speaking
-            # and then Azure's internal VAD (Voice Activity Detection) will trigger the end of speech
-            logger.info("Listening from microphone...")
-            result = speech_recognizer.recognize_once()
-            
-            # Check result
-            if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                logger.info(f"Recognized: {result.text}")
-                return result.text
-            elif result.reason == speechsdk.ResultReason.NoMatch:
-                logger.warning("No speech could be recognized")
-                return ""
-            elif result.reason == speechsdk.ResultReason.Canceled:
-                cancellation = result.cancellation_details
-                logger.error(f"Speech recognition canceled: {cancellation.reason}")
-                return ""
-            
-            return ""
+            return self._recognize_once_from_config(audio_config)
         
         except Exception as e:
             logger.error(f"Error in microphone recognition: {e}")
             raise
-    
-    def recognize_streaming(self, audio_stream: Iterator[bytes], sample_rate: int = 16000) -> Generator[str, None, None]:
+
+    def recognize_streaming(self, audio_stream: Iterator[bytes], sample_rate: int = 16000) -> Generator[tuple[str, float], None, None]:
         """
         Recognize speech from streaming audio chunks in real-time.
-        Yields partial and final recognition results as they arrive.
-        
+        This method is a generator, yielding final recognition results as they arrive.
+
         Args:
-            audio_stream: Iterator yielding audio chunks (bytes)
-            sample_rate: Audio sample rate
-            
+            audio_stream: An iterator that yields audio chunks (bytes).
+            sample_rate: The sample rate of the audio.
+
         Yields:
-            Transcribed text (final results only)
+            A tuple of (transcribed_text, first_recognition_time).
         """
-        try:
-            # Create audio stream format
-            audio_format = speechsdk.audio.AudioStreamFormat(
-                samples_per_second=sample_rate,
-                bits_per_sample=16,
-                channels=1
-            )
-            
-            # Create push stream for feeding audio chunks
-            push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
-            
-            # Create audio config from push stream
-            audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
-            
-            # Create recognizer
-            speech_recognizer = speechsdk.SpeechRecognizer(
-                speech_config=self.speech_config,
-                audio_config=audio_config
-            )
-            
-            # Store results - collect ALL recognition events
-            recognized_texts = []
-            stream_ended = threading.Event()
-            recognition_error = None
-            
-            # Event handlers
-            first_recognition_time = None
-            recognition_event_count = 0
-            
-            def recognized_handler(evt):
-                """Handle final recognition results."""
-                nonlocal first_recognition_time, recognition_event_count
-                recognition_event_count += 1
-                logger.info(f"🎯 Recognition event #{recognition_event_count}: reason={evt.result.reason}")
-                
-                if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                    # LATENCY: Track first text recognition for STT latency
-                    if first_recognition_time is None:
-                        first_recognition_time = time.perf_counter()
-                    
-                    # Log what was actually recognized
-                    logger.info(f"✓ Recognized: '{evt.result.text}' (length: {len(evt.result.text)})")
-                    
-                    if evt.result.text:  # Only add non-empty results
-                        recognized_texts.append(evt.result.text)
-                    else:
-                        logger.warning("⚠️  RecognizedSpeech event but text is EMPTY!")
-                elif evt.result.reason == speechsdk.ResultReason.NoMatch:
-                    logger.warning(f"❌ No speech matched - NoMatchReason: {evt.result.no_match_details}")
-            
-            def recognizing_handler(evt):
-                """Handle interim recognition results."""
-                logger.debug(f"🔄 Recognizing (interim): {evt.result.text}")
-            
-            def canceled_handler(evt):
-                """Handle cancellation."""
-                nonlocal recognition_error
-                logger.error(f"Recognition canceled: {evt.reason}")
-                if evt.reason == speechsdk.CancellationReason.Error:
-                    logger.error(f"Error details: {evt.error_details}")
-                    recognition_error = evt.error_details
-                stream_ended.set()
-            
-            def session_stopped_handler(evt):
-                """Handle session stopped."""
-                logger.info("🏁 Recognition session stopped event fired")
-                logger.info("🔔 Setting stream_ended event")
-                stream_ended.set()
-            
-            # Subscribe to events
-            speech_recognizer.recognized.connect(recognized_handler)
-            speech_recognizer.recognizing.connect(recognizing_handler)  # Track interim results
-            speech_recognizer.canceled.connect(canceled_handler)
-            speech_recognizer.session_stopped.connect(session_stopped_handler)
-            
-            # Start continuous recognition
-            logger.info("Starting streaming recognition...")
-            speech_recognizer.start_continuous_recognition()
-            
-            chunk_count = 0
+        result_queue = Queue()
+        recognition_error = None
+        
+        audio_format = speechsdk.audio.AudioStreamFormat(
+            samples_per_second=sample_rate, bits_per_sample=16, channels=1
+        )
+        push_stream = speechsdk.audio.PushAudioInputStream(stream_format=audio_format)
+        audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
+
+        speech_recognizer = speechsdk.SpeechRecognizer(
+            speech_config=self.speech_config, audio_config=audio_config
+        )
+
+        first_recognition_time = None
+
+        def recognized_handler(evt):
+            nonlocal first_recognition_time
+            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech and evt.result.text:
+                if first_recognition_time is None:
+                    first_recognition_time = time.perf_counter()
+                logger.info(f"✓ Recognized: '{evt.result.text}'")
+                result_queue.put((evt.result.text, True, first_recognition_time))
+            elif evt.result.reason == speechsdk.ResultReason.NoMatch:
+                logger.warning(f"❌ No speech matched: {evt.result.no_match_details}")
+
+        def canceled_handler(evt):
+            nonlocal recognition_error
+            logger.error(f"Recognition canceled: {evt.reason}")
+            if evt.reason == speechsdk.CancellationReason.Error:
+                logger.error(f"Error details: {evt.error_details}")
+                recognition_error = Exception(evt.error_details)
+            result_queue.put(None)
+
+        def session_stopped_handler(evt):
+            logger.info("🏁 Recognition session stopped.")
+            result_queue.put(None)
+
+        def recognizing_handler(evt):
+            nonlocal first_recognition_time
+            if evt.result.reason == speechsdk.ResultReason.RecognizingSpeech and evt.result.text:
+                if first_recognition_time is None:
+                    first_recognition_time = time.perf_counter()
+                logger.info(f"✓ Recognizing: '{evt.result.text}'")
+                result_queue.put((evt.result.text, False, first_recognition_time))
+            elif evt.result.reason == speechsdk.ResultReason.NoMatch:
+                logger.warning(f"❌ No speech matched: {evt.result.no_match_details}")
+
+
+        speech_recognizer.recognized.connect(recognized_handler)
+        # speech_recognizer.recognizing.connect(lambda evt: logger.debug(f"🔄 Recognizing: {evt.result.text}"))
+        speech_recognizer.recognizing.connect(recognizing_handler)
+        speech_recognizer.canceled.connect(canceled_handler)
+        speech_recognizer.session_stopped.connect(session_stopped_handler)
+        speech_recognizer.session_started.connect(lambda evt: logger.info("🎤 Recognition session started."))
+
+        speech_recognizer.start_continuous_recognition()
+
+        def feed_audio():
+            """Feeds audio chunks from the iterator to the push stream in a separate thread."""
             try:
-                # Feed audio chunks to the push stream
-                logger.info("📡 Feeding audio chunks to Azure STT...")
-                for audio_chunk in audio_stream:
-                    if audio_chunk is None:
-                        # End of stream signal
-                        logger.info(f"🛑 End of audio stream detected (received {chunk_count} chunks total)")
-                        break
-                    push_stream.write(audio_chunk)
-                    chunk_count += 1
-                logger.info(f"✅ Finished feeding {chunk_count} chunks, closing push stream...")
-                # Close the push stream to signal end of audio
-                push_stream.close()
-                logger.info("✅ Push stream closed, waiting for recognition to complete...")
-                
-                # Wait for recognition session to complete (with timeout)
-                if stream_ended.wait(timeout=10.0):
-                    logger.info(f"✅ Recognition session ended. Collected {len(recognized_texts)} text segments")
-                    if recognition_error:
-                        raise Exception(f"Recognition error: {recognition_error}")
-                else:
-                    logger.warning(f"⚠️  Recognition session didn't end within timeout, stopping manually. Collected {len(recognized_texts)} segments so far")
-                
-                # Yield all accumulated text as a single result with timing
-                combined_text = " ".join(recognized_texts)
-                logger.info(f"📝 Final combined text: '{combined_text}' (from {len(recognized_texts)} segments)")
-                # Return tuple: (text, first_recognition_time)
-                yield (combined_text, first_recognition_time)
-                    
+                for chunk in audio_stream:
+                    if chunk:
+                        push_stream.write(chunk)
+                logger.info("✅ Finished feeding audio stream, closing push stream.")
+            except Exception as e:
+                logger.error(f"Error feeding audio stream: {e}")
             finally:
-                # Stop recognition
-                logger.info("🛑 Stopping continuous recognition...")
-                speech_recognizer.stop_continuous_recognition()
-                
-        except Exception as e:
-            logger.error(f"Error in streaming recognition: {e}")
-            raise
+                push_stream.close()
+        
+        audio_feeder_thread = threading.Thread(target=feed_audio)
+        audio_feeder_thread.start()
+
+        try:
+            while True:
+                result = result_queue.get()
+                if result is None:
+                    break
+                # result is (text, is_final, timestamp)
+                yield result
+            
+            if recognition_error:
+                raise recognition_error
+
+        finally:
+            logger.info("🛑 Stopping continuous recognition...")
+            speech_recognizer.stop_continuous_recognition()
+            audio_feeder_thread.join() # Ensure feeder thread is finished
+            logger.info("✓ Streaming recognition finished.")
 
 
 if __name__ == "__main__":
@@ -315,18 +280,34 @@ if __name__ == "__main__":
     print("Speak into your microphone when prompted.\n")
     
     try:
+        # This import will only work if you run this script from the project root
         from src.audio.continuous_vad import ContinuousVADCapture
+        
         client = SpeechToTextClient()
         
-        input("Press Enter to start recording from microphone...")
-        continuous_vad = ContinuousVADCapture()
-        audio_stream = continuous_vad.stream_audio_chunks()
-        text = client.recognize_streaming(audio_stream)
+        input("Press Enter to start recording from microphone for 10 seconds...")
         
-        if text:
-            print(f"\nTranscribed text: {text}")
+        continuous_vad = ContinuousVADCapture(
+            silence_threshold_ms=500,
+            recording_duration_ms=10000 # Record for 10 seconds
+        )
+        audio_stream = continuous_vad.stream_audio_chunks()
+        
+        print("\n--- Transcribed Text ---")
+        full_transcript = []
+        for result in client.recognize_streaming(audio_stream):
+            text, timestamp = result
+            print(f"> {text} (at {timestamp})")
+            full_transcript.append(text)
+        print("------------------------\n")
+
+        if full_transcript:
+            print(f"Final Transcript: {' '.join(full_transcript)}")
         else:
-            print("\nNo speech recognized")
+            print("No speech was recognized.")
     
+    except ImportError:
+        print("Could not import ContinuousVADCapture. Please run this script from the project root directory.")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"An error occurred: {e}")
+
