@@ -103,7 +103,7 @@ def test_microphone(device_index=None, duration=5, sample_rate=16000):
         stream.close()
         
         # Save to file
-        output_file = "test_recording.wav"
+        output_file = "./tests/test_recording.wav"
         print(f"\n💾 Saving recording to {output_file}...")
         
         wf = wave.open(output_file, 'wb')
