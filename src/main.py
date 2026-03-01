@@ -25,7 +25,7 @@ class JarvisBot:
     def __init__(self, face):
         self.face = face
         self.wake = WakeWordDetector()
-        self.audio = AudioPlayer()
+        self.audio = AudioPlayer(on_level=self.face.push_mouth_level)
         self.stt = SpeechToTextClient()
         self.llm = LLMClient()
         self.tts = TextToSpeechClient()
@@ -67,12 +67,6 @@ class JarvisBot:
                 self.llm.generate_response_stream(self.conv.get_messages())
             ):
                 self.audio.queue_audio(audio)
-                self.face.update_mouth(audio)
-
-                # ---- LIP SYNC ----
-                pcm = np.frombuffer(audio, dtype=np.int16).astype(np.float32)
-                rms = np.sqrt(np.mean(pcm ** 2)) / 32768.0
-                self.face.update_mouth(rms)
 
             self.audio.stop_streaming()
             self.face.stop_talking()
