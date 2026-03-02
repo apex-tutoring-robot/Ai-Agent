@@ -1,56 +1,48 @@
-"""
-Jarvis - Main Orchestrator
-Coordinates all components for the LLM-powered tutoring robot.
-"""
-
 import os
-import sys
-import logging
-import time
-import asyncio
+# Allow the OS to use its default display and QT backend, rather than hardcoding.
+
 import threading
+import time
 import queue
 from queue import Queue
 from typing import Optional
 from difflib import SequenceMatcher
 from dotenv import load_dotenv
+from visuals.faces.face_animator import FaceAnimator
+import numpy as np
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
-# Import components
 from audio.wake_word import WakeWordDetector
 from audio.continuous_vad import ContinuousVADCapture
 from audio.playback import AudioPlayer
 from azure_services.stt_client import SpeechToTextClient
 from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
-from privacy.privacy_manager import PrivacyManager
 from conversation.state_manager import ConversationStateManager
-import pyaudio
+from privacy.privacy_manager import PrivacyManager
+import logging
 
-# Load environment
-load_dotenv("/home/pi/Desktop/Ai-Agent 2.0/Jarvis/config/.env")
-logging.basicConfig(
-    level=os.getenv('LOG_LEVEL', 'INFO'),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class JarvisBot:
     """Main orchestrator for Jarvis tutoring robot."""
     
-    def __init__(self):
+    def __init__(self, face: Optional['FaceAnimator'] = None):
         """Initialize Jarvis with all components."""
         logger.info("Initializing Jarvis...")
+        self.face = face
         
         # Initialize shared PyAudio instance
+        import pyaudio
         self.pa = pyaudio.PyAudio()
         
         # Initialize components with shared PyAudio
         self.wake_word_detector = WakeWordDetector(pa=self.pa)
-        self.audio_player = AudioPlayer(pa=self.pa)
+        self.audio_player = AudioPlayer(
+            pa=self.pa,
+            on_level=self.face.push_mouth_level if self.face else None
+        )
         self.stt_client = SpeechToTextClient()
         self.llm_client = LLMClient()
         self.tts_client = TextToSpeechClient()
@@ -209,6 +201,8 @@ class JarvisBot:
                     # Start audio playback (callback mode)
                     # AEC: Provide reference audio back to VAD
                     self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
+                    if self.face:
+                        self.face.start_talking()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
                     
                     # ── ECHO GUARD: Signal that bot is now speaking ──
@@ -267,6 +261,8 @@ class JarvisBot:
                 except Exception as turn_err:
                     logger.error(f"Error in speaker turn: {turn_err}")
                 finally:
+                    if self.face:
+                        self.face.start_idle()
                     # ── ECHO GUARD: Signal playback ended + start cooldown ──
                     self._bot_is_speaking = False
                     self._playback_ended_time = time.time()
@@ -522,6 +518,8 @@ class JarvisBot:
         """
         try:
             # Step 1: Stream audio chunks to STT
+            if self.face:
+                self.face.start_thinking()
             logger.info("☁️  Starting streaming speech recognition...")
             stt_start = time.perf_counter()
             
@@ -577,6 +575,8 @@ class JarvisBot:
                 # Start audio player BEFORE first audio arrives for lower latency
                 # CRITICAL: Use dedicated PulseAudio output stream
                 self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
+                if self.face:
+                    self.face.start_talking()
                 self.audio_player.start_streaming(output_device_index=output_device_index)
                 
                 # Full Duplex: Start monitoring for interruptions while bot speaks
@@ -662,6 +662,8 @@ class JarvisBot:
                 # This ensures we don't timeout while bot is generating/speaking
                 continuous_vad.reset_idle_timer()
                 
+                if self.face:
+                    self.face.start_idle()
                 return True
                 
             except Exception as e:
@@ -695,6 +697,8 @@ class JarvisBot:
     
     def run(self):
         """Start Jarvis and run the main loop."""
+        if self.face:
+            self.face.start_idle()
         logger.info("\n" + "🤖 "*20)
         logger.info("Jarvis TUTORING ROBOT STARTED")
         logger.info("🤖 "*20 + "\n")
@@ -748,18 +752,40 @@ class JarvisBot:
             
         logger.info("Jarvis shutdown complete. Goodbye! 👋\n")
 
-
 def main():
-    """Main entry point."""
-    try:
-        Jarvis = JarvisBot()
-        Jarvis.run()
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        return 1
+    import os
     
-    return 0
-
+    # Check if a display is available or if we can force the physical monitor
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    
+    if not has_display:
+        logger.info("No display detected in environment. Attempting to route to physical monitor (:0)...")
+        os.environ["DISPLAY"] = ":0"
+        if not os.environ.get("XAUTHORITY"):
+            # Provide authentication to access the physical X11 display
+            xauth_path = os.path.expanduser("~/.Xauthority")
+            if os.path.exists(xauth_path):
+                os.environ["XAUTHORITY"] = xauth_path
+    
+    # Secondary check: If DISPLAY is still just :0, let's try to ensure it works before trusting cv2
+    try:
+        # Initializing FaceAnimator opens cv2 windows. If X11 is inaccessible, OpenCV Qt backend
+        # will cause a hard C++ abort() which cannot be caught by Python try/except.
+        # We rely on the environment variables being correctly routed now.
+        face = FaceAnimator("Ai-Agent/src/visuals/faces")
+        jarvis = JarvisBot(face)
+        
+        worker = threading.Thread(target=jarvis.run, daemon=True)
+        worker.start()
+        
+        # 🔥 THIS MUST BE MAIN THREAD for cv2 GUI events
+        face.render_forever()
+        
+    except Exception as e:
+        logger.warning(f"Failed to start GUI: {e}")
+        logger.warning("Running headlessly.")
+        jarvis = JarvisBot()
+        jarvis.run()
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

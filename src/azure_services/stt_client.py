@@ -49,7 +49,7 @@ class SpeechToTextClient:
         )
         
         # Warm-start the STT service
-        self.warm_up()
+        logger.info("Skipping STT warm-up on Raspberry Pi")
     
     def warm_up(self):
         """

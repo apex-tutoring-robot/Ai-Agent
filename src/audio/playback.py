@@ -1,8 +1,6 @@
 """
-Audio playback module for Raspberry Pi.
-Supports streaming audio playback with USB audio devices.
-Audio playback the process of reproducing previously recorded sound, converting digital data
-into audible sound waves that come out of speakers
+Audio playback module for Raspberry Pi using sounddevice.
+PipeWire / PulseAudio compatible.
 """
 
 import os
@@ -11,7 +9,9 @@ import time
 import queue
 import threading
 from typing import Optional
-import pyaudio
+
+import sounddevice as sd
+import numpy as np
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,8 +27,9 @@ class AudioPlayer:
         sample_rate: int = 16000,  # Azure TTS outputs 16kHz audio
         channels: int = None,
         output_device_index: Optional[int] = None,
-        pa: Optional[pyaudio.PyAudio] = None,
-        on_audio_played: Optional[callable] = None
+        pa: Optional['pyaudio.PyAudio'] = None,
+        on_audio_played: Optional[callable] = None,
+        on_level: Optional[callable] = None
     ):
         """
         Initialize audio player.
@@ -37,10 +38,14 @@ class AudioPlayer:
             sample_rate: Audio sample rate (default 16000 for Azure TTS)
             channels: Number of audio channels
             output_device_index: Index of audio output device
+            pa: Optional shared PyAudio instance
+            on_audio_played: Optional callback for AEC reference audio
+            on_level: Optional callback for lip sync RMS level (0.0 to 1.0)
         """
         self.sample_rate = sample_rate  # Use 16000 to match Azure TTS
         self.channels = channels or int(os.getenv('CHANNELS', 1))
         self.output_device_index = output_device_index or int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 1))
+        self.on_level = on_level
         
         logger.info(f"AudioPlayer initialized: {self.sample_rate}Hz, {self.channels} channel(s), device {self.output_device_index}")
         
@@ -59,14 +64,10 @@ class AudioPlayer:
         self.first_token_time = None
         self.first_audio_played = False
         self.last_heartbeat = 0.0  # Real-time timestamp of local playback
+
     def play_audio(self, audio_data: bytes) -> None:
-        """
-        Play audio data (blocking).
-        
-        Args:
-            audio_data: Raw audio bytes to play
-        """
         try:
+            import pyaudio
             if not self.pa:
                 self.pa = pyaudio.PyAudio()
             
@@ -108,6 +109,7 @@ class AudioPlayer:
         self._callback_buf = bytearray()  # leftover bytes between callback calls
 
         try:
+            import pyaudio
             if not self.pa:
                 self.pa = pyaudio.PyAudio()
                 self._owns_pa = True
@@ -164,6 +166,7 @@ class AudioPlayer:
         - immediate=True  → _stop_event is set → return paAbort  (silent, instant)
         - graceful        → None sentinel in queue → return paComplete (drain then stop)
         """
+        import pyaudio
         required = frame_count * 2  # mono int16: 2 bytes per sample
 
         # Immediate abort path — check first, fastest exit
@@ -217,20 +220,28 @@ class AudioPlayer:
             except Exception as e:
                 # Use a flag to avoid log spamming if VAD is not ready
                 pass
+                
+        # --- LIP SYNC RMS ---
+        if self.on_level:
+            if original_output == b'\x00' * len(original_output):
+                self.on_level(0.0)
+            else:
+                try:
+                    import numpy as np
+                    a = np.frombuffer(original_output, dtype=np.int16).astype(np.float32)
+                    rms = np.sqrt(np.mean(a * a)) / 32768.0
+                    if rms < 0.02:
+                        rms = 0.0
+                    level = min(rms * 8.0, 1.0)
+                    self.on_level(level)
+                except Exception as e:
+                    logger.error(f"Error calculating RMS: {e}")
 
         return (original_output, pyaudio.paContinue)
 
-    
     def queue_audio(self, audio_chunk: bytes) -> None:
-        """
-        Add audio chunk to playback queue.
-        
-        Args:
-            audio_chunk: Audio data to queue for playback
-        """
         if not self._is_playing:
-            raise RuntimeError("Streaming not started. Call start_streaming() first.")
-        
+            raise RuntimeError("Streaming not started.")
         self.audio_queue.put(audio_chunk)
     
     def stop_streaming(self, immediate: bool = False) -> bool:
@@ -286,11 +297,11 @@ class AudioPlayer:
             # self.audio_stream = None
 
         self.playback_thread = None
+        if self.on_level is not None:
+            self.on_level(0.0)
         logger.info("✅ Streaming playback stopped")
         return True
 
-
-    
     def cleanup(self) -> None:
         """Clean up audio stream (but keep PyAudio instance for reuse)."""
         # Clean up stream
@@ -316,7 +327,6 @@ class AudioPlayer:
         # Only terminate in __exit__ or explicit shutdown
     
     def shutdown(self) -> None:
-        """Complete shutdown including PyAudio termination."""
         self.cleanup()
         
         # Now terminate PyAudio only if we own it
@@ -331,56 +341,8 @@ class AudioPlayer:
             logger.error(f"Error terminating PyAudio: {e}")
     
     def __enter__(self):
-        """Context manager entry."""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
         self.stop_streaming()
-        self.shutdown()  # Complete shutdown including PyAudio
-
-
-def list_audio_devices():
-    """Helper function to list available audio devices."""
-    pa = pyaudio.PyAudio()
-    print("\nAvailable Audio Devices:")
-    print("-" * 60)
-    for i in range(pa.get_device_count()):
-        info = pa.get_device_info_by_index(i)
-        print(f"{i}: {info['name']}")
-        print(f"   Max Input Channels: {info['maxInputChannels']}")
-        print(f"   Max Output Channels: {info['maxOutputChannels']}")
-        print(f"   Default Sample Rate: {info['defaultSampleRate']}")
-        print()
-    pa.terminate()
-
-
-if __name__ == "__main__":
-    import struct
-    import math
-    
-    # List available devices
-    list_audio_devices()
-    
-    # Test audio playback with a simple tone
-    print("\nTesting audio playback with a 440 Hz tone...")
-    
-    player = AudioPlayer()
-    
-    # Generate a 1-second 440 Hz sine wave
-    duration = 1.0
-    sample_rate = player.sample_rate
-    frequency = 440.0
-    
-    samples = []
-    for i in range(int(sample_rate * duration)):
-        value = int(32767 * 0.3 * math.sin(2 * math.pi * frequency * i / sample_rate))
-        samples.append(struct.pack('h', value))
-    
-    audio_data = b''.join(samples)
-    
-    print("Playing tone...")
-    player.play_audio(audio_data)
-    print("Playback complete!")
-    
-    player.cleanup()
+        self.shutdown()
