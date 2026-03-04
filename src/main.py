@@ -19,6 +19,7 @@ from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
 from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
+from vision.camera import Camera
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -47,6 +48,7 @@ class JarvisBot:
         self.llm_client = LLMClient()
         self.tts_client = TextToSpeechClient()
         self.privacy_manager = PrivacyManager()
+        self.camera = Camera()
         self.conversation_manager = ConversationStateManager(
             max_history=int(os.getenv('MAX_CONVERSATION_HISTORY', 20))
         )
@@ -104,6 +106,17 @@ class JarvisBot:
             return 0.0
         overlap = words_a & words_b
         return len(overlap) / min(len(words_a), len(words_b))
+
+    _CAMERA_TRIGGERS = {
+        "scan", "photo", "picture", "camera",
+        "take a photo", "take a picture", "scan my homework",
+        "look at this", "check this", "show you",
+    }
+
+    @staticmethod
+    def _is_camera_trigger(text: str) -> bool:
+        t = text.lower()
+        return any(kw in t for kw in JarvisBot._CAMERA_TRIGGERS)
 
     def _listener_loop(self, continuous_vad, request_queue):
         """Producer: Always listening, detecting interruptions in real-time.
@@ -192,25 +205,54 @@ class JarvisBot:
                     logger.info(f"📝 Processing Turn: {user_text}")
                     # Anonymize and prepare history
                     anonymized_text = self.privacy_manager.anonymize(user_text)
-                    self.conversation_manager.add_user_message(anonymized_text)
-                    
+
+                    # ── Camera Vision ──────────────────────────────────────────
+                    # If the user's phrase is a camera trigger, capture an image
+                    # and build a one-shot multimodal message. The image is NOT
+                    # stored in conversation history to keep token usage efficient.
+                    if self._is_camera_trigger(user_text):
+                        if self.face:
+                            self.face.start_scanning()
+                        try:
+                            image_b64 = self.camera.capture_base64()
+                            vision_turn = {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": anonymized_text},
+                                    {"type": "image_url", "image_url": {
+                                        "url": f"data:image/jpeg;base64,{image_b64}"
+                                    }}
+                                ]
+                            }
+                            # Store only the text part in history
+                            self.conversation_manager.add_user_message(anonymized_text)
+                            messages = self.conversation_manager.get_messages()[:-1] + [vision_turn]
+                            logger.info("📷 Vision turn: image attached to LLM message")
+                        except Exception as cam_err:
+                            logger.error(f"📷 Camera failed: {cam_err} — falling back to text-only")
+                            self.conversation_manager.add_user_message(anonymized_text)
+                            messages = self.conversation_manager.get_messages()
+                    else:
+                        self.conversation_manager.add_user_message(anonymized_text)
+                        messages = self.conversation_manager.get_messages()
+                    # ──────────────────────────────────────────────────────────
+
                     # LLM Generation
-                    messages = self.conversation_manager.get_messages()
                     llm_start = time.perf_counter()
-                    
+
                     # Start audio playback (callback mode)
                     # AEC: Provide reference audio back to VAD
                     self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
                     if self.face:
                         self.face.start_talking()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
-                    
+
                     # ── ECHO GUARD: Signal that bot is now speaking ──
                     self._bot_is_speaking = True
                     continuous_vad.set_playback_state(True)
-                    
+
                     response_chunks = []
-                    
+
                     # Helper to collect text while streaming
                     def text_collector(stream):
                         for chunk in stream:
@@ -218,7 +260,7 @@ class JarvisBot:
                                 break
                             response_chunks.append(chunk)
                             yield chunk
-                            
+
                     # Pipeline: LLM -> TTS -> AudioPlayer
                     llm_stream = self.llm_client.generate_response_stream(messages)
                     collected_stream = text_collector(llm_stream)

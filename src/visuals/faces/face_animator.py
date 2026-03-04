@@ -56,6 +56,11 @@ class FaceAnimator:
         self.emotion = "thinking"
         self.is_talking = False
 
+    def start_scanning(self):
+        """Visual feedback while the camera captures an image."""
+        self.emotion = "thinking"
+        self.is_talking = False
+
     def start_talking(self):
         self.is_talking = True
 

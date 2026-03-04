@@ -72,7 +72,7 @@ class LLMClient:
     
     def generate_response_stream(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict],
         temperature: float = 0.7,
         max_tokens: int = 500
     ) -> Iterator[str]:
