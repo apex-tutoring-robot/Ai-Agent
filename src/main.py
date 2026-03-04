@@ -307,7 +307,15 @@ class JarvisBot:
             
             # Stop wake word detection to free microphone
             self.wake_word_detector.stop()
-            
+
+            # Flush any stale items (e.g. a leftover None sentinel from the previous
+            # conversation's idle-timeout cleanup) so the new speaker thread starts clean.
+            while not self._request_queue.empty():
+                try:
+                    self._request_queue.get_nowait()
+                except queue.Empty:
+                    break
+
             # Enter continuous conversation mode
             idle_timeout = int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
             
@@ -706,17 +714,26 @@ class JarvisBot:
         logger.info("Press Ctrl+C to stop\n")
         
         self._is_running = True
-        
+
         try:
-            # Start wake word detection (blocking call)
+            # First blocking wake word listen. When a wake word fires, _handle_wake_word()
+            # is called inline, stops the detector, runs the conversation, then calls
+            # _restart_wake_word() which takes over in a daemon thread. After that,
+            # start() returns here — but we must NOT call stop() at that point because
+            # the daemon thread and all shared resources (self.pa, TTS) are still needed.
             self.wake_word_detector.start(self._handle_wake_word)
-        
+
+            # Keep run() alive while wake-word/conversation cycles continue in daemon threads.
+            # Only exit when _is_running is cleared by stop() or a signal arrives.
+            while self._is_running:
+                time.sleep(0.5)
+
         except KeyboardInterrupt:
             logger.info("\nShutdown requested by user")
-        
+
         except Exception as e:
             logger.error(f"Error in main loop: {e}")
-        
+
         finally:
             self.stop()
     
@@ -754,37 +771,88 @@ class JarvisBot:
 
 def main():
     import os
-    
-    # Check if a display is available or if we can force the physical monitor
-    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-    
-    if not has_display:
-        logger.info("No display detected in environment. Attempting to route to physical monitor (:0)...")
-        os.environ["DISPLAY"] = ":0"
+
+    # ── Display configuration ──────────────────────────────────────────────────
+    # FACE_ENABLED=true          → show face animation
+    # FACE_ENABLED=false         → headless, no GUI (default when DISPLAY not set)
+    #
+    # DISPLAY_BACKEND=physical   → HDMI monitor          (DISPLAY=:0)
+    # DISPLAY_BACKEND=vnc        → TigerVNC session      (DISPLAY=:1)
+    # DISPLAY_BACKEND=auto       → pick first available X11 socket (:1 then :0)
+    #
+    # You can also skip DISPLAY_BACKEND and set DISPLAY directly, e.g. DISPLAY=:0
+    # ──────────────────────────────────────────────────────────────────────────
+    face_env = os.getenv("FACE_ENABLED", "").strip().lower()
+    if face_env in ("true", "1", "yes"):
+        face_enabled = True
+    elif face_env in ("false", "0", "no"):
+        face_enabled = False
+    else:
+        # Auto: enable face only when DISPLAY is already set in the environment
+        face_enabled = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+    if face_enabled:
+        # DISPLAY_BACKEND always wins when explicitly set — it overrides whatever
+        # DISPLAY was loaded from .env so that a single knob controls the display.
+        # Priority: DISPLAY_BACKEND (explicit) > DISPLAY (env/shell) > default :0
+        backend = os.getenv("DISPLAY_BACKEND", "").strip().lower()
+
+        if backend == "vnc":
+            os.environ["DISPLAY"] = ":1"
+        elif backend == "physical":
+            os.environ["DISPLAY"] = ":0"
+        elif backend == "auto":
+            # Pick the first X11 socket that actually exists
+            for candidate in (":1", ":0"):
+                if os.path.exists(f"/tmp/.X11-unix/X{candidate[1:]}"):
+                    os.environ["DISPLAY"] = candidate
+                    break
+            else:
+                os.environ["DISPLAY"] = ":0"
+        elif not os.environ.get("DISPLAY"):
+            # No DISPLAY_BACKEND and no DISPLAY — last resort default
+            os.environ["DISPLAY"] = ":0"
+
+        # Ensure X authentication is available.
+        # TigerVNC stores its cookie in the same ~/.Xauthority file as the
+        # physical display, just under a different display entry (:1 vs :0).
         if not os.environ.get("XAUTHORITY"):
-            # Provide authentication to access the physical X11 display
             xauth_path = os.path.expanduser("~/.Xauthority")
             if os.path.exists(xauth_path):
                 os.environ["XAUTHORITY"] = xauth_path
-    
-    # Secondary check: If DISPLAY is still just :0, let's try to ensure it works before trusting cv2
-    try:
-        # Initializing FaceAnimator opens cv2 windows. If X11 is inaccessible, OpenCV Qt backend
-        # will cause a hard C++ abort() which cannot be caught by Python try/except.
-        # We rely on the environment variables being correctly routed now.
-        face = FaceAnimator("Ai-Agent/src/visuals/faces")
-        jarvis = JarvisBot(face)
-        
+
+        # Pre-check: verify the X11 socket actually exists before letting Qt try.
+        # Qt calls abort() on a missing display — that can't be caught by Python.
+        display = os.environ.get("DISPLAY", "")
+        display_num = display.lstrip(":").split(".")[0]
+        socket_path = f"/tmp/.X11-unix/X{display_num}"
+        if not os.path.exists(socket_path):
+            logger.warning(
+                f"X11 socket {socket_path} not found — is the display server running? "
+                f"Falling back to headless."
+            )
+            face_enabled = False
+        else:
+            logger.info(f"Face animation enabled on display {display}")
+
+    if not face_enabled:
+        logger.info("Face animation disabled — running headless (set FACE_ENABLED=true to enable)")
+
+    face = None
+    if face_enabled:
+        try:
+            face = FaceAnimator("src/visuals/faces")
+        except Exception as e:
+            logger.warning(f"Failed to init face animation: {e}. Falling back to headless.")
+
+    jarvis = JarvisBot(face)
+
+    if face:
         worker = threading.Thread(target=jarvis.run, daemon=True)
         worker.start()
-        
-        # 🔥 THIS MUST BE MAIN THREAD for cv2 GUI events
+        # cv2 GUI event loop must run on the main thread
         face.render_forever()
-        
-    except Exception as e:
-        logger.warning(f"Failed to start GUI: {e}")
-        logger.warning("Running headlessly.")
-        jarvis = JarvisBot()
+    else:
         jarvis.run()
 
 if __name__ == "__main__":
