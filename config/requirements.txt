@@ -5,6 +5,10 @@
 #
 # sudo apt-get update
 # sudo apt-get install -y \
+#     libcap-dev \
+#     swig \
+#     python3-libcamera 
+#     libcamera-apps
 #     portaudio19-dev \
 #     libasound2-dev \
 #     python3-pyqt5
@@ -16,7 +20,7 @@
 #     liblapack-dev \
 #     libgtk-3-0 \
 #     ffmpeg \
-#  libxcb-xinerama0 \
+#     libxcb-xinerama0 \
 #     libxcb-cursor0 \
 #     libxkbcommon-x11-0 \
 #     libxcb-icccm4 \
@@ -57,8 +61,7 @@ python-dotenv==1.0.1
 aiofiles==24.1.0
 
 # Noise Cancellation (Requires libspeexdsp-dev)
-# speexdsp
-# openai
+
  build
  cython
  pyaudio
@@ -66,8 +69,8 @@ aiofiles==24.1.0
  sounddevice==0.4.6  
  opencv-python==4.8.1.78 
 #  azure-cognitiveservices-speech==1.48.1
- httpx==0.27.0
+httpx==0.27.0
 #  python-dotenv==1.0.1
- typing-extensions==4.15.0
- openwakeword
- speexdsp
+typing-extensions==4.15.0
+openwakeword
+picamera2

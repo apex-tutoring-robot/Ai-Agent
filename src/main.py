@@ -1,3 +1,4 @@
+import base64
 import os
 # Allow the OS to use its default display and QT backend, rather than hardcoding.
 
@@ -10,6 +11,7 @@ from difflib import SequenceMatcher
 from dotenv import load_dotenv
 from visuals.faces.face_animator import FaceAnimator
 import numpy as np
+import logging
 
 from audio.wake_word import WakeWordDetector
 from audio.continuous_vad import ContinuousVADCapture
@@ -20,9 +22,30 @@ from azure_services.tts_client import TextToSpeechClient
 from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
 from vision.camera import Camera
-import logging
 
-logging.basicConfig(level=logging.INFO)
+
+def _setup_logging():
+    """Write INFO+ logs to both the console and a timestamped file in logs/."""
+    os.makedirs("logs", exist_ok=True)
+    log_path = os.path.join("logs", f"run_{time.strftime('%Y%m%d_%H%M%S')}.log")
+
+    fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(fmt)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
+
+    return log_path
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -214,7 +237,10 @@ class JarvisBot:
                         if self.face:
                             self.face.start_scanning()
                         try:
-                            image_b64 = self.camera.capture_base64()
+                            saved_path = self.camera.capture_and_save()
+                            with open(saved_path, "rb") as _f:
+                                image_b64 = base64.b64encode(_f.read()).decode("utf-8")
+                            logger.info(f"📷 Image saved to {saved_path}")
                             vision_turn = {
                                 "role": "user",
                                 "content": [
