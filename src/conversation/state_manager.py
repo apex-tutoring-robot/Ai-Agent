@@ -5,7 +5,7 @@ Manages conversation history and context for multi-turn interactions.
 
 import logging
 import threading
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 from collections import deque
 
 logging.basicConfig(level='INFO')
@@ -28,19 +28,21 @@ class ConversationStateManager:
         
         logger.info(f"Conversation state manager initialized (max history: {max_history})")
     
-    def add_user_message(self, content: str) -> None:
+    def add_user_message(self, content: Union[str, List]) -> None:
         """
         Add a user message to conversation history.
-        
+
         Args:
-            content: User message content
+            content: Either a plain string for text-only messages, or a list of
+                     content parts for multimodal messages (text + image_url).
         """
         with self._lock:
             self._messages.append({
                 "role": "user",
                 "content": content
             })
-            logger.debug(f"Added user message: {content[:50]}...")
+            preview = content[:50] if isinstance(content, str) else str(content)[:80]
+            logger.debug(f"Added user message: {preview}...")
     
     def add_assistant_message(self, content: str) -> None:
         """

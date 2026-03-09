@@ -1,4 +1,3 @@
-import base64
 import os
 # Allow the OS to use its default display and QT backend, rather than hardcoding.
 
@@ -22,6 +21,12 @@ from azure_services.tts_client import TextToSpeechClient
 from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
 from vision.camera import Camera
+
+try:
+    from azure_services.blob_client import BlobStorageClient
+    _BLOB_AVAILABLE = True
+except ImportError:
+    _BLOB_AVAILABLE = False
 
 
 def _setup_logging():
@@ -72,6 +77,12 @@ class JarvisBot:
         self.tts_client = TextToSpeechClient()
         self.privacy_manager = PrivacyManager()
         self.camera = Camera()
+        self.blob_client = None
+        if _BLOB_AVAILABLE:
+            try:
+                self.blob_client = BlobStorageClient()
+            except Exception as e:
+                logger.warning(f"BlobStorageClient init failed: {e} — camera vision will fall back to base64")
         self.conversation_manager = ConversationStateManager(
             max_history=int(os.getenv('MAX_CONVERSATION_HISTORY', 20))
         )
@@ -230,30 +241,40 @@ class JarvisBot:
                     anonymized_text = self.privacy_manager.anonymize(user_text)
 
                     # ── Camera Vision ──────────────────────────────────────────
-                    # If the user's phrase is a camera trigger, capture an image
-                    # and build a one-shot multimodal message. The image is NOT
-                    # stored in conversation history to keep token usage efficient.
+                    # If the user's phrase is a camera trigger, capture an image,
+                    # upload it to Azure Blob Storage, and store the SAS URL in
+                    # conversation history so follow-up questions can reference it.
                     if self._is_camera_trigger(user_text):
                         if self.face:
                             self.face.start_scanning()
                         try:
                             saved_path = self.camera.capture_and_save()
-                            with open(saved_path, "rb") as _f:
-                                image_b64 = base64.b64encode(_f.read()).decode("utf-8")
                             logger.info(f"📷 Image saved to {saved_path}")
-                            vision_turn = {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": anonymized_text},
-                                    {"type": "image_url", "image_url": {
-                                        "url": f"data:image/jpeg;base64,{image_b64}"
-                                    }}
-                                ]
-                            }
-                            # Store only the text part in history
-                            self.conversation_manager.add_user_message(anonymized_text)
-                            messages = self.conversation_manager.get_messages()[:-1] + [vision_turn]
-                            logger.info("📷 Vision turn: image attached to LLM message")
+
+                            # Upload to blob → get SAS URL; fall back to base64 if unavailable
+                            image_url = None
+                            if self.blob_client is not None:
+                                try:
+                                    image_url = self.blob_client.upload_image(saved_path)
+                                    logger.info("📷 Uploaded to blob storage")
+                                except Exception as blob_err:
+                                    logger.warning(f"📷 Blob upload failed: {blob_err} — falling back to base64")
+
+                            if image_url is None:
+                                import base64 as _b64
+                                with open(saved_path, "rb") as _f:
+                                    image_url = f"data:image/jpeg;base64,{_b64.b64encode(_f.read()).decode()}"
+                                logger.info("📷 Using base64 fallback for vision turn")
+
+                            vision_content = [
+                                {"type": "text", "text": anonymized_text},
+                                {"type": "image_url", "image_url": {"url": image_url}},
+                            ]
+
+                            # Store full multimodal content — SAS URL persists in every follow-up turn
+                            self.conversation_manager.add_user_message(vision_content)
+                            messages = self.conversation_manager.get_messages()
+                            logger.info("📷 Vision turn stored in conversation history")
                         except Exception as cam_err:
                             logger.error(f"📷 Camera failed: {cam_err} — falling back to text-only")
                             self.conversation_manager.add_user_message(anonymized_text)
