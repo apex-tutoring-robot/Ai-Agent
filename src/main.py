@@ -19,7 +19,9 @@ from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
 from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
+from guardrails.guardrails_manager import GuardrailsManager
 import logging
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -47,6 +49,9 @@ class JarvisBot:
         self.llm_client = LLMClient()
         self.tts_client = TextToSpeechClient()
         self.privacy_manager = PrivacyManager()
+        self.guardrails = GuardrailsManager(
+            config_path=os.getenv('GUARDRAILS_CONFIG_PATH', 'config/guardrails')
+        )
         self.conversation_manager = ConversationStateManager(
             max_history=int(os.getenv('MAX_CONVERSATION_HISTORY', 20))
         )
@@ -190,45 +195,77 @@ class JarvisBot:
                 
                 try:
                     logger.info(f"📝 Processing Turn: {user_text}")
-                    # Anonymize and prepare history
+
+                    # Anonymize
                     anonymized_text = self.privacy_manager.anonymize(user_text)
-                    self.conversation_manager.add_user_message(anonymized_text)
-                    
-                    # LLM Generation
-                    messages = self.conversation_manager.get_messages()
-                    llm_start = time.perf_counter()
-                    
-                    # Start audio playback (callback mode)
-                    # AEC: Provide reference audio back to VAD
+
+                    # ── GUARDRAILS: INPUT CHECK ──────────────────────────────
+                    # Runs before LLM call — blocks off-topic and harmful input
+                    # entirely, saving API cost and latency.
+                    allowed, refusal_msg = self.guardrails.check_input(anonymized_text)
+
+                    if allowed:
+                        # Add to conversation history only after input passes
+                        self.conversation_manager.add_user_message(anonymized_text)
+                        messages = self.conversation_manager.get_messages()
+
+                        # Buffer the FULL LLM response before starting TTS.
+                        # This is required so the output guardrail can check the
+                        # complete response before any audio is produced.
+                        llm_start = time.perf_counter()
+                        response_chunks = []
+                        for chunk in self.llm_client.generate_response_stream(messages):
+                            if self._interruption_event.is_set():
+                                break
+                            response_chunks.append(chunk)
+
+                        # Handle interruption during LLM generation
+                        if self._interruption_event.is_set():
+                            partial = "".join(response_chunks)
+                            if partial:
+                                self._last_bot_response = partial  # for similarity filter
+                            continuous_vad.reset_idle_timer()
+                            continue
+
+                        full_response = "".join(response_chunks)
+                        if not full_response:
+                            continuous_vad.reset_idle_timer()
+                            continue
+
+                        # ── GUARDRAILS: OUTPUT CHECK ─────────────────────────
+                        # Checks complete LLM response before any audio plays.
+                        safe, final_text = self.guardrails.check_output(full_response)
+                        if safe:
+                            self.conversation_manager.add_assistant_message(final_text)
+                            self._last_bot_response = final_text
+                            logger.info(f"🤖 Bot: {final_text}")
+                        else:
+                            logger.warning("🛡️ Guardrails blocked LLM output — substituting refusal")
+                            # final_text is already the kid-friendly refusal; history not updated
+                    else:
+                        # Input blocked — speak refusal, skip LLM entirely
+                        logger.info("🛡️ Guardrails blocked input — speaking refusal")
+                        final_text = refusal_msg
+
+                    # ── TTS + PLAYBACK PIPELINE ──────────────────────────────
+                    # Start audio player now that we have the final text to speak
                     self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
                     if self.face:
                         self.face.start_talking()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
-                    
+
                     # ── ECHO GUARD: Signal that bot is now speaking ──
                     self._bot_is_speaking = True
                     continuous_vad.set_playback_state(True)
-                    
-                    response_chunks = []
-                    
-                    # Helper to collect text while streaming
-                    def text_collector(stream):
-                        for chunk in stream:
-                            if self._interruption_event.is_set():
-                                break
-                            response_chunks.append(chunk)
-                            yield chunk
-                            
-                    # Pipeline: LLM -> TTS -> AudioPlayer
-                    llm_stream = self.llm_client.generate_response_stream(messages)
-                    collected_stream = text_collector(llm_stream)
-                    tts_stream = self.tts_client.synthesize_stream(collected_stream)
-                    
+
+                    # Stream final_text through TTS to audio player
+                    tts_stream = self.tts_client.synthesize_stream(iter([final_text]))
+
                     for audio_chunk in tts_stream:
                         if self._interruption_event.is_set():
                             logger.warning("🛑 Speaker aborted due to interruption event")
                             break
-                        
+
                         # Defensive check: ensure streaming is still active
                         if self.audio_player._is_playing:
                             try:
@@ -238,26 +275,14 @@ class JarvisBot:
                                 break
                         else:
                             break
-                        
+
                     # Wait for playback to finish naturally (if not interrupted)
                     if not self._interruption_event.is_set():
                         self.audio_player.stop_streaming(immediate=False)
-                        
-                        # Add full response to history only if NOT interrupted
-                        full_response = "".join(response_chunks)
-                        if full_response:
-                            self._last_bot_response = full_response
-                            self.conversation_manager.add_assistant_message(full_response)
-                            logger.info(f"🤖 Bot: {full_response}")
-                    else:
-                        # Interrupted — still store partial response for similarity filter
-                        partial = "".join(response_chunks)
-                        if partial:
-                            self._last_bot_response = partial
-                    
+
                     # Reset idle timer because we just finished a turn
                     continuous_vad.reset_idle_timer()
-                    
+
                 except Exception as turn_err:
                     logger.error(f"Error in speaker turn: {turn_err}")
                 finally:
@@ -268,9 +293,9 @@ class JarvisBot:
                     self._playback_ended_time = time.time()
                     continuous_vad.set_playback_state(False)
                     self._barge_in_detected.clear()
-                    
+
                     self._speaker_busy.clear()
-                    self.audio_player.stop_streaming(immediate=True) # Ensure closed
+                    self.audio_player.stop_streaming(immediate=True)  # Ensure closed
                     
             logger.info("🔊 Speaker worker stopped cleanly")
         except Exception as e:
@@ -796,6 +821,7 @@ def main():
         # DISPLAY was loaded from .env so that a single knob controls the display.
         # Priority: DISPLAY_BACKEND (explicit) > DISPLAY (env/shell) > default :0
         backend = os.getenv("DISPLAY_BACKEND", "").strip().lower()
+        logger.info(f"backenddddd: {backend}")
 
         if backend == "vnc":
             os.environ["DISPLAY"] = ":1"
@@ -812,14 +838,6 @@ def main():
         elif not os.environ.get("DISPLAY"):
             # No DISPLAY_BACKEND and no DISPLAY — last resort default
             os.environ["DISPLAY"] = ":0"
-
-        # Ensure X authentication is available.
-        # TigerVNC stores its cookie in the same ~/.Xauthority file as the
-        # physical display, just under a different display entry (:1 vs :0).
-        if not os.environ.get("XAUTHORITY"):
-            xauth_path = os.path.expanduser("~/.Xauthority")
-            if os.path.exists(xauth_path):
-                os.environ["XAUTHORITY"] = xauth_path
 
         # Pre-check: verify the X11 socket actually exists before letting Qt try.
         # Qt calls abort() on a missing display — that can't be caught by Python.
