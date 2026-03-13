@@ -105,6 +105,26 @@ class TextToSpeechClient:
         except Exception as e:
             logger.warning(f"TTS warm-up failed (non-critical): {e}")
     
+    @staticmethod
+    def _strip_latex(text: str) -> str:
+        """Remove LaTeX math notation so Azure TTS doesn't read backslashes aloud."""
+        # Strip inline/display math delimiters, keep the content inside
+        text = re.sub(r'\\\(|\\\)', '', text)
+        text = re.sub(r'\\\[|\\\]', '', text)
+        # Convert common math commands to spoken words
+        text = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'\1 over \2', text)
+        text = re.sub(r'\\times', ' times ', text)
+        text = re.sub(r'\\div', ' divided by ', text)
+        text = re.sub(r'\\cdot', ' times ', text)
+        text = re.sub(r'\\sqrt\{([^}]*)\}', r'square root of \1', text)
+        # Strip any remaining LaTeX commands (backslash + word)
+        text = re.sub(r'\\[a-zA-Z]+\*?', '', text)
+        # Remove stray curly braces left over from LaTeX
+        text = re.sub(r'[{}]', '', text)
+        # Collapse extra whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
     def synthesize_to_audio(self, text: str) -> bytes:
         """
         Synthesize text to audio (non-streaming).
@@ -117,6 +137,7 @@ class TextToSpeechClient:
         """
         try:
             # Reuse persistent synthesizer instance (no initialization overhead)
+            text = self._strip_latex(text)
             logger.info(f"Synthesizing: {text[:50]}...")
             result = self.synthesizer.speak_text(text)
             
