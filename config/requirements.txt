@@ -36,7 +36,6 @@
 # Azure AI Services
 azure-cognitiveservices-speech==1.40.0
 openai>=1.12.0
-azure-storage-blob>=12.19.0
 
 # NeMo Guardrails for topic control
 # nemoguardrails>=0.9.0

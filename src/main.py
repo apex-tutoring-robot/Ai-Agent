@@ -22,12 +22,6 @@ from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
 from vision.camera import Camera
 
-try:
-    from azure_services.blob_client import BlobStorageClient
-    _BLOB_AVAILABLE = True
-except ImportError:
-    _BLOB_AVAILABLE = False
-
 
 def _setup_logging():
     """Write INFO+ logs to both the console and a timestamped file in logs/."""
@@ -77,12 +71,6 @@ class JarvisBot:
         self.tts_client = TextToSpeechClient()
         self.privacy_manager = PrivacyManager()
         self.camera = Camera()
-        self.blob_client = None
-        if _BLOB_AVAILABLE:
-            try:
-                self.blob_client = BlobStorageClient()
-            except Exception as e:
-                logger.warning(f"BlobStorageClient init failed: {e} — camera vision will fall back to base64")
         self.conversation_manager = ConversationStateManager(
             max_history=int(os.getenv('MAX_CONVERSATION_HISTORY', 20))
         )
@@ -251,30 +239,29 @@ class JarvisBot:
                             saved_path = self.camera.capture_and_save()
                             logger.info(f"📷 Image saved to {saved_path}")
 
-                            # Upload to blob → get SAS URL; fall back to base64 if unavailable
-                            image_url = None
-                            if self.blob_client is not None:
-                                try:
-                                    image_url = self.blob_client.upload_image(saved_path)
-                                    logger.info("📷 Uploaded to blob storage")
-                                except Exception as blob_err:
-                                    logger.warning(f"📷 Blob upload failed: {blob_err} — falling back to base64")
+                            import base64 as _b64
+                            with open(saved_path, "rb") as _f:
+                                data_url = f"data:image/jpeg;base64,{_b64.b64encode(_f.read()).decode()}"
 
-                            if image_url is None:
-                                import base64 as _b64
-                                with open(saved_path, "rb") as _f:
-                                    image_url = f"data:image/jpeg;base64,{_b64.b64encode(_f.read()).decode()}"
-                                logger.info("📷 Using base64 fallback for vision turn")
-
-                            vision_content = [
-                                {"type": "text", "text": anonymized_text},
-                                {"type": "image_url", "image_url": {"url": image_url}},
-                            ]
-
-                            # Store full multimodal content — SAS URL persists in every follow-up turn
-                            self.conversation_manager.add_user_message(vision_content)
-                            messages = self.conversation_manager.get_messages()
-                            logger.info("📷 Vision turn stored in conversation history")
+                            try:
+                                extracted = self.llm_client.extract_image_content(data_url)
+                                combined = f"{anonymized_text}\n\n[Scanned homework content:\n{extracted}]"
+                                self.conversation_manager.add_user_message(combined)
+                                messages = self.conversation_manager.get_messages()
+                                logger.info("📷 Image extracted and stored as text — no image re-sent per turn")
+                            except Exception as extract_err:
+                                logger.error(f"📷 Image extraction failed: {extract_err}")
+                                if self.face:
+                                    self.face.start_talking()
+                                error_audio = self.tts_client.synthesize_to_audio(
+                                    "Sorry, I had trouble reading the image. Please try again."
+                                )
+                                self.audio_player.start_streaming(output_device_index=output_device_index)
+                                self.audio_player.queue_audio(error_audio)
+                                self.audio_player.stop_streaming(immediate=False)
+                                if self.face:
+                                    self.face.start_idle()
+                                continue
                         except Exception as cam_err:
                             logger.error(f"📷 Camera failed: {cam_err} — falling back to text-only")
                             self.conversation_manager.add_user_message(anonymized_text)

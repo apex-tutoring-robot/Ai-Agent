@@ -113,6 +113,34 @@ class LLMClient:
             logger.error(f"Error generating response: {e}")
             raise
     
+    def extract_image_content(self, image_url: str, max_tokens: int = 1000) -> str:
+        """
+        One-shot GPT-4V call to extract all image content as plain text.
+        Called once on the vision turn; result stored in history so the image
+        is never re-sent — eliminates per-turn image re-encoding cost/latency.
+        """
+        extraction_prompt = (
+            "You are an image content extractor. Describe every question, equation, "
+            "diagram, number, and piece of text visible in this image with complete "
+            "accuracy. Write all math in plain spoken form (e.g. '2x plus 5 equals 15'). "
+            "Be exhaustive — do not skip any content."
+        )
+        messages = [
+            {"role": "system", "content": extraction_prompt},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ]},
+        ]
+        response = self.client.chat.completions.create(
+            model=self.deployment,
+            messages=messages,
+            max_tokens=max_tokens,
+            stream=False,
+        )
+        extracted = response.choices[0].message.content.strip()
+        logger.info(f"📷 Image extracted ({len(extracted)} chars)")
+        return extracted
+
     def generate_response(
         self,
         messages: List[Dict[str, str]],
