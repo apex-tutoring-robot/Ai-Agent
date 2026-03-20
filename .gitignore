@@ -37,4 +37,6 @@ Thumbs.db
 
 # Picovoice wake word models (user-specific)
 config/*.ppn
+
+# test images captured for testing
 captures/
