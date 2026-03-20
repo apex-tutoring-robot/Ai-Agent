@@ -22,6 +22,8 @@ from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
 from vision.camera import Camera
 
+load_dotenv(".env")
+
 
 def _setup_logging():
     """Write INFO+ logs to both the console and a timestamped file in logs/."""
@@ -151,6 +153,7 @@ class JarvisBot:
         logger.info("📡 Listener worker started")
         ECHO_COOLDOWN_S = 0.5          # Ignore speech for 500ms after playback ends
         SIMILARITY_THRESHOLD = 0.55    # Reject if >55% word overlap with bot's last response
+        SIMILARITY_WINDOW_S = 3.0      # Only apply similarity filter within 3s of playback ending
         
         try:
             # Create a never-ending generator for STT
@@ -185,8 +188,12 @@ class JarvisBot:
                     continue
                 
                 # ── LAYER 2: Text similarity filter ──
-                # Reject finalized text that matches the bot's last response
-                if is_final and self._last_bot_response:
+                # Reject finalized text that matches the bot's last response,
+                # but only within a short window after playback ends (real echo
+                # arrives immediately; user follow-up speech can share words too).
+                within_window = (self._playback_ended_time > 0 and
+                                 (now - self._playback_ended_time) < SIMILARITY_WINDOW_S)
+                if is_final and self._last_bot_response and within_window:
                     sim = self._text_similarity(text, self._last_bot_response)
                     if sim > SIMILARITY_THRESHOLD:
                         logger.info(f"🔇 Echo rejected (similarity={sim:.0%}): '{text[:60]}...'")
@@ -217,7 +224,10 @@ class JarvisBot:
                     
                 if user_text is None: # Termination sentinel
                     break
-                    
+
+                # Reset idle timer immediately so long camera/LLM processing doesn't trigger timeout
+                continuous_vad.reset_idle_timer()
+
                 # Signal we are busy
                 self._speaker_busy.set()
                 self._interruption_event.clear()
@@ -273,6 +283,8 @@ class JarvisBot:
 
                     # LLM Generation
                     llm_start = time.perf_counter()
+                    if self.face:
+                        self.face.start_thinking()
 
                     # Start audio playback (callback mode)
                     # AEC: Provide reference audio back to VAD
@@ -482,20 +494,20 @@ class JarvisBot:
             self._conversation_active.clear()
             self._request_queue.put(None) # Sentinel for speaker
             
-            # 2. CLEANUP WORKERS - ensure they stop before releasing PA
-            try:
-                if 'listener_thread' in locals() and listener_thread.is_alive():
-                    listener_thread.join(timeout=1.0)
-                if 'speaker_thread' in locals() and speaker_thread.is_alive():
-                    speaker_thread.join(timeout=1.0)
-            except:
-                pass
-
-            # 3. Explicitly cleanup continuous VAD to free microphone
+            # 2. Stop VAD first — this closes the audio stream and unblocks the listener thread
             try:
                 if 'continuous_vad' in locals():
                     continuous_vad.stop_background_monitoring()
                     continuous_vad.cleanup()
+            except:
+                pass
+
+            # 3. Now join workers — listener can exit cleanly within the timeout
+            try:
+                if 'listener_thread' in locals() and listener_thread.is_alive():
+                    listener_thread.join(timeout=5.0)
+                if 'speaker_thread' in locals() and speaker_thread.is_alive():
+                    speaker_thread.join(timeout=1.0)
             except:
                 pass
             
@@ -851,12 +863,6 @@ def main():
     # ── Display configuration ──────────────────────────────────────────────────
     # FACE_ENABLED=true          → show face animation
     # FACE_ENABLED=false         → headless, no GUI (default when DISPLAY not set)
-    #
-    # DISPLAY_BACKEND=physical   → HDMI monitor          (DISPLAY=:0)
-    # DISPLAY_BACKEND=vnc        → TigerVNC session      (DISPLAY=:1)
-    # DISPLAY_BACKEND=auto       → pick first available X11 socket (:1 then :0)
-    #
-    # You can also skip DISPLAY_BACKEND and set DISPLAY directly, e.g. DISPLAY=:0
     # ──────────────────────────────────────────────────────────────────────────
     face_env = os.getenv("FACE_ENABLED", "").strip().lower()
     if face_env in ("true", "1", "yes"):
@@ -868,30 +874,12 @@ def main():
         face_enabled = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
     if face_enabled:
-        # DISPLAY_BACKEND always wins when explicitly set — it overrides whatever
-        # DISPLAY was loaded from .env so that a single knob controls the display.
-        # Priority: DISPLAY_BACKEND (explicit) > DISPLAY (env/shell) > default :0
-        backend = os.getenv("DISPLAY_BACKEND", "").strip().lower()
-
-        if backend == "vnc":
-            os.environ["DISPLAY"] = ":1"
-        elif backend == "physical":
-            os.environ["DISPLAY"] = ":0"
-        elif backend == "auto":
-            # Pick the first X11 socket that actually exists
-            for candidate in (":1", ":0"):
-                if os.path.exists(f"/tmp/.X11-unix/X{candidate[1:]}"):
-                    os.environ["DISPLAY"] = candidate
-                    break
-            else:
-                os.environ["DISPLAY"] = ":0"
-        elif not os.environ.get("DISPLAY"):
-            # No DISPLAY_BACKEND and no DISPLAY — last resort default
+        # Use whatever DISPLAY is set in the environment (e.g. by XWayland).
+        # Fall back to :0 if nothing is set.
+        if not os.environ.get("DISPLAY"):
             os.environ["DISPLAY"] = ":0"
 
         # Ensure X authentication is available.
-        # TigerVNC stores its cookie in the same ~/.Xauthority file as the
-        # physical display, just under a different display entry (:1 vs :0).
         if not os.environ.get("XAUTHORITY"):
             xauth_path = os.path.expanduser("~/.Xauthority")
             if os.path.exists(xauth_path):
