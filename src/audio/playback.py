@@ -257,9 +257,9 @@ class AudioPlayer:
             return True
 
         logger.info(f"Stopping playback (immediate={immediate})...")
-        self._is_playing = False
 
         if immediate:
+            self._is_playing = False
             # 1. Discard all queued audio
             logger.info("Clearing playback queue for immediate stop")
             while not self.audio_queue.empty():
@@ -270,17 +270,25 @@ class AudioPlayer:
             # 2. Signal callback to return paAbort on its next invocation
             self._stop_event.set()
         else:
-            # Graceful: push sentinel so callback returns paComplete after draining
+            # Graceful: push sentinel so callback returns paComplete after draining.
+            # _is_playing must remain True until the callback consumes the sentinel,
+            # otherwise the callback's queue.Empty handler exits early mid-playback.
             self.audio_queue.put(None)
 
         # Wait for PortAudio to acknowledge the stop (polls is_active())
         # In callback mode there is NO Python blocking write() here — completely safe
-        timeout = 2.0 if immediate else 30.0
-        deadline = time.time() + timeout
+        # Immediate: short timeout — paAbort fires within one callback cycle (~64ms)
+        # Graceful: no deadline — the None sentinel drives paComplete naturally;
+        #           forcing a timeout here would cut off long audio mid-playback.
         stream = self.audio_stream  # local ref — safe to read, we're the only closer
         if stream:
-            while stream.is_active() and time.time() < deadline:
-                time.sleep(0.02)
+            if immediate:
+                deadline = time.time() + 2.0
+                while stream.is_active() and time.time() < deadline:
+                    time.sleep(0.02)
+            else:
+                while stream.is_active():
+                    time.sleep(0.02)
 
         # Close the stream safely
         if self.audio_stream:
