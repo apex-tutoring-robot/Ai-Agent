@@ -35,7 +35,7 @@ class LLMClient:
             api_version: API version
             system_prompt_path: Path to system prompt file
         """
-        self.api_key = api_key or os.getenv('AZURE_OPENAI_KEY')
+        self.api_key = api_key or os.getenv('AZURE_OPENAI_API_KEY')
         self.endpoint = endpoint or os.getenv('AZURE_OPENAI_ENDPOINT')
         self.deployment = deployment or os.getenv('AZURE_OPENAI_DEPLOYMENT')
         self.api_version = api_version or os.getenv('AZURE_OPENAI_API_VERSION', '2024-08-01-preview')

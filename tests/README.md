@@ -231,4 +231,4 @@ cd ../src
 python main.py
 ```
 
-Enjoy your AI tutoring robot! 🤖
+Enjoy your AI tutoring robot!

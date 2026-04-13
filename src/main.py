@@ -327,7 +327,7 @@ class JarvisBot:
                         if safe:
                             self.conversation_manager.add_assistant_message(final_text)
                             self._last_bot_response = final_text
-                            logger.info(f"🤖 Bot: {final_text}")
+                            logger.info(f"Bot: {final_text}")
                         else:
                             logger.warning("🛡️ Guardrails blocked LLM output — substituting refusal")
                             # final_text is already the kid-friendly refusal; history not updated
@@ -612,7 +612,7 @@ class JarvisBot:
                 
                 # Combine collected chunks into full response
                 response_text = ''.join(response_chunks)
-                logger.info(f"🤖 Jarvis: {response_text}")
+                logger.info(f"Jarvis: {response_text}")
                 
                 # Add assistant response to conversation
                 self.conversation_manager.add_assistant_message(response_text)
@@ -778,7 +778,7 @@ class JarvisBot:
                 
                 # Combine collected chunks into full response
                 response_text = ''.join(response_chunks)
-                logger.info(f"🤖 Chippy: {response_text}")
+                logger.info(f"Chippy: {response_text}")
                 # Add assistant response to conversation
                 self.conversation_manager.add_assistant_message(response_text)
                 
@@ -823,9 +823,9 @@ class JarvisBot:
         """Start Jarvis and run the main loop."""
         if self.face:
             self.face.start_idle()
-        logger.info("\n" + "🤖 "*20)
+        logger.info("\n" + "="*20)
         logger.info("Jarvis TUTORING ROBOT STARTED")
-        logger.info("🤖 "*20 + "\n")
+        logger.info("="*20 + "\n")
         logger.info("Listening for wake word: 'Hey Jarvis'")
         logger.info("Press Ctrl+C to stop\n")
         
