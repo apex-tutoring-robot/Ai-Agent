@@ -64,7 +64,7 @@ class WakeWordDetector:
             enable_speex_noise_suppression: Enable Speex noise suppression (Raspberry Pi)
             input_device_index: Index of audio input device
         """
-        self.model_path = model_path
+        self.model_path = model_path or os.getenv('WAKE_WORD_MODEL_PATH', '')
         self.model_name = model_name or os.getenv('WAKE_WORD_MODEL', '')
         self.threshold = threshold if threshold is not None else float(os.getenv('WAKE_WORD_THRESHOLD', 0.5))
         self.vad_threshold = vad_threshold if vad_threshold is not None else float(os.getenv('WAKE_WORD_VAD_THRESHOLD', 0))
