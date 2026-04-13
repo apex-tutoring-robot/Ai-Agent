@@ -58,9 +58,11 @@ httpx==0.27.0
 typing-extensions==4.15.0
 
 # Wake Word Detection
-# Note: For Speex noise suppression on Raspberry Pi, install the wheel after:
-#  https://github.com/dscripka/openWakeWord/releases/download/v0.1.1/speexdsp_ns-0.1.2-cp313-cp313-linux_aarch64.whl
 openwakeword
+
+# Acoustic Echo Cancellation
+# IMPORTANT: Requires libspeex-dev and libspeexdsp-dev (see system deps above)
+speexdsp
 
 # Camera
 # IMPORTANT: Requires libcap-dev (see system deps above)

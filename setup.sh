@@ -10,6 +10,7 @@ sudo apt-get update && sudo apt-get install -y \
     libasound2-dev \
     libportaudio2 \
     libportaudiocpp0 \
+    libspeex-dev \
     libspeexdsp-dev \
     python3-dev \
     libopenblas-dev \
