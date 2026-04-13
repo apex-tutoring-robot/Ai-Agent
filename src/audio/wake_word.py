@@ -13,27 +13,6 @@ import pyaudio
 from openwakeword.model import Model
 from dotenv import load_dotenv
 
-# Install shim for Python 3.13 compatibility with SpeexDSP
-try:
-    from utils import imp_shim
-    imp_shim.install_shim()
-    import speexdsp
-    import sys
-    
-    # Satisfy openWakeWord by providing a dummy NoiseSuppression if missing
-    if not hasattr(speexdsp, 'NoiseSuppression'):
-        class DummyNS:
-            def __init__(self, *args, **kwargs): pass
-            @staticmethod
-            def create(*args, **kwargs): return DummyNS()
-            def process(self, chunk): return chunk
-        speexdsp.NoiseSuppression = DummyNS
-        
-    # Alias speexdsp to speexdsp_ns for openWakeWord compatibility
-    sys.modules['speexdsp_ns'] = speexdsp
-except ImportError:
-    pass
-
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
