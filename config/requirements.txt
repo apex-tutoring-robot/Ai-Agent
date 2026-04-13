@@ -1,36 +1,23 @@
 # ==============================================================================
 # SYSTEM DEPENDENCIES - INSTALL THESE FIRST (Raspberry Pi / Linux)
 # ==============================================================================
-# Before running ' -r requirements.txt', install these system packages:
+# Before running 'pip install -r requirements.txt', install these system packages:
 #
-# sudo apt-get update
-# sudo apt-get install -y \
+# sudo apt-get update && sudo apt-get install -y \
 #     libcap-dev \
 #     swig \
-#     python3-libcamera 
-#     libcamera-apps
+#     python3-libcamera \
 #     portaudio19-dev \
 #     libasound2-dev \
-#     python3-pyqt5
 #     libportaudio2 \
 #     libportaudiocpp0 \
-#     libspeexdsp-dev
+#     libspeexdsp-dev \
 #     python3-dev \
 #     libopenblas-dev \
 #     liblapack-dev \
-#     libgtk-3-0 \
-#     ffmpeg \
-#     libxcb-xinerama0 \
-#     libxcb-cursor0 \
-#     libxkbcommon-x11-0 \
-#     libxcb-icccm4 \
-#     libxcb-image0 \
-#     libxcb-keysyms1 \
-#     libxcb-render-util0 \
-#     libxcb-xkb1 \
-#     libx11-xcb1
-
-# These are required for PyAudio, webrtcvad, and openwakeword to compile.
+#     ffmpeg
+#
+# These are required for PyAudio, webrtcvad, picamera2, and openwakeword to compile.
 # ==============================================================================
 
 # Azure AI Services
@@ -44,13 +31,8 @@ nemoguardrails>=0.9.0
 langchain-openai>=0.1.0
 langchain-core>=0.1.0
 
-# Wake Word Detection (open-source, no API key required)
-# openwakeword>=0.6.0
-# Note: For Speex noise suppression on Raspberry Pi, install the wheel after :
-#  https://github.com/dscripka/openWakeWord/releases/download/v0.1.1/speexdsp_ns-0.1.2-cp313-cp313-linux_aarch64.whl
-
 # Audio Processing
-# IMPORTANT: Requires portaudio19-dev and libasound2-dev to be installed via apt-get (see top of file)
+# IMPORTANT: Requires portaudio19-dev and libasound2-dev (see system deps above)
 pyaudio==0.2.14
 webrtcvad-wheels>=2.0.11  # Drop-in replacement for webrtcvad, Python 3.13 compatible
 
@@ -60,17 +42,26 @@ python-dotenv==1.0.1
 # Async Support
 aiofiles==24.1.0
 
-# Noise Cancellation (Requires libspeexdsp-dev)
+# Build Tools
+build
+cython
 
- build
- cython
- pyaudio
- numpy>=2.1.0
- sounddevice==0.4.6
- opencv-python>=4.10.0
-#  azure-cognitiveservices-speech==1.48.1
+# Numeric & Vision
+numpy>=2.1.0
+sounddevice==0.4.6
+opencv-python>=4.10.0
+
+# HTTP
 httpx==0.27.0
-#  python-dotenv==1.0.1
+
+# Typing
 typing-extensions==4.15.0
+
+# Wake Word Detection
+# Note: For Speex noise suppression on Raspberry Pi, install the wheel after:
+#  https://github.com/dscripka/openWakeWord/releases/download/v0.1.1/speexdsp_ns-0.1.2-cp313-cp313-linux_aarch64.whl
 openwakeword
+
+# Camera
+# IMPORTANT: Requires libcap-dev (see system deps above)
 picamera2
