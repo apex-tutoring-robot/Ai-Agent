@@ -13,6 +13,9 @@ from typing import Optional
 import numpy as np
 from dotenv import load_dotenv
 
+# Must be imported before PyAudio initialises to suppress ALSA noise
+from audio import suppress_alsa  # noqa: F401
+
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)

@@ -17,6 +17,9 @@ import webrtcvad
 import pyaudio
 import traceback
 
+# Must be imported before PyAudio initialises to suppress ALSA noise
+from audio import suppress_alsa  # noqa: F401
+
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
