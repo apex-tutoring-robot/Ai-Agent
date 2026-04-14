@@ -11,14 +11,11 @@ import logging
 from collections import deque
 import queue
 import threading
-from typing import Generator, Optional, Dict
+from typing import Generator, Optional
 from dotenv import load_dotenv
 import webrtcvad
 import pyaudio
 import traceback
-
-import numpy as np
-from dotenv import load_dotenv
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -54,11 +51,6 @@ if HAS_SPEEX:
         logger.info("✅ SpeexDSP loaded - AEC active (Preprocessor/NS missing)")
 else:
     logger.warning("⚠️  SpeexDSP NOT found - using Digital Ducking fallback for interruptions")
-
-try:
-    from . import suppress_alsa
-except ImportError:
-    pass
 
 
 class ContinuousVADCapture:
@@ -587,6 +579,8 @@ class ContinuousVADCapture:
         # Barge-in detection state
         barge_in_consecutive = 0
         barge_in_active = False  # Once true, stays true until playback ends
+        _barge_in_peak_rms = 0.0        # Track peak RMS this playback session
+        _barge_in_log_time = 0.0        # Throttle RMS telemetry to once/sec
         
         logger.info("📡 Continuous audio streaming started")
         
@@ -694,11 +688,18 @@ class ContinuousVADCapture:
                     mic_samples = np.frombuffer(audio_chunk, dtype=np.int16)
                     rms = np.sqrt(np.mean(mic_samples.astype(np.float32)**2))
                     
+                    if rms > _barge_in_peak_rms:
+                        _barge_in_peak_rms = rms
+                    _now = time.time()
+                    if _now - _barge_in_log_time >= 1.0:
+                        logger.debug(f"🔉 Barge-in RMS: {rms:.0f} (peak={_barge_in_peak_rms:.0f}, threshold={self._barge_in_energy_threshold})")
+                        _barge_in_log_time = _now
+
                     if rms > self._barge_in_energy_threshold:
                         barge_in_consecutive += 1
                     else:
                         barge_in_consecutive = 0
-                    
+
                     if barge_in_consecutive >= self._barge_in_consecutive_needed and not barge_in_active:
                         # BARGE-IN DETECTED! Open the gate.
                         barge_in_active = True
@@ -716,9 +717,12 @@ class ContinuousVADCapture:
                 else:
                     # Bot is NOT playing — normal operation
                     # Reset barge-in state for next playback session
-                    if barge_in_active:
+                    if barge_in_active or barge_in_consecutive > 0 or _barge_in_peak_rms > 0:
+                        if _barge_in_peak_rms > 0:
+                            logger.debug(f"🔉 Barge-in session ended: peak RMS={_barge_in_peak_rms:.0f}, threshold={self._barge_in_energy_threshold}")
                         barge_in_active = False
                         barge_in_consecutive = 0
+                        _barge_in_peak_rms = 0.0
                     
                     # VAD check to update idle timer
                     try:

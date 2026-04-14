@@ -210,66 +210,6 @@ class TextToSpeechClient:
                 logger.error(f"Lost text in buffer: '{sentence_buffer}'")
             raise
     
-    def synthesize_stream_old(self, text_stream: Iterator[str]) -> Iterator[bytes]:
-        """
-        Synthesize streaming text to audio chunks with optimized WebSocket V2 streaming.
-        Uses phrase-level buffering (smaller chunks than full sentences) for lower latency.
-        Streams audio at byte-level for immediate playback.
-        
-        Args:
-            text_stream: Iterator yielding text chunks from LLM
-        
-        Yields:
-            Audio data chunks (smaller chunks for lower latency)
-        """
-        phrase_buffer = ""
-        
-        # Phrase boundary patterns - more frequent than sentences for lower latency
-        # Triggers on: sentence end, comma, semicolon, or after ~50 chars
-        phrase_endings = re.compile(r'[.!?;:]\s+|[.!?]$')
-        
-        try:
-            for text_chunk in text_stream:
-                phrase_buffer += text_chunk
-                
-                # Check for phrase boundaries OR if buffer is getting long
-                match = phrase_endings.search(phrase_buffer)
-                should_synthesize = match or len(phrase_buffer) > 50
-                
-                if should_synthesize:
-                    # Extract complete phrase(s)
-                    if match:
-                        end_pos = match.end()
-                        complete_text = phrase_buffer[:end_pos].strip()
-                        phrase_buffer = phrase_buffer[end_pos:]
-                    else:
-                        # Buffer too long without punctuation, split at last space
-                        last_space = phrase_buffer.rfind(' ', 0, 50)
-                        if last_space > 0:
-                            complete_text = phrase_buffer[:last_space].strip()
-                            phrase_buffer = phrase_buffer[last_space:]
-                        else:
-                            # No space found, synthesize everything
-                            complete_text = phrase_buffer.strip()
-                            phrase_buffer = ""
-                    
-                    if complete_text:
-                        # Use audio streaming for this phrase
-                        for audio_chunk in self._synthesize_with_audio_streaming(complete_text):
-                            yield audio_chunk
-            
-            # Synthesize any remaining text
-            if phrase_buffer.strip():
-                logger.debug(f"📝 Synthesizing remaining buffer: '{phrase_buffer.strip()[:50]}...'")
-                for audio_chunk in self._synthesize_with_audio_streaming(phrase_buffer.strip()):
-                    yield audio_chunk
-        
-        except Exception as e:
-            logger.error(f"Error in streaming synthesis: {e}")
-            if phrase_buffer:
-                logger.error(f"Lost text in buffer: '{phrase_buffer}'")
-            raise
-    
     def _synthesize_with_audio_streaming(self, text: str) -> Iterator[bytes]:
         """
         Synthesize text and stream audio in chunks for lower latency.
@@ -300,22 +240,6 @@ class TextToSpeechClient:
         except Exception as e:
             logger.error(f"Error in audio streaming synthesis: {e}")
             raise
-    
-    def synthesize_sentences(self, sentences: list[str]) -> Iterator[bytes]:
-        """
-        Synthesize a list of sentences to audio chunks.
-        
-        Args:
-            sentences: List of sentences to synthesize
-        
-        Yields:
-            Audio data chunks
-        """
-        for sentence in sentences:
-            if sentence.strip():
-                audio_data = self.synthesize_to_audio(sentence.strip())
-                if audio_data:
-                    yield audio_data
     
     def cleanup(self):
         """

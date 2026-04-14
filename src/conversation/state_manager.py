@@ -5,7 +5,7 @@ Manages conversation history and context for multi-turn interactions.
 
 import logging
 import threading
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Union
 from collections import deque
 
 logging.basicConfig(level='INFO')

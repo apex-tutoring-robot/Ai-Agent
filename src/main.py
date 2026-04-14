@@ -6,10 +6,8 @@ import time
 import queue
 from queue import Queue
 from typing import Optional
-from difflib import SequenceMatcher
 from dotenv import load_dotenv
 from visuals.faces.face_animator import FaceAnimator
-import numpy as np
 import logging
 
 from audio.wake_word import WakeWordDetector
@@ -240,9 +238,6 @@ class JarvisBot:
                 try:
                     logger.info(f"📝 Processing Turn: {user_text}")
 
-                    # Anonymize
-                    # anonymized_text = self.privacy_manager.anonymize(user_text)
-
                     # ── Camera Vision ──────────────────────────────────────────
                     # If the user's phrase is a camera trigger, capture an image,
                     # upload it to Azure Blob Storage, and store the SAS URL in
@@ -262,8 +257,6 @@ class JarvisBot:
                                 extracted = self.llm_client.extract_image_content(data_url)
                                 combined = f"{user_text}\n\n[Scanned homework content:\n{extracted}]"
                                 anonymized_text = self.privacy_manager.anonymize(combined)
-                                # self.conversation_manager.add_user_message(combined)
-                                # messages = self.conversation_manager.get_messages()
                                 logger.info("📷 Image extracted and stored as text")
                             except Exception as extract_err:
                                 logger.error(f"📷 Image extraction failed: {extract_err}")
@@ -282,12 +275,8 @@ class JarvisBot:
                             logger.error(f"📷 Camera failed to capture: {cam_err} — falling back to text-only")
                             combined = f"{user_text}\n\nCamera is not working, please talk to me!"
                             anonymized_text = self.privacy_manager.anonymize(combined)
-                            # self.conversation_manager.add_user_message(anonymized_text)
-                            # messages = self.conversation_manager.get_messages()
                     else:
                         anonymized_text = self.privacy_manager.anonymize(user_text)
-                        # self.conversation_manager.add_user_message(anonymized_text)
-                        # messages = self.conversation_manager.get_messages()
                     # ──────────────────────────────────────────────────────────
                     allowed, refusal_msg = self.guardrails.check_input(anonymized_text)
 
@@ -336,8 +325,6 @@ class JarvisBot:
                         logger.info("🛡️ Guardrails blocked input — speaking refusal")
                         final_text = refusal_msg
 
-                    # LLM Generation
-                    # llm_start = time.perf_counter()
                     # Start audio playback (callback mode)
                     # AEC: Provide reference audio back to VAD
                     self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
@@ -493,27 +480,7 @@ class JarvisBot:
                 time.sleep(0.5)
             
             logger.info(f"\n👋 Conversation ended")
-            # for audio_data in continuous_vad.listen_continuous():
-            #     if audio_data is None:
-            #         # Timeout reached
-            #         break
-                
-            #     turn_count += 1
-            #     logger.info(f"\n💬 Turn {turn_count}")
-                
-            #     # Process this turn
-            #     self.end_time = time.time()
-            #     if turn_count == 1:
-            #         logger.info(f"⏱️ latency to start STT upon detection of wake word : {(self.end_time - self.start_time):.3f}s")
-            #     # interrupted = self._process_turn(audio_data, continuous_vad)
-            #     self._process_turn(audio_data, continuous_vad)
-            #     # if interrupted:
-            #     #     logger.info("🛑 Conversation interrupted by wake word")
-            #     #     break
-            
-            # logger.info(f"\n👋 Conversation ended ({turn_count} turns)")
-            # logger.info(f"📊 {self.conversation_manager}")
-            
+
         except Exception as e:
             logger.error(f"Error in conversation: {e}")
         
@@ -543,93 +510,6 @@ class JarvisBot:
             logger.info("▶️  Resuming wake word detection...")
             self._restart_wake_word()
             self._interaction_lock.release()
-    
-    def _process_turn(self, audio_data: bytes, continuous_vad: ContinuousVADCapture) -> bool:
-        """
-        Process one turn of the conversation.
-        
-        Args:
-            audio_data: Captured audio data
-            continuous_vad: Continuous VAD instance (to reset idle timer)
-            
-        Returns:
-            True if interrupted, False otherwise
-        """
-        try:
-            # Step 1: Convert speech to text
-            logger.info("☁️  Converting speech to text...")
-            user_text = self.stt_client.recognize_from_audio_data(audio_data)
-            
-            if not user_text:
-                logger.warning("No speech recognized")
-                return False
-            
-            logger.info(f"📝 Student: {user_text}")
-            
-            # Step 2: Anonymize PII
-            anonymized_text = self.privacy_manager.anonymize(user_text)
-            
-            # Step 3: Add to conversation history
-            self.conversation_manager.add_user_message(anonymized_text)
-            
-            # Step 4: Generate LLM response with streaming
-            logger.info("🧠 Generating response...")
-            messages = self.conversation_manager.get_messages()
-            
-            # Start audio player streaming
-            self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
-            self.audio_player.start_streaming()
-            
-            # Collect response text chunks as they stream
-            response_chunks = []
-            try:
-                # Create a wrapper that collects chunks while streaming
-                def text_chunk_collector(llm_stream):
-                    """Collect text chunks while passing them through."""
-
-                    for chunk in llm_stream:
-                        response_chunks.append(chunk)
-                        if len(response_chunks) == 1:
-                            logger.info(f"⏱️  LLM TTFT: {(time.time() - llm_start):.3f}s")
-
-                        yield chunk
-                
-                # Stream LLM output through collector to TTS
-                llm_start = time.time()
-                llm_stream = self.llm_client.generate_response_stream(messages)
-
-                # Now synthesize TTS from collected text
-                tts_start = time.perf_counter()
-                response_text_stream = text_chunk_collector(llm_stream)  # Iterator over chunks
-                tts_stream = self.tts_client.synthesize_stream(response_text_stream)
-
-                # Stream audio to player
-                for audio_chunk in tts_stream:
-                    self.audio_player.queue_audio(audio_chunk)
-                
-                # Wait for playback to complete
-                self.audio_player.stop_streaming()
-                
-                # Combine collected chunks into full response
-                response_text = ''.join(response_chunks)
-                logger.info(f"Jarvis: {response_text}")
-                
-                # Add assistant response to conversation
-                self.conversation_manager.add_assistant_message(response_text)
-                
-                # Reset idle timer after our response
-                continuous_vad.reset_idle_timer()
-                
-            except Exception as e:
-                logger.error(f"Error in streaming pipeline: {e}")
-                self.audio_player.stop_streaming()
-                raise
-            
-            return False  # No interruption possible in continuous mode
-        
-        except Exception as e:
-            logger.error(f"Error processing turn: {e}")
-            return False
     
     def _process_turn_streaming(self, continuous_vad: ContinuousVADCapture, output_device_index: int = None) -> bool:
         """ Process one turn of the conversation using streaming STT.

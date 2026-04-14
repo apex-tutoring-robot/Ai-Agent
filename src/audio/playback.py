@@ -10,7 +10,6 @@ import queue
 import threading
 from typing import Optional
 
-import sounddevice as sd
 import numpy as np
 from dotenv import load_dotenv
 

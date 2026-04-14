@@ -4,7 +4,7 @@ Placeholder implementation for user to populate with privacy logic.
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict
 
 logging.basicConfig(level='INFO')
 logger = logging.getLogger(__name__)
