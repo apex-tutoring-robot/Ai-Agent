@@ -76,7 +76,7 @@ class JarvisBot:
         )
         self.camera = Camera()
         self.conversation_manager = ConversationStateManager(
-            max_history=int(os.getenv('MAX_CONVERSATION_HISTORY', 20))
+            max_history=int(os.getenv('MAX_CONVERSATION_HISTORY', 30))
         )
         
         self._is_running = False
@@ -293,6 +293,7 @@ class JarvisBot:
 
                             try:
                                 extracted = self.llm_client.extract_image_content(data_url)
+                                continuous_vad.reset_idle_timer()  # extraction can take 5-10s
                                 combined = f"{user_text}\n\n[Scanned homework content:\n{extracted}]"
                                 anonymized_text = self.privacy_manager.anonymize(combined)
                                 logger.info("📷 Image extracted and stored as text")
@@ -317,6 +318,7 @@ class JarvisBot:
                         anonymized_text = self.privacy_manager.anonymize(user_text)
                     # ──────────────────────────────────────────────────────────
                     allowed, refusal_msg = self.guardrails.check_input(anonymized_text)
+                    continuous_vad.reset_idle_timer()  # guardrails LLM call can take 5-10s
 
                     if allowed:
                         # Add to conversation history only after input passes
@@ -513,12 +515,16 @@ class JarvisBot:
                     logger.warning("♻️  FATAL AUDIO ERROR - Recreating system...")
                     self._recreate_audio_system()
                 
-                # Check if idle timeout exceeded
-                idle_duration = time.time() - continuous_vad.last_speech_time
-                if idle_duration >= idle_timeout:
-                    logger.info(f"⏱️  {idle_timeout}s idle timeout - ending")
-                    self._conversation_active.clear()
-                    break
+                # Check if idle timeout exceeded — but ONLY when the speaker is
+                # idle. Long turns (camera + image extraction + LLM) can exceed
+                # idle_timeout during processing, which would tear down the
+                # conversation mid-response and leave threads in a bad state.
+                if not self._speaker_busy.is_set():
+                    idle_duration = time.time() - continuous_vad.last_speech_time
+                    if idle_duration >= idle_timeout:
+                        logger.info(f"⏱️  {idle_timeout}s idle timeout - ending")
+                        self._conversation_active.clear()
+                        break
                     
                 time.sleep(0.5)
             
