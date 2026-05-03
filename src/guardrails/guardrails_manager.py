@@ -2,7 +2,7 @@
 NeMo Guardrails manager for Jarvis K-8 tutoring robot.
 
 Provides input and output safety rails:
-  - Input: topic restriction (math/science only) + safety (no harmful/jailbreak content)
+  - Input: school-subject allowlist + safety (no harmful/jailbreak content)
   - Output: safety check before TTS (blocks any harmful LLM output before it is spoken)
 
 Both checks fail-open: if NeMo encounters an error, the bot continues normally
@@ -10,29 +10,33 @@ rather than silently breaking the conversation.
 """
 
 import os
+import re
 import asyncio
 import logging
 from typing import Optional, Tuple
+
+_ENV_PATTERN = re.compile(r'\$\{env:([^}]+)\}')
 
 logger = logging.getLogger(__name__)
 
 # Kid-friendly refusal messages keyed by block reason
 REFUSAL_MESSAGES = {
     "off_topic": (
-        "That is an interesting question, but I can only help with math and science! "
-        "Would you like to explore a math or science topic today?"
+        "That is not something I can help with. I am here to help with school subjects — "
+        "English, math, science, history, civics, computers, arts, sports, and more. "
+        "What would you like to learn today?"
     ),
     "harmful_input": (
-        "I cannot help with that. Let us talk about something fun, "
-        "like why the sky is blue or how to add fractions!"
+        "I cannot help with that. Let us focus on learning! "
+        "What school subject would you like to explore today?"
     ),
     "jailbreak": (
-        "I am Jarvis, your math and science tutor! "
+        "I am Jarvis, your school tutor! "
         "What would you like to learn today?"
     ),
     "harmful_output": (
-        "I am not sure how to answer that safely. "
-        "Let us get back to learning! Do you have a math or science question?"
+        "I am not sure how to answer that. "
+        "Let us get back to learning! What school subject can I help you with?"
     ),
 }
 
@@ -41,6 +45,39 @@ _REFUSAL_SIGNATURES = [msg[:40].lower() for msg in REFUSAL_MESSAGES.values()]
 
 # NeMo's own default block sentinel (returned when no custom flow matches)
 _NEMO_DEFAULT_BLOCK = "i'm sorry, i can't respond to that"
+
+# Marker injected by the vision pipeline when image content is appended to the user message
+_IMAGE_CONTENT_MARKER = "[Scanned homework content:"
+
+# Allowlist-style prompt for evaluating scanned image content.
+# Intentionally more restrictive than the general input prompt: only clearly
+# math/science homework/diagrams pass — portraits, objects, scenes do not.
+_IMAGE_EVAL_PROMPT = """\
+You are a content filter for Jarvis, an AI tutor for K-8 students covering all school subjects.
+
+A student has shared an image. Below is what the image shows.
+
+Image content: "{image_content}"
+
+The image is APPROPRIATE (answer No) if it clearly shows educational content from any school subject:
+- Mathematics: equations, numbers, word problems, graphs, geometry, fractions, worksheets
+- Science: biology diagrams, chemistry equations, physics problems, experiments, nature diagrams
+- English/language arts: text passages, grammar exercises, writing prompts, literature excerpts
+- History/civics/geography: maps, historical documents, timelines, diagrams
+- Economics: charts, supply/demand diagrams, financial concepts
+- Computer science: code, flowcharts, circuit diagrams
+- Arts/music: labeled artwork, music notation, art history images
+- Sports/PE: technique diagrams, rules illustrations, fitness charts
+- Any other school homework worksheet or educational diagram
+
+The image is NOT APPROPRIATE (answer Yes) if it shows:
+- People, portraits, selfies, or faces unrelated to education
+- Random food, drinks, or cooking
+- Celebrity or entertainment content
+- Anything clearly not educational or inappropriate for children
+
+Should this image be blocked?
+Answer [Yes/No]:"""
 
 # Keywords for fast keyword-based refusal classification (no extra LLM call)
 _JAILBREAK_KEYWORDS = {
@@ -98,6 +135,18 @@ class GuardrailsManager:
             from nemoguardrails import LLMRails, RailsConfig
 
             config = RailsConfig.from_path(self._config_path)
+
+            # NeMo Guardrails does not expand ${env:VAR} when variables are
+            # injected via load_dotenv() rather than the OS environment at
+            # process start. Resolve them here before LLMRails consumes them.
+            for model in config.models:
+                if model.parameters:
+                    for key, value in list(model.parameters.items()):
+                        if isinstance(value, str) and _ENV_PATTERN.search(value):
+                            model.parameters[key] = _ENV_PATTERN.sub(
+                                lambda m: os.getenv(m.group(1), ''), value
+                            )
+
             self._rails = LLMRails(config)
             self._enabled = True
             logger.info("GuardrailsManager initialized from %s", self._config_path)
@@ -123,36 +172,63 @@ class GuardrailsManager:
 
     def check_input(self, user_text: str) -> Tuple[bool, Optional[str]]:
         """
-        Run NeMo input rails against user_text BEFORE calling the main LLM.
+        Gate user_text BEFORE calling the main LLM.
 
-        This is the gate that prevents off-topic or harmful queries from ever
-        reaching Azure OpenAI, saving both API cost and response latency.
+        Camera-trigger path: if the message contains scanned image content
+        (appended by the vision pipeline), evaluate only the IMAGE content for
+        topic relevance. The camera command itself ("can you take a picture?")
+        is always allowed — we only gate what the image actually shows.
 
-        Args:
-            user_text: The transcribed (and PII-anonymised) user utterance.
+        Fast path: keyword scan for obvious jailbreak/harmful content (no LLM).
+        LLM path: single self_check_input call to enforce the math/science-only
+        allowlist.
 
         Returns:
             (allowed, refusal_message)
-              allowed=True  → input passed all rails; proceed with LLM call.
-              allowed=False → input was blocked; speak refusal_message instead.
         """
         if not self._enabled:
             return True, None
 
-        try:
-            response = asyncio.run(
-                self._rails.generate_async(
-                    messages=[{"role": "user", "content": user_text}]
-                )
+        # Vision pipeline appends "[Scanned homework content: ...]" to the user
+        # message. Evaluate only the image content — the camera command itself
+        # is always a valid meta-request.
+        marker_idx = user_text.find(_IMAGE_CONTENT_MARKER)
+        if marker_idx != -1:
+            image_content = (
+                user_text[marker_idx + len(_IMAGE_CONTENT_MARKER):]
+                .rstrip(']')
+                .strip()
             )
+            if not image_content:
+                return True, None
+            try:
+                allowed = asyncio.run(self._check_image_content_async(image_content))
+                if not allowed:
+                    logger.info("Guardrails BLOCKED image content (not math/science)")
+                    return False, REFUSAL_MESSAGES["off_topic"]
+                return True, None
+            except Exception as exc:
+                logger.error(
+                    "Guardrails image content check error: %s — allowing through (fail-open).", exc
+                )
+                return True, None
 
-            bot_text = response.strip() if isinstance(response, str) else ""
+        lowered = user_text.lower()
 
-            if self._is_blocked_response(bot_text):
+        if any(kw in lowered for kw in _JAILBREAK_KEYWORDS):
+            logger.info("Guardrails BLOCKED input (jailbreak keyword): '%.60s'", user_text)
+            return False, REFUSAL_MESSAGES["jailbreak"]
+
+        if any(kw in lowered for kw in _HARM_KEYWORDS):
+            logger.info("Guardrails BLOCKED input (harm keyword): '%.60s'", user_text)
+            return False, REFUSAL_MESSAGES["harmful_input"]
+
+        try:
+            allowed = asyncio.run(self._self_check_input_async(user_text))
+            if not allowed:
                 refusal = self._classify_refusal(user_text)
                 logger.info("Guardrails BLOCKED input: '%.60s'", user_text)
                 return False, refusal
-
             return True, None
 
         except Exception as exc:
@@ -163,40 +239,21 @@ class GuardrailsManager:
 
     def check_output(self, bot_response: str) -> Tuple[bool, str]:
         """
-        Run NeMo output rails against the FULL buffered LLM response,
-        BEFORE it is sent to TTS.
-
-        Args:
-            bot_response: The complete LLM-generated text for this turn.
+        Run only self_check_output against the LLM response, BEFORE TTS.
 
         Returns:
             (safe, final_text)
-              safe=True  → final_text is the original bot_response (pass through).
-              safe=False → final_text is a kid-friendly refusal; speak this instead.
+              safe=True  → pass through original bot_response.
+              safe=False → speak kid-friendly refusal instead.
         """
         if not self._enabled:
             return True, bot_response
 
         try:
-            # Feed as a two-message context so NeMo runs output rails on the response
-            response = asyncio.run(
-                self._rails.generate_async(
-                    messages=[
-                        {"role": "user", "content": "[output check]"},
-                        {"role": "assistant", "content": bot_response},
-                    ]
-                )
-            )
-
-            result_text = response.strip() if isinstance(response, str) else bot_response
-
-            if self._is_blocked_response(result_text):
-                logger.warning(
-                    "Guardrails BLOCKED output: '%.80s'", bot_response
-                )
+            allowed = asyncio.run(self._self_check_output_async(bot_response))
+            if not allowed:
+                logger.warning("Guardrails BLOCKED output: '%.80s'", bot_response)
                 return False, REFUSAL_MESSAGES["harmful_output"]
-
-            # Always return the ORIGINAL response — do not use NeMo's re-generation
             return True, bot_response
 
         except Exception as exc:
@@ -204,6 +261,67 @@ class GuardrailsManager:
                 "Guardrails output check error: %s — passing through (fail-open).", exc
             )
             return True, bot_response
+
+    async def _check_image_content_async(self, image_content: str) -> bool:
+        """
+        Evaluate scanned image content against a strict math/science allowlist.
+
+        Uses a hardcoded allowlist prompt rather than the general self_check_input
+        prompt, because the general prompt is a blocklist (food/sports/etc.) that
+        leaves ambiguous content like 'person in an office' uncaught.  This prompt
+        only passes clearly educational math/science material.
+        """
+        from langchain_core.messages import HumanMessage
+        filled = _IMAGE_EVAL_PROMPT.format(image_content=image_content)
+        result = await self._rails.llm.ainvoke(
+            [HumanMessage(content=filled)],
+            max_tokens=3,
+        )
+        answer = (result.content if hasattr(result, 'content') else str(result)).strip().lower()
+        return not answer.startswith('yes')
+
+    async def _self_check_input_async(self, user_text: str) -> bool:
+        """Call self_check_input directly via LLM, bypassing NeMo's full pipeline."""
+        prompt_template = None
+        for prompt in self._rails.config.prompts:
+            if prompt.task == 'self_check_input':
+                prompt_template = prompt.content
+                break
+
+        if not prompt_template:
+            return True
+
+        filled = re.sub(r'\{\{\s*user_input\s*\}\}', user_text, prompt_template)
+
+        from langchain_core.messages import HumanMessage
+        result = await self._rails.llm.ainvoke(
+            [HumanMessage(content=filled)],
+            max_tokens=3,
+        )
+        answer = (result.content if hasattr(result, 'content') else str(result)).strip().lower()
+        return not answer.startswith('yes')
+
+    async def _self_check_output_async(self, bot_response: str) -> bool:
+        """Call self_check_output directly, bypassing NeMo's full pipeline."""
+        # Pull the prompt template from the loaded config
+        prompt_template = None
+        for prompt in self._rails.config.prompts:
+            if prompt.task == 'self_check_output':
+                prompt_template = prompt.content
+                break
+
+        if not prompt_template:
+            return True
+
+        filled = re.sub(r'\{\{\s*bot_response\s*\}\}', bot_response, prompt_template)
+
+        from langchain_core.messages import HumanMessage
+        result = await self._rails.llm.ainvoke(
+            [HumanMessage(content=filled)],
+            max_tokens=3,
+        )
+        answer = (result.content if hasattr(result, 'content') else str(result)).strip().lower()
+        return not answer.startswith('yes')
 
     # ──────────────────────────────────────────────────────────────────────────
     # PRIVATE HELPERS
