@@ -83,9 +83,14 @@ class JarvisBot:
         self._interaction_lock = threading.Lock()
         self._interruption_event = threading.Event()
         self._speaker_busy = threading.Event() # Track if speaker is active
-        self._conversation_active = threading.Event() 
+        self._conversation_active = threading.Event()
         self._request_queue = Queue()
-        
+
+        # ── Display sleep state ──
+        self._display_on = True
+        self._display_timer: Optional[threading.Timer] = None
+        self._display_lock = threading.Lock()
+
         # ── Echo Guard State ──
         self._bot_is_speaking = False          # True while TTS audio is playing
         self._last_bot_response = ""           # Full text of last bot response
@@ -120,6 +125,39 @@ class JarvisBot:
             logger.info("✅ Audio system fully recreated and re-wired")
         except Exception as e:
             logger.error(f"Failed to recreate audio system: {e}")
+
+    # ── Display power management ───────────────────────────────────────────────
+
+    def _set_display_power(self, on: bool) -> None:
+        if not self.face:
+            return
+        os.system(f"vcgencmd display_power {'1' if on else '0'}")
+        self._display_on = on
+        logger.info(f"🖥️  Display power {'on' if on else 'off'}")
+
+    def _on_display_sleep(self) -> None:
+        logger.info("💤 Display sleep timeout — turning off display")
+        self._set_display_power(False)
+
+    def _schedule_display_sleep(self) -> None:
+        if not self.face:
+            return
+        timeout = int(os.getenv('DISPLAY_SLEEP_TIMEOUT', 60))
+        with self._display_lock:
+            if self._display_timer:
+                self._display_timer.cancel()
+            self._display_timer = threading.Timer(timeout, self._on_display_sleep)
+            self._display_timer.daemon = True
+            self._display_timer.start()
+        logger.info(f"💤 Display will sleep in {timeout}s of inactivity")
+
+    def _cancel_display_sleep(self) -> None:
+        with self._display_lock:
+            if self._display_timer:
+                self._display_timer.cancel()
+                self._display_timer = None
+
+    # ──────────────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _text_similarity(a: str, b: str) -> float:
@@ -397,6 +435,11 @@ class JarvisBot:
 
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
+        # Cancel display sleep timer and restore display before anything else
+        self._cancel_display_sleep()
+        if not self._display_on:
+            self._set_display_power(True)
+
         # Prevent concurrent interactions
         if not self._interaction_lock.acquire(blocking=False):
             logger.warning("Already in conversation, ignoring wake word")
@@ -698,6 +741,7 @@ class JarvisBot:
             daemon=True
         )
         wake_thread.start()
+        self._schedule_display_sleep()
     
     def run(self):
         """Start Jarvis and run the main loop."""
@@ -710,6 +754,7 @@ class JarvisBot:
         logger.info("Press Ctrl+C to stop\n")
         
         self._is_running = True
+        self._schedule_display_sleep()
 
         try:
             # First blocking wake word listen. When a wake word fires, _handle_wake_word()
@@ -736,9 +781,11 @@ class JarvisBot:
     def stop(self):
         """Stop Jarvis and cleanup resources."""
         logger.info("Shutting down Jarvis...")
-        
+
         self._is_running = False
-        
+        self._cancel_display_sleep()
+        self._set_display_power(True)  # Restore display on shutdown
+
         # Stop wake word detector
         if self.wake_word_detector:
             self.wake_word_detector.stop()
