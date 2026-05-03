@@ -20,8 +20,10 @@ from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
 from vision.camera import Camera
 from guardrails.guardrails_manager import GuardrailsManager
+import config.app_config as app_config
 
 load_dotenv(".env")
+_cfg = app_config.load()
 
 
 def _setup_logging():
@@ -67,9 +69,20 @@ class JarvisBot:
             pa=self.pa,
             on_level=self.face.push_mouth_level if self.face else None
         )
-        self.stt_client = SpeechToTextClient()
-        self.llm_client = LLMClient()
-        self.tts_client = TextToSpeechClient()
+        self.stt_client = SpeechToTextClient(
+            speech_key=app_config.get(_cfg, "AZURE_SPEECH_KEY"),
+            speech_region=app_config.get(_cfg, "AZURE_SPEECH_REGION"),
+        )
+        self.llm_client = LLMClient(
+            api_key=app_config.get(_cfg, "AZURE_OPENAI_API_KEY"),
+            endpoint=app_config.get(_cfg, "AZURE_OPENAI_ENDPOINT"),
+            deployment=app_config.get(_cfg, "AZURE_OPENAI_DEPLOYMENT"),
+            api_version=app_config.get(_cfg, "AZURE_OPENAI_API_VERSION"),
+        )
+        self.tts_client = TextToSpeechClient(
+            speech_key=app_config.get(_cfg, "AZURE_SPEECH_KEY"),
+            speech_region=app_config.get(_cfg, "AZURE_SPEECH_REGION"),
+        )
         self.privacy_manager = PrivacyManager()
         self.guardrails = GuardrailsManager(
             config_path=os.getenv('GUARDRAILS_CONFIG_PATH', 'config/guardrails')

@@ -22,6 +22,7 @@
 
 # Azure AI Services
 azure-cognitiveservices-speech==1.40.0
+azure-appconfiguration>=1.6.0
 openai>=1.12.0
 
 # NeMo Guardrails for topic control and child safety
