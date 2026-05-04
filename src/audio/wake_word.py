@@ -68,13 +68,11 @@ class WakeWordDetector:
         self.model_name = model_name or os.getenv('WAKE_WORD_MODEL', '')
         self.threshold = threshold if threshold is not None else float(os.getenv('WAKE_WORD_THRESHOLD', 0.5))
         self.vad_threshold = vad_threshold if vad_threshold is not None else float(os.getenv('WAKE_WORD_VAD_THRESHOLD', 0))
-        self.enable_speex = enable_speex_noise_suppression
-        self.input_device_index = input_device_index if input_device_index is not None else int(os.getenv('AUDIO_INPUT_DEVICE_INDEX', 1))
+        self.enable_speex = False
+        self.input_device_index = None
         
         self.model = None
         self.audio_stream = None
-        self.pa = pa
-        self._owns_pa = (pa is None)
         self._is_running = False
         self.last_detection_time = 0  # For debouncing multiple detections
         
@@ -84,6 +82,13 @@ class WakeWordDetector:
         
         logger.info(f"Wake word detector initialized: model='{self.model_name or 'all'}', "
                    f"threshold={self.threshold}, vad={self.vad_threshold}, speex={self.enable_speex}")
+                   
+        """
+        Start listening for wake word.
+        
+        Args:
+            callback: Function to call when wake word is detected
+        """
     
     def start(self, callback: Callable[[], None]) -> None:
         """
@@ -93,141 +98,82 @@ class WakeWordDetector:
             callback: Function to call when wake word is detected
         """
         try:
-            # Initialize openWakeWord model
             logger.info("Loading openWakeWord model...")
-            
-            # Determine model paths
-            if self.model_path and os.path.exists(self.model_path):
-                # Load specific custom model file
-                model_paths = [self.model_path]
-                logger.info(f"Loading custom model: {self.model_path}")
-            else:
-                # Load all pre-trained models (will filter by name during prediction)
-                model_paths = []
-                logger.info("Loading all pre-trained models...")
-            
-            # Try to enable Speex if requested (only works on Linux with speexdsp_ns installed)
-            try:
-                self.model = Model(
-                    wakeword_model_paths=model_paths,
-                    # inference_framework='onnx',  # Use ONNX (works on both Windows and Pi)
-                    enable_speex_noise_suppression=self.enable_speex,
-                    vad_threshold=self.vad_threshold
-                )
-                if self.enable_speex:
-                    logger.info("✓ Speex noise suppression enabled")
-            except ModuleNotFoundError as e:
-                if 'speexdsp_ns' in str(e):
-                    logger.warning("Speex not installed, falling back to basic mode")
-                    self.model = Model(
-                        wakeword_model_paths=model_paths,
-                        # inference_framework='onnx',
-                        enable_speex_noise_suppression=False,
-                        vad_threshold=self.vad_threshold
-                    )
-                else:
-                    raise
-            
+
+            # Load all built-in models, then filter to self.model_name later
+            self.model = Model(
+                wakeword_model_paths=[],
+                enable_speex_noise_suppression=False,
+                vad_threshold=self.vad_threshold
+            )
             logger.info(f"✓ Models loaded: {list(self.model.models.keys())}")
-            
-            # Validate model name if using pre-trained
+
             if self.model_name and self.model_name not in self.model.models:
-                logger.warning(f"Model '{self.model_name}' not found. "
-                             f"Available: {list(self.model.models.keys())}")
-                logger.info(f"Will respond to any wake word")
+                logger.warning(
+                    f"Model '{self.model_name}' not found. Available: {list(self.model.models.keys())}"
+                )
                 self.model_name = None
-            
-            # Initialize PyAudio if not provided
-            if not self.pa:
-                self.pa = pyaudio.PyAudio()
-                self._owns_pa = True
-                logger.info("PyAudio initialized (owned by WakeWordDetector)")
-            else:
-                logger.info("♻️  Reusing shared PyAudio instance in WakeWordDetector")
-            
-            # Open audio stream with robust fallback (Channels 1 -> 2 -> Default Device)
-            self.audio_stream = None
-            self._actual_channels = 1
-            
-            # List of (channels, device_index) to try
-            configs_to_try = [
-                (1, self.input_device_index),
-                (2, self.input_device_index),
-                (1, None), # System Default
-                (2, None)  # System Default Stereo
-            ]
-            
-            for channels, dev_index in configs_to_try:
-                try:
-                    self.audio_stream = self.pa.open(
-                        rate=self.sample_rate,
-                        channels=channels,
-                        format=pyaudio.paInt16,
-                        input=True,
-                        frames_per_buffer=self.chunk_size,
-                        input_device_index=dev_index
-                    )
-                    self._actual_channels = channels
-                    logger.info(f"✓ Audio stream opened: {channels} channels, device index: {dev_index}")
-                    break
-                except Exception as e:
-                    logger.debug(f"Failed configuration ({channels} channels, index {dev_index}): {e}")
-                    continue
-            
-            if not self.audio_stream:
-                raise RuntimeError("Could not open audio input stream after all fallbacks failed.")
-            
-            logger.info(f"Wake word detection started (device index: {self.input_device_index})")
-            if self.model_name:
-                logger.info(f"Listening for '{self.model_name}' (threshold: {self.threshold})")
-            else:
-                logger.info(f"Listening for any wake word (threshold: {self.threshold})")
-            
-            if self.vad_threshold > 0:
-                logger.info(f"VAD filtering enabled (threshold: {self.vad_threshold})")
-            
+
+            # Always use a dedicated PyAudio instance here
+            self.pa = pyaudio.PyAudio()
+            self._owns_pa = True
+            logger.info("PyAudio initialized (owned by WakeWordDetector)")
+
+            # Open input stream (SAFE VERSION)
+            try:
+                self.audio_stream = self.pa.open(
+                    rate=self.sample_rate,
+                    channels=1,
+                    format=pyaudio.paInt16,
+                    input=True,
+                    frames_per_buffer=self.chunk_size,
+                    input_device_index=self.input_device_index
+                )
+            except Exception as e:
+                logger.warning(f"Failed to open with device index {self.input_device_index}, using default mic")
+
+                self.audio_stream = self.pa.open(
+                    rate=self.sample_rate,
+                    channels=1,
+                    format=pyaudio.paInt16,
+                    input=True,
+                    frames_per_buffer=self.chunk_size
+                )
+            logger.info(f"✓ Audio stream opened on input device index {self.input_device_index}")
+
             self._is_running = True
-            
-            # Listen loop
+            logger.info("Wake word detection started")
+
             while self._is_running:
-                # Read audio chunk
                 audio_data = self.audio_stream.read(self.chunk_size, exception_on_overflow=False)
-                
-                # Convert bytes to numpy array (int16)
                 audio_array = np.frombuffer(audio_data, dtype=np.int16)
-                
-                # Mix down to mono if device is stereo
-                if self._actual_channels == 2:
-                    audio_array = audio_array.reshape(-1, 2)[:, 0]
-                
-                # Get predictions from model
+
                 predictions = self.model.predict(audio_array)
-                
-                # Filter by model name if specified
+    
                 current_time = time.time()
-                cooldown_period = 2.0  # Don't trigger again within 2 seconds
-                
+                cooldown_period = 2.0
+
                 if self.model_name:
-                    # Check only the specified model
                     if self.model_name in predictions:
                         score = predictions[self.model_name]
-                        if score >= self.threshold:
-                            # Check cooldown to prevent multiple detections from same utterance
-                            if current_time - self.last_detection_time >= cooldown_period:
-                                logger.info(f"✓ Wake word detected! (model: {self.model_name}, score: {score:.3f})")
-                                self.last_detection_time = current_time
-                                callback()
+                        if score >= self.threshold and (current_time - self.last_detection_time) >= cooldown_period:
+                            logger.info(
+                                f"✓ Wake word detected! (model: {self.model_name}, score: {score:.3f})"
+                            )
+                            self.last_detection_time = current_time
+                            callback()
                 else:
-                    # Check all models if no specific model name
                     for model_name, score in predictions.items():
-                        if score >= self.threshold:
-                            # Check cooldown to prevent multiple detections from same utterance
-                            if current_time - self.last_detection_time >= cooldown_period:
-                                logger.info(f"✓ Wake word detected! (model: {model_name}, score: {score:.3f})")
-                                self.last_detection_time = current_time
-                                callback()
-                                break
-        
+                        if score >= self.threshold and (current_time - self.last_detection_time) >= cooldown_period:
+                            logger.info(
+                                f"✓ Wake word detected! (model: {model_name}, score: {score:.3f})"
+                            )
+                            self.last_detection_time = current_time
+                            callback()
+                            break
+
+                time.sleep(0.01)
+
         except Exception as e:
             logger.error(f"Error in wake word detection: {e}")
             raise
@@ -247,14 +193,6 @@ class WakeWordDetector:
                 logger.info("Wake word detection paused (stream stopped but kept alive)")
             except Exception as e:
                 logger.warning(f"Error stopping stream during pause: {e}")
-    
-    def get_audio_stream(self):
-        """Get the active audio stream for reuse."""
-        return self.audio_stream
-    
-    def get_pyaudio_instance(self):
-        """Get the PyAudio instance for reuse."""
-        return self.pa
     
     def stop(self) -> None:
         """Stop wake word detection and clean up resources."""

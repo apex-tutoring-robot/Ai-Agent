@@ -8,8 +8,12 @@ from queue import Queue
 from typing import Optional
 from difflib import SequenceMatcher
 from dotenv import load_dotenv
-from visuals.faces.face_animator import FaceAnimator
 import numpy as np
+from PyQt5.QtWidgets import QApplication
+import sys
+
+from visuals.ui.main_window import MainWindow
+from visuals.ui.ui_signals import UISignals
 
 from audio.wake_word import WakeWordDetector
 from audio.continuous_vad import ContinuousVADCapture
@@ -21,6 +25,7 @@ from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
 import logging
 
+load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -28,20 +33,26 @@ logger = logging.getLogger(__name__)
 class JarvisBot:
     """Main orchestrator for Jarvis tutoring robot."""
     
-    def __init__(self, face: Optional['FaceAnimator'] = None):
+    def __init__(self, ui_signals=None):
         """Initialize Jarvis with all components."""
         logger.info("Initializing Jarvis...")
-        self.face = face
+        self.ui_signals = ui_signals        
         
         # Initialize shared PyAudio instance
         import pyaudio
         self.pa = pyaudio.PyAudio()
         
         # Initialize components with shared PyAudio
-        self.wake_word_detector = WakeWordDetector(pa=self.pa)
+        input_idx = os.getenv("AUDIO_INPUT_DEVICE_INDEX")
+        input_idx = int(input_idx) if input_idx not in (None, "") else None
+        
+        self.wake_word_detector = WakeWordDetector(
+            pa=self.pa,
+            input_device_index=input_idx
+        )
         self.audio_player = AudioPlayer(
             pa=self.pa,
-            on_level=self.face.push_mouth_level if self.face else None
+            on_level=(lambda level: self.ui_signals.mouth_level.emit(level)) if self.ui_signals else None
         )
         self.stt_client = SpeechToTextClient()
         self.llm_client = LLMClient()
@@ -104,6 +115,64 @@ class JarvisBot:
             return 0.0
         overlap = words_a & words_b
         return len(overlap) / min(len(words_a), len(words_b))
+        
+    def run_teaching_plan(self, plan, output_device_index, continuous_vad):
+        import time
+        
+        speech_steps = plan.get("speech", [])
+        visual_steps = plan.get("visuals", [])
+        
+        def visuals_for(step_id):
+            return [v for v in visual_steps if v.get("speech_id") == step_id]
+
+        self.audio_player.start_streaming(output_device_index=output_device_index)
+        logger.info("DEBUG: run_teaching_plan started")
+
+        try:
+            if self.ui_signals:
+                self.ui_signals.start_talking.emit()
+
+            for step in speech_steps:
+                if self._interruption_event.is_set():
+                    break
+                
+                step_id = step.get("id")
+                step_text = step.get("text", "").strip()
+                
+                if not step_text:
+                    continue
+                
+                actions = visuals_for(step["id"])
+
+                if self.ui_signals and actions:
+                    logger.info(f"DEBUG: emitting draw actions for step {step_id}: {actions}")
+                    self.ui_signals.draw_actions.emit(actions)
+
+                time.sleep(0.15)
+
+                audio_bytes = self.tts_client.synthesize_to_audio(step_text)
+                if audio_bytes and self.audio_player._is_playing:
+                    self.audio_player.queue_audio(audio_bytes)
+
+            self.audio_player.stop_streaming(immediate=False)
+
+        finally:
+            if self.ui_signals:
+                self.ui_signals.stop_talking.emit()
+                
+    def is_math_query(self, text: str) -> bool:
+        import re
+        
+        t = text.lower().strip()
+        
+        math_keywords = [
+            "solve", "equations", "add", "subtract", "multiply", "divide", "area", "perimeter", "radius", "diameter", "rectangle", "circle", "triangle", "fraction", "algebra", "geometry", "graph"
+        ]
+        
+        if any(word in t for word in math_keywords):
+            return True
+            
+        return bool(re.search(r"\d", t) and re.search(r"[\+\-\*/=]", t))
 
     def _listener_loop(self, continuous_vad, request_queue):
         """Producer: Always listening, detecting interruptions in real-time.
@@ -162,12 +231,76 @@ class JarvisBot:
                     logger.info(f"📌 User finalized: '{text}'")
                     self._interruption_event.clear()
                     self._barge_in_detected.clear()
+                    if self.ui_signals:
+                        self.ui_signals.listening.emit()
                     request_queue.put(text)
                     
             logger.info("📡 Listener worker stopped cleanly")
         except Exception as e:
             logger.error(f"Listener error: {e}")
             self._conversation_active.clear()
+            
+    def force_shape_if_missing(self, plan, user_text):
+        import re
+        text = user_text.lower()
+        visuals = plan.get("visuals", [])
+        
+        shape_map = {
+            "triangle": 3,
+            "pentagon": 5,
+            "hexagon": 6,
+            "heptagon": 7,
+            "octagon": 8,
+            "nonagon": 9,
+            "decagon": 10,
+        }
+        
+        sides = None
+        for word, n in shape_map.items():
+            if word in text:
+                sides = n
+                break 
+        
+        match = re.search(r"(\d+)\s*[- ]?sided|(\d+)\s+sides", text)
+        if match:
+            sides = int(match.group(1) or match.group(2))
+            
+        if not sides:
+            plan["visuals"] = visuals
+            return plan
+            
+        visuals = [
+            v for v in visuals
+            if v.get("action") not in ["draw_regular_polygon", "draw_polygon"]
+        ]
+        
+        speech = paln.get("speech", [])
+        speech_id = speech[0].get("id", 1) if speech else 1
+
+        has_clear = any(v.get("action") == "clear" for v in visuals)
+        if not has_clear:
+            visuals.insert(0, {"speech_id": speech_id, "action": "clear"})
+
+            visuals.insert(1, {
+                "speech_id": speech_id,
+                "action": "draw_regular_polygon",
+                "sides": max(3, min(12, sides)),
+                "cx": 700,
+                "cy": 270,
+                "radius": 125
+            })
+
+            visuals.insert(2, {
+                "speech_id": speech_id,
+                "action": "draw_text",
+                "text": f"{sides}-sided shape",
+                "sides": max(3, min(12, sides)),
+                "x": 610,
+                "y": 430
+            })
+
+        plan["visuals"] = visuals
+        return plan
 
     def _speaker_loop(self, continuous_vad, output_device_index):
         """Consumer: Processes requests and speaks."""
@@ -190,6 +323,32 @@ class JarvisBot:
                 
                 try:
                     logger.info(f"📝 Processing Turn: {user_text}")
+                    
+                    if self.is_math_query(user_text):
+                        logger.info("DEBUG: math query detected - generating teaching plan")
+                        if self.ui_signals:
+                            self.ui_signals.thinking.emit()
+                            
+                        anonymized_text = self.privacy_manager.anonymize(user_text)
+                        self.conversation_manager.add_user_message(anonymized_text)
+                    
+                        try:
+                            # LLM Generation
+                            messages = self.conversation_manager.get_messages()
+                            plan = self.llm_client.generate_teaching_plan(messages)
+                            plan = self.force_shape_if_missing(plan, user_text)
+                            self.run_teaching_plan(plan, output_device_index, continuous_vad)
+                            if self.ui_signals:
+                                self.ui_signals.show_teaching_layout.emit()
+                        
+                            self.run_teaching_plan(plan, output_device_index, continuous_vad)
+                            continue
+                        
+                        except Exception as e:
+                            logger.error(f"Teaching plan failed, falling back to normal response: {e}")
+                        
+                    if self.ui_signals:
+                        self.ui_signals.thinking.emit()
                     # Anonymize and prepare history
                     anonymized_text = self.privacy_manager.anonymize(user_text)
                     self.conversation_manager.add_user_message(anonymized_text)
@@ -201,8 +360,8 @@ class JarvisBot:
                     # Start audio playback (callback mode)
                     # AEC: Provide reference audio back to VAD
                     self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
-                    if self.face:
-                        self.face.start_talking()
+                    if self.ui_signals:
+                        self.ui_signals.start_talking.emit()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
                     
                     # ── ECHO GUARD: Signal that bot is now speaking ──
@@ -245,6 +404,8 @@ class JarvisBot:
                         
                         # Add full response to history only if NOT interrupted
                         full_response = "".join(response_chunks)
+                        if self.ui_signals:
+                            self.ui_signals.teaching_text.emit(full_response)
                         if full_response:
                             self._last_bot_response = full_response
                             self.conversation_manager.add_assistant_message(full_response)
@@ -261,8 +422,8 @@ class JarvisBot:
                 except Exception as turn_err:
                     logger.error(f"Error in speaker turn: {turn_err}")
                 finally:
-                    if self.face:
-                        self.face.start_idle()
+                    if self.ui_signals:
+                        self.ui_signals.stop_talking.emit()
                     # ── ECHO GUARD: Signal playback ended + start cooldown ──
                     self._bot_is_speaking = False
                     self._playback_ended_time = time.time()
@@ -288,9 +449,8 @@ class JarvisBot:
             logger.warning(f"Error searching for PulseAudio device: {e}")
         
         # Fallback to env var or default 1 (but log warning)
-        fallback = int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 1))
-        logger.warning(f"⚠️  PulseAudio not found - falling back to index {fallback}")
-        return fallback
+        logger.warning("⚠️ PulseAudio not found - using default output device")
+        return None
 
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
@@ -422,6 +582,9 @@ class JarvisBot:
                     continuous_vad.cleanup()
             except:
                 pass
+                
+            if self.ui_signals:
+                self.ui_signals.show_face_fullscreen.emit()
             
             # 4. Always restart wake word detection
             logger.info("▶️  Resuming wake word detection...")
@@ -526,8 +689,8 @@ class JarvisBot:
         """
         try:
             # Step 1: Stream audio chunks to STT
-            if self.face:
-                self.face.start_thinking()
+            if self.ui_signals:
+                self.ui_signals.thinking.emit()
             logger.info("☁️  Starting streaming speech recognition...")
             stt_start = time.perf_counter()
             
@@ -583,8 +746,8 @@ class JarvisBot:
                 # Start audio player BEFORE first audio arrives for lower latency
                 # CRITICAL: Use dedicated PulseAudio output stream
                 self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
-                if self.face:
-                    self.face.start_talking()
+                if self.ui_signals:
+                    self.ui_signals.start_talking.emit()
                 self.audio_player.start_streaming(output_device_index=output_device_index)
                 
                 # Full Duplex: Start monitoring for interruptions while bot speaks
@@ -670,8 +833,8 @@ class JarvisBot:
                 # This ensures we don't timeout while bot is generating/speaking
                 continuous_vad.reset_idle_timer()
                 
-                if self.face:
-                    self.face.start_idle()
+                if self.ui_signals:
+                    self.ui_signals.stop_talking.emit()
                 return True
                 
             except Exception as e:
@@ -705,8 +868,8 @@ class JarvisBot:
     
     def run(self):
         """Start Jarvis and run the main loop."""
-        if self.face:
-            self.face.start_idle()
+        if self.ui_signals:
+            self.ui_signals.stop_talking.emit()
         logger.info("\n" + "🤖 "*20)
         logger.info("Jarvis TUTORING ROBOT STARTED")
         logger.info("🤖 "*20 + "\n")
@@ -772,29 +935,18 @@ class JarvisBot:
 def main():
     import os
 
-    # ── Display configuration ──────────────────────────────────────────────────
-    # FACE_ENABLED=true          → show face animation
-    # FACE_ENABLED=false         → headless, no GUI (default when DISPLAY not set)
-    #
-    # DISPLAY_BACKEND=physical   → HDMI monitor          (DISPLAY=:0)
-    # DISPLAY_BACKEND=vnc        → TigerVNC session      (DISPLAY=:1)
-    # DISPLAY_BACKEND=auto       → pick first available X11 socket (:1 then :0)
-    #
-    # You can also skip DISPLAY_BACKEND and set DISPLAY directly, e.g. DISPLAY=:0
-    # ──────────────────────────────────────────────────────────────────────────
+    # -----------------------------
+    # DISPLAY CONFIG (KEEP THIS)
+    # -----------------------------
     face_env = os.getenv("FACE_ENABLED", "").strip().lower()
     if face_env in ("true", "1", "yes"):
         face_enabled = True
     elif face_env in ("false", "0", "no"):
         face_enabled = False
     else:
-        # Auto: enable face only when DISPLAY is already set in the environment
         face_enabled = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
     if face_enabled:
-        # DISPLAY_BACKEND always wins when explicitly set — it overrides whatever
-        # DISPLAY was loaded from .env so that a single knob controls the display.
-        # Priority: DISPLAY_BACKEND (explicit) > DISPLAY (env/shell) > default :0
         backend = os.getenv("DISPLAY_BACKEND", "").strip().lower()
 
         if backend == "vnc":
@@ -802,7 +954,6 @@ def main():
         elif backend == "physical":
             os.environ["DISPLAY"] = ":0"
         elif backend == "auto":
-            # Pick the first X11 socket that actually exists
             for candidate in (":1", ":0"):
                 if os.path.exists(f"/tmp/.X11-unix/X{candidate[1:]}"):
                     os.environ["DISPLAY"] = candidate
@@ -810,49 +961,47 @@ def main():
             else:
                 os.environ["DISPLAY"] = ":0"
         elif not os.environ.get("DISPLAY"):
-            # No DISPLAY_BACKEND and no DISPLAY — last resort default
             os.environ["DISPLAY"] = ":0"
 
-        # Ensure X authentication is available.
-        # TigerVNC stores its cookie in the same ~/.Xauthority file as the
-        # physical display, just under a different display entry (:1 vs :0).
+        # XAUTHORITY fix
         if not os.environ.get("XAUTHORITY"):
             xauth_path = os.path.expanduser("~/.Xauthority")
             if os.path.exists(xauth_path):
                 os.environ["XAUTHORITY"] = xauth_path
 
-        # Pre-check: verify the X11 socket actually exists before letting Qt try.
-        # Qt calls abort() on a missing display — that can't be caught by Python.
         display = os.environ.get("DISPLAY", "")
         display_num = display.lstrip(":").split(".")[0]
         socket_path = f"/tmp/.X11-unix/X{display_num}"
+
         if not os.path.exists(socket_path):
-            logger.warning(
-                f"X11 socket {socket_path} not found — is the display server running? "
-                f"Falling back to headless."
-            )
+            logger.warning("Display not available, switching to headless")
             face_enabled = False
         else:
-            logger.info(f"Face animation enabled on display {display}")
+            logger.info(f"Running UI on display {display}")
 
-    if not face_enabled:
-        logger.info("Face animation disabled — running headless (set FACE_ENABLED=true to enable)")
+    else:
+        logger.info("Running headless mode")
 
-    face = None
+    # -----------------------------
+    # QT APP (NEW)
+    # -----------------------------
     if face_enabled:
-        try:
-            face = FaceAnimator("src/visuals/faces")
-        except Exception as e:
-            logger.warning(f"Failed to init face animation: {e}. Falling back to headless.")
+        app = QApplication(sys.argv)
 
-    jarvis = JarvisBot(face)
+        ui_signals = UISignals()
+        window = MainWindow(ui_signals)
+        window.show()
 
-    if face:
+        jarvis = JarvisBot(ui_signals=ui_signals)
+
         worker = threading.Thread(target=jarvis.run, daemon=True)
         worker.start()
-        # cv2 GUI event loop must run on the main thread
-        face.render_forever()
+
+        sys.exit(app.exec_())
+
     else:
+        # Headless fallback
+        jarvis = JarvisBot(ui_signals=None)
         jarvis.run()
 
 if __name__ == "__main__":

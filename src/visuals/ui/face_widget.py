@@ -1,41 +1,43 @@
-import cv2
 import os
-import time
 import random
 import numpy as np
+import cv2
+
+from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtWidgets import QLabel, QWidget, QVBoxLayout
 
 
-class FaceAnimator:
-    def __init__(self, face_dir):
+class FaceWidget(QWidget):
+    def __init__(self, face_dir, parent=None):
+        super().__init__(parent)
+
         self.face_dir = face_dir
-        self.running = True
-
         self.emotion = "neutral"
         self.is_talking = False
-
-        # Mouth state
         self.mouth_open = 0.0
         self.external_mouth_level = 0.0
-
-        # Blink state
         self.blink = 0.0
 
-        # Load images
         self.faces = {}
         for name in ["neutral", "thinking", "happy", "blinking"]:
             self.faces[name] = self._load(name + ".png")
 
         self.talk_frames = [self._load(f"talk{i}.png") for i in range(1, 6)]
 
-        self.window = "CHIPPY"
-        cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.window, 1280, 720)
+        self.label = QLabel()
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setStyleSheet("background: transparent; border: none;")
+        self.label.setAlignment(Qt.AlignCenter)
 
-        print("[FACE] Ready")
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.label)
+        self.setLayout(layout)
 
-    # --------------------------------------------------
-    # Asset loading
-    # --------------------------------------------------
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_face)
+        self.timer.start(16)  # ~60 FPS
 
     def _load(self, name):
         path = os.path.join(self.face_dir, name)
@@ -43,10 +45,6 @@ class FaceAnimator:
         if img is None:
             raise RuntimeError(f"Failed to load {path}")
         return cv2.resize(img, (600, 600))
-
-    # --------------------------------------------------
-    # Public API
-    # --------------------------------------------------
 
     def stop_talking(self):
         self.emotion = "neutral"
@@ -61,52 +59,32 @@ class FaceAnimator:
 
     def stop_talking(self):
         self.is_talking = False
-        self.external_mouth_level = 0.0 # immediately decay toward closed
+        self.external_mouth_level = 0.0
 
-    def shutdown(self):
-        self.running = False
-
-    # --------------------------------------------------
-    # Animation Updates
-    # --------------------------------------------------
-
-    def _blink_update(self):
-        # Random blink trigger
-        if self.blink < 0.05 and random.random() < 0.01:
-            self.blink = 1.0
-        self.blink *= 0.85  # smooth decay
-        
     def push_mouth_level(self, level: float):
-        # Called from audio thread; keep it dead simple
         self.external_mouth_level = float(level)
 
+    def _blink_update(self):
+        if self.blink < 0.05 and random.random() < 0.01:
+            self.blink = 1.0
+        self.blink *= 0.85
 
     def _update_mouth(self):
-        attack = 0.60   # opens faster
-        release = 0.22  # closes smoother
+        attack = 0.60
+        release = 0.22
 
         target = self.external_mouth_level
-
-        # Noise gate
         if target < 0.03:
             target = 0.0
 
-        # Attack when rising, release when falling
         k = attack if target > self.mouth_open else release
-
         self.mouth_open += (target - self.mouth_open) * k
 
         if self.mouth_open < 0.01:
             self.mouth_open = 0.0
 
-
-    # --------------------------------------------------
-    # Frame Generation
-    # --------------------------------------------------
-
     def _frame(self):
         self._update_mouth()
-
         talking_now = self.is_talking or (self.mouth_open > 0.02)
 
         if talking_now and self.mouth_open > 0.05:
@@ -121,18 +99,25 @@ class FaceAnimator:
         if self.blink > 0.7:
             frame = self.faces["blinking"].copy()
 
+        return frame
 
-        return cv2.resize(frame, (1280, 720))
+    def update_face(self):
+        frame = self._frame()
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        bytes_per_line = ch * w
 
-    # --------------------------------------------------
-    # Render Loop
-    # --------------------------------------------------
+        image = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(image)
 
-    def render_forever(self):
-        print("[FACE] Render loop started (MAIN THREAD)")
-        while self.running:
-            cv2.imshow(self.window, self._frame())
-            cv2.waitKey(1)
-            time.sleep(1 / 60)  # 60 FPS
+        self.label.setPixmap(
+            pixmap.scaled(
+                self.label.size(),
+                Qt.IgnoreAspectRatio,
+                Qt.SmoothTransformation
+            )
+        )
 
-        cv2.destroyAllWindows()
+    def resizeEvent(self, event):
+        self.update_face()
+        super().resizeEvent(event)

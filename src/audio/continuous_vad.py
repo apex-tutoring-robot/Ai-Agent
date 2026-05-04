@@ -94,7 +94,12 @@ class ContinuousVADCapture:
         self.vad_aggressiveness = vad_aggressiveness or int(os.getenv('VAD_AGGRESSIVENESS', 2))
         self.silence_timeout_ms = silence_timeout_ms or int(os.getenv('SILENCE_TIMEOUT_MS', 2000))
         self.idle_timeout_seconds = idle_timeout_seconds or int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
-        self.input_device_index = input_device_index or int(os.getenv('AUDIO_INPUT_DEVICE_INDEX', 1))
+        env_input = os.getenv('AUDIO_INPUT_DEVICE_INDEX')
+        self.input_device_index = (
+            input_device_index
+            if input_device_index is not None
+            else (int(env_input) if env_input not in (None, "") else None)
+        )   
         
         # Validate sample rate for WebRTC VAD
         if self.sample_rate not in [8000, 16000, 32000, 48000]:
@@ -149,6 +154,8 @@ class ContinuousVADCapture:
         self.ref_ring_timestamp = 0.0 # DAC Time of the last sample in ring
         self.last_reference_time = 0.0 # Wall-clock time of last reference update
         self.ref_lock = threading.Lock()
+        self.echo_canceller = None
+        self.preprocessor = None
         
         # AEC Delay Compensation & Stabilization
         self.mic_delay_buffer = deque(maxlen=int(os.getenv('AEC_DELAY_CHUNKS', '12')))
@@ -158,41 +165,41 @@ class ContinuousVADCapture:
         self._aec_locked_offset = None # Permanent lock per session
         
         self.preprocessor = None
-        if HAS_SPEEX:
+        #if HAS_SPEEX:
             # Speex echo canceller needs (frame_size, filter_length)
             # frame_size must match chunk_size (320 for 20ms at 16kHz)
             # filter_length is typically 2000-4000
-            try:
-                # 4096 taps = 256ms of tail length. Better for Pi rooms.
-                self.echo_canceller = EchoCanceller(self.chunk_size, 4096, self.sample_rate)
-            except Exception as e:
-                if "No constructor defined" in str(e) or "abstract" in str(e).lower():
-                    logger.info("ℹ️  Using EchoCanceller_create factory (SWIG abstract class workaround)")
-                    import speexdsp
-                    self.echo_canceller = speexdsp.EchoCanceller_create(self.chunk_size, 2048, self.sample_rate)
-                else:
-                    raise
+         #   try:
+               # 4096 taps = 256ms of tail length. Better for Pi rooms.
+          #     self.echo_canceller = EchoCanceller(self.chunk_size, 4096, self.sample_rate)
+           # except Exception as e:
+            #    if "No constructor defined" in str(e) or "abstract" in str(e).lower():
+             #       logger.info("ℹ️  Using EchoCanceller_create factory (SWIG abstract class workaround)")
+              #      import speexdsp
+               #     self.echo_canceller = speexdsp.EchoCanceller_create(self.chunk_size, 2048, self.sample_rate)
+                #else:
+                 #   raise
             
             # Initialize Preprocessor (Denoise + AGC)
             # Control via env variable (default: True)
-            enable_ns = os.getenv('ENABLE_SPEEX_NOISE_SUPPRESSION', 'true').lower() == 'true'
+            #enable_ns = os.getenv('ENABLE_SPEEX_NOISE_SUPPRESSION', 'true').lower() == 'true'
             
-            if enable_ns and HAS_PREPROCESSOR:
-                try:
-                    self.preprocessor = Preprocessor(self.chunk_size, self.sample_rate)
-                    self.preprocessor.denoise = True
-                    self.preprocessor.agc = True
-                    self.preprocessor.dereverb = True
-                    self.preprocessor.agc_level = 8000
-                    logger.info("✅ Speex Preprocessor (Denoise/AGC) initialized")
-                except Exception as e:
-                    logger.warning(f"Failed to init Speex Preprocessor: {e}")
-            elif enable_ns and not HAS_PREPROCESSOR:
-                logger.warning("ℹ️  Speex Preprocessor requested but not available in this version")
-            else:
-                logger.info("ℹ️  Speex Preprocessor disabled via env var")
+            #if enable_ns and HAS_PREPROCESSOR:
+             #   try:
+              #      self.preprocessor = Preprocessor(self.chunk_size, self.sample_rate)
+               #     self.preprocessor.denoise = True
+                #    self.preprocessor.agc = True
+                 #   self.preprocessor.dereverb = True
+                  #  self.preprocessor.agc_level = 8000
+                   # logger.info("✅ Speex Preprocessor (Denoise/AGC) initialized")
+                #except Exception as e:
+                 #   logger.warning(f"Failed to init Speex Preprocessor: {e}")
+            #elif enable_ns and not HAS_PREPROCESSOR:
+             #   logger.warning("ℹ️  Speex Preprocessor requested but not available in this version")
+            #else:
+             #   logger.info("ℹ️  Speex Preprocessor disabled via env var")
             
-            logger.info("✅ Speex Echo Canceller initialized")
+            #logger.info("✅ Speex Echo Canceller initialized")
             
     def on_audio_played(self, audio_data: bytes) -> None:
         """Alias for provide_reference_audio to match AudioPlayer callback signature."""

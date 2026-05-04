@@ -8,6 +8,8 @@ import logging
 from typing import Iterator, List, Dict, Optional
 from openai import AzureOpenAI
 from dotenv import load_dotenv
+import json
+import re
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -112,7 +114,123 @@ class LLMClient:
         except Exception as e:
             logger.error(f"Error generating response: {e}")
             raise
-    
+
+    def generate_teaching_plan(
+        self,
+        messages,
+        temperature: float = 0.2,
+        max_tokens: int = 800
+    ):
+        try:
+            full_messages = [
+                {
+                    "role": "system",
+                    "content": self.system_prompt + """
+
+    You are an AI math tutor.
+
+    Return ONLY valid JSON.
+    Do NOT include markdown.
+    Do NOT include explanation outside JSON.
+
+    Schema:
+    {
+      "speech": [
+        {"id": 1, "text": "string"}
+      ],
+      "visuals": [
+        {"speech_id": 1, "action": "clear"},
+        {"speech_id": 1, "action": "draw_text", "text": "string", "x": 100, "y": 120}
+      ]
+    }
+
+    Rules:
+    - Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon
+    - Use 2–5 speech steps
+    - Keep explanations short and teacher-like
+    - Every visual must map to a valid speech_id
+    - Use integers for coordinates
+    - Always include at least  one visual action for each speech step after the first
+    - ALways fully solve the problem when enough information is given
+    - Do not stop at just writing the formula
+    - Substitute the given values
+    - Show the final numeric answer when possible
+    - For geometry problems, include:
+        1. formula
+        2. substituted values
+        3. simplified result
+        4. final answer
+    If the problem involves geometry, shapes, area, perimeter, radius, diameter, rectangle, square, triangle, or circle:
+    - Always include a diagram on the canvas
+    - place the diagram beside the equations, not on top of them
+    - Always label dimensions or key values on the diagram using draw_text
+    - Never place labels on top of the shape boundary
+    - For rectangles and squares, put width labels above the shape and height label to the left or right
+    - For circles, always draw the circle and place the radius label outside the circle
+    - For triangles, use draw_line for all three edges and place side labels near, but not on, the edges
+    - For regular polygons:
+        - MUST use draw_regular_polygon
+        - Do not use draw_circle or partial arcs
+        - Do not skip the shape
+        - The first diagram action after clear must be draw_regular_polygon
+        - provide sides, cx, cy, radius 
+        - use cx=700, cy=260, radius=120 unless there is a reason to change it
+        - label the side length below or beside the polygon using draw_text
+    - use draw_line for triangle edges and markings
+    - use draw_rect for rectangles and squares
+    - use draw_circle for circles
+    - Always include both:
+        1. the visual diagram
+        2. the calculation steps
+        
+    Canvas layout:
+    - equations on the left: x between 60 and 420
+    - diagrams in the middle-right: x between 560 and 860
+    - keep the far-right area x > 900 empty for the face
+    - use y values between 130 and 420
+    - space equation rows at least 55 pixels apart
+    - never place text labels on top of other text
+    """
+                }
+            ] + messages
+
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=full_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+            content = response.choices[0].message.content.strip()
+            logger.info(f"Raw teaching plan: {content[:300]}")
+
+            # ✅ STEP 1: extract JSON safely
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not match:
+                raise ValueError("No JSON object found in response")
+
+            json_str = match.group(0)
+
+            # ✅ STEP 2: parse JSON
+            plan = json.loads(json_str)
+
+            # ✅ STEP 3: validate structure
+            if "speech" not in plan or "visuals" not in plan:
+                raise ValueError("Invalid teaching plan format")
+
+            # ✅ STEP 4: ensure IDs exist
+            speech_ids = {s["id"] for s in plan["speech"]}
+
+            for v in plan["visuals"]:
+                if v.get("speech_id") not in speech_ids:
+                    raise ValueError(f"Invalid speech_id in visuals: {v}")
+
+            return plan
+
+        except Exception as e:
+            logger.error(f"Error generating teaching plan: {e}")
+            raise
+            
     def generate_response(
         self,
         messages: List[Dict[str, str]],
