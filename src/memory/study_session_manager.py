@@ -28,7 +28,7 @@ SESSION_COMPLETE_RE = re.compile(r'\[SESSION_COMPLETE\]', re.IGNORECASE)
 _SUPPORTED_EXTENSIONS = {".txt", ".md", ".png", ".jpg", ".jpeg", ".pdf"}
 
 _WORD_TO_NUM = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
     "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20,
 }
@@ -314,26 +314,95 @@ class StudySessionManager:
             logger.error("complete_session: backend.complete_session failed: %s", e)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Number extraction utility
+    # Input parsing utilities
     # ──────────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def extract_number(text: str) -> Optional[int]:
+    def extract_duration_weeks(text: str) -> Optional[float]:
         """
-        Extract a session count from spoken text. No LLM call needed.
+        Parse spoken schedule duration into weeks.
 
-        Handles digit strings ("5"), word numbers ("five"), and embedded phrases
-        ("I want five sessions"). Returns None if nothing recognizable is found.
-        Clamps accepted range to 1–20.
+        Understands: "two weeks", "a month", "3 months", "a semester",
+        "one year", bare numbers (treated as weeks). Returns None if not found.
         """
-        digit_match = re.search(r'\b(\d+)\b', text)
-        if digit_match:
-            val = int(digit_match.group(1))
-            return val if 1 <= val <= 20 else None
-
         lowered = text.lower()
-        for word, num in _WORD_TO_NUM.items():
-            if re.search(rf'\b{word}\b', lowered):
-                return num
+
+        def _word_val(s: str) -> Optional[float]:
+            digit = re.search(r'\b(\d+(?:\.\d+)?)\b', s)
+            if digit:
+                return float(digit.group(1))
+            for word, num in _WORD_TO_NUM.items():
+                if re.search(rf'\b{word}\b', s):
+                    return float(num)
+            return None
+
+        # semester / term → ~18 weeks
+        if re.search(r'\b(semester|term|quarter)\b', lowered):
+            return 18.0
+
+        # year
+        m = re.search(r'\b(\w+)\s+year', lowered)
+        if m or re.search(r'\byear\b', lowered):
+            n = _word_val(m.group(1) if m else "") if m else None
+            return (n or 1.0) * 52.0
+
+        # months
+        m = re.search(r'(\w+)\s+month', lowered)
+        if m or re.search(r'\bmonth\b', lowered):
+            n = _word_val(m.group(1) if m else "") if m else None
+            return (n or 1.0) * 4.0
+
+        # weeks
+        m = re.search(r'(\w+)\s+week', lowered)
+        if m or re.search(r'\bweek\b', lowered):
+            n = _word_val(m.group(1) if m else "") if m else None
+            return n or 1.0
+
+        # bare digit → weeks
+        digit = re.search(r'\b(\d+(?:\.\d+)?)\b', lowered)
+        if digit:
+            return float(digit.group(1))
+
+        return None
+
+    @staticmethod
+    def extract_hours_per_week(text: str) -> Optional[float]:
+        """
+        Parse spoken weekly study hours into a float.
+
+        Understands: "two hours", "an hour", "1.5 hours", "half an hour",
+        "thirty minutes". Returns None if not found.
+        """
+        lowered = text.lower()
+
+        # half an hour / 30 minutes
+        if re.search(r'\bhalf\b', lowered) or re.search(r'\b30\s*min', lowered):
+            return 0.5
+
+        # X hours and Y minutes  (e.g. "1 hour 30 minutes")
+        m = re.search(r'(\d+(?:\.\d+)?)\s*hour[s]?\s*(?:and\s*)?(\d+)\s*min', lowered)
+        if m:
+            return float(m.group(1)) + float(m.group(2)) / 60.0
+
+        # X minutes only
+        m = re.search(r'(\d+(?:\.\d+)?)\s*min', lowered)
+        if m:
+            return float(m.group(1)) / 60.0
+
+        # decimal digit + hours
+        m = re.search(r'(\d+(?:\.\d+)?)\s*hour', lowered)
+        if m:
+            return float(m.group(1))
+
+        # word number + hours / hour
+        if re.search(r'\bhour', lowered):
+            for word, num in _WORD_TO_NUM.items():
+                if re.search(rf'\b{word}\b', lowered):
+                    return float(num)
+
+        # bare digit → hours
+        digit = re.search(r'\b(\d+(?:\.\d+)?)\b', lowered)
+        if digit:
+            return float(digit.group(1))
 
         return None

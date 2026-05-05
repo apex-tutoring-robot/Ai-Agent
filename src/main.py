@@ -103,10 +103,12 @@ class JarvisBot:
         # ── Study Session State Machine ──
         os.makedirs("config/schedule", exist_ok=True)
         self.study_session_manager = StudySessionManager(llm_client=self.llm_client)
-        # States: "normal" | "awaiting_schedule" | "awaiting_session_count" | "in_session"
+        # States: "normal" | "awaiting_schedule" | "awaiting_schedule_duration"
+        #         | "awaiting_weekly_hours" | "in_session"
         self._study_state: str = "normal"
         self._pending_schedule_path: Optional[str] = None
         self._pending_schedule_text: Optional[str] = None
+        self._pending_schedule_weeks: Optional[float] = None
         self._active_session: Optional[dict] = None
         self._pending_session_finalize: bool = False
         self._study_state_lock = threading.Lock()
@@ -217,10 +219,11 @@ class JarvisBot:
         or None to let the normal pipeline handle the turn.
 
         States:
-            normal               → check for study trigger; resume or start new plan
-            awaiting_schedule    → re-check schedule dir on every user utterance
-            awaiting_session_count → extract number, generate plan, start session
-            in_session           → return None (normal LLM handles it)
+            normal                   → check for study trigger; resume or start new plan
+            awaiting_schedule        → re-check schedule dir on every user utterance
+            awaiting_schedule_duration → ask how long the schedule covers
+            awaiting_weekly_hours    → ask hours/week, then compute sessions and start
+            in_session               → return None (normal LLM handles it)
         """
         with self._study_state_lock:
             state = self._study_state
@@ -229,20 +232,46 @@ class JarvisBot:
         if state == "in_session":
             return None
 
-        # ── awaiting_session_count: extract number and generate plan ──
-        if state == "awaiting_session_count":
-            num = StudySessionManager.extract_number(user_text)
-            if num is None:
-                return "I did not catch how many sessions. Please say a number, like five or ten."
+        # ── awaiting_schedule_duration: parse how long the schedule covers ──
+        if state == "awaiting_schedule_duration":
+            weeks = StudySessionManager.extract_duration_weeks(user_text)
+            if weeks is None or weeks <= 0:
+                return (
+                    "I did not quite catch that. How long does the schedule cover? "
+                    "For example, say two weeks, one month, or a semester."
+                )
+            with self._study_state_lock:
+                self._pending_schedule_weeks = weeks
+                self._study_state = "awaiting_weekly_hours"
+            return (
+                "Got it! And how many hours per week would you like to study? "
+                "For example, say two hours or one hour."
+            )
 
-            logger.info("Generating study plan with %d sessions...", num)
+        # ── awaiting_weekly_hours: parse hours/week, compute sessions, generate plan ──
+        if state == "awaiting_weekly_hours":
+            hours = StudySessionManager.extract_hours_per_week(user_text)
+            if hours is None or hours <= 0:
+                return (
+                    "I did not catch that. How many hours per week would you like to study? "
+                    "For example, say two hours or half an hour."
+                )
+
+            weeks = self._pending_schedule_weeks or 1.0
+            num_sessions = max(1, round(weeks * hours / 0.5))  # each session is 30 min
+
+            logger.info(
+                "Generating study plan: %.1f weeks x %.1f hrs/week = %d sessions",
+                weeks, hours, num_sessions,
+            )
             success = self.study_session_manager.generate_study_plan(
-                self._pending_schedule_text, num
+                self._pending_schedule_text, num_sessions
             )
             if not success:
                 with self._study_state_lock:
                     self._pending_schedule_path = None
                     self._pending_schedule_text = None
+                    self._pending_schedule_weeks = None
                     self._study_state = "normal"
                 return "Sorry, I had trouble creating your study plan. Please try again."
 
@@ -251,12 +280,13 @@ class JarvisBot:
             with self._study_state_lock:
                 self._pending_schedule_path = None
                 self._pending_schedule_text = None
+                self._pending_schedule_weeks = None
                 self._active_session = session
                 self._study_state = "in_session"
                 context = self.study_session_manager.build_session_context(session)
                 self.llm_client.system_prompt = self.llm_client._base_system_prompt + context
             return (
-                f"Your study plan is ready with {num} sessions! "
+                f"Your study plan is ready with {num_sessions} sessions! "
                 f"Starting session one now: {session.get('focus', 'your first topic')}. "
                 f"Ready to begin?"
             )
@@ -301,17 +331,17 @@ class JarvisBot:
         return self._process_schedule_file(schedule_path)
 
     def _process_schedule_file(self, file_path: str) -> str:
-        """Read and extract a schedule file, then ask how many sessions to create."""
+        """Read and extract a schedule file, then ask how long it covers."""
         schedule_text = self.study_session_manager.extract_schedule_text(file_path)
         if schedule_text.startswith("ERROR:"):
             return schedule_text.replace("ERROR: ", "")
         with self._study_state_lock:
             self._pending_schedule_path = file_path
             self._pending_schedule_text = schedule_text
-            self._study_state = "awaiting_session_count"
+            self._study_state = "awaiting_schedule_duration"
         return (
-            "I found your schedule! How many study sessions would you like me to create? "
-            "For example, say five sessions or just say a number."
+            "I found your schedule! How long does it cover? "
+            "For example, say two weeks, one month, or a semester."
         )
 
     def _listener_loop(self, continuous_vad, request_queue):
@@ -687,14 +717,19 @@ class JarvisBot:
             self._request_queue.put(None)  # Sentinel for speaker
 
             # Reset study state if conversation ended mid-flow (e.g. idle timeout
-            # while waiting for the student to answer "how many sessions?").
+            # while waiting for the student to answer schedule questions).
             # "in_session" is intentionally NOT reset — the session persists across
             # wake-word cycles until [SESSION_COMPLETE] is detected.
             with self._study_state_lock:
-                if self._study_state in ("awaiting_schedule", "awaiting_session_count"):
+                if self._study_state in (
+                    "awaiting_schedule",
+                    "awaiting_schedule_duration",
+                    "awaiting_weekly_hours",
+                ):
                     logger.info("Conversation ended mid-study-flow — resetting study state to normal")
                     self._pending_schedule_path = None
                     self._pending_schedule_text = None
+                    self._pending_schedule_weeks = None
                     self._study_state = "normal"
             
             # 2. Stop VAD first — this closes the audio stream and unblocks the listener thread
