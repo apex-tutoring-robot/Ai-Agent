@@ -68,21 +68,26 @@ class StudyMemoryBackend(Protocol):
 
     def get_next_session(self) -> Optional[Dict[str, Any]]:
         """
-        Return the first session dict with status == "not_started", or None.
-        Does NOT mutate status — caller mutates via complete_session.
+        Return the most recent in_progress session if one exists, otherwise
+        the first not_started session. Returns None if neither exists.
+        Does NOT mutate status — caller marks in_progress via mark_session_in_progress.
         """
         ...
 
     def has_active_plan(self) -> bool:
-        """Return True if a study_plan exists with at least one not_started session."""
+        """Return True if a study_plan exists with at least one in_progress or not_started session."""
         ...
 
-    def complete_session(self, session_number: int, summary: Dict[str, Any]) -> None:
+    def mark_session_in_progress(self, session_id: str) -> None:
+        """Set the session with the given session_id to 'in_progress'."""
+        ...
+
+    def complete_session(self, session_id: str, summary: Dict[str, Any]) -> None:
         """
-        Mark session_number as 'completed' in study_plan.sessions.
+        Mark the session with the given session_id as 'completed'.
         Append summary to session_history.
         summary shape:
-          {"date": str, "session_number": int,
+          {"date": str, "session_id": str,
            "summary": str, "struggles": List[str], "next_focus": str}
         """
         ...
@@ -145,19 +150,37 @@ class JsonFileBackend:
         data = self.load()
         if not data.get("study_plan"):
             return None
-        for session in data["study_plan"].get("sessions", []):
+        sessions = data["study_plan"].get("sessions", [])
+
+        # Prefer the most recently started in_progress session (paused/premature exit)
+        in_progress = [s for s in sessions if s.get("status") == "in_progress"]
+        if in_progress:
+            return in_progress[-1]  # last by list position = most recently started
+
+        # Otherwise start the next not_started session
+        for session in sessions:
             if session.get("status") == "not_started":
                 return session
+
         return None
 
     def has_active_plan(self) -> bool:
         return self.get_next_session() is not None
 
-    def complete_session(self, session_number: int, summary: Dict[str, Any]) -> None:
+    def mark_session_in_progress(self, session_id: str) -> None:
         data = self.load()
         if data.get("study_plan"):
             for session in data["study_plan"].get("sessions", []):
-                if session.get("session_number") == session_number:
+                if session.get("session_id") == session_id:
+                    session["status"] = "in_progress"
+                    break
+        self.save(data)
+
+    def complete_session(self, session_id: str, summary: Dict[str, Any]) -> None:
+        data = self.load()
+        if data.get("study_plan"):
+            for session in data["study_plan"].get("sessions", []):
+                if session.get("session_id") == session_id:
                     session["status"] = "completed"
                     break
         data["session_history"].append(summary)

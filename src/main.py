@@ -277,6 +277,7 @@ class JarvisBot:
 
             self.study_session_manager.mark_schedule_processed(self._pending_schedule_path)
             session = self.study_session_manager.get_next_session()
+            self.study_session_manager.mark_session_in_progress(session["session_id"])
             with self._study_state_lock:
                 self._pending_schedule_path = None
                 self._pending_schedule_text = None
@@ -287,7 +288,7 @@ class JarvisBot:
                 self.llm_client.system_prompt = self.llm_client._base_system_prompt + context
             return (
                 f"Your study plan is ready with {num_sessions} sessions! "
-                f"Starting session one now: {session.get('focus', 'your first topic')}. "
+                f"Starting with: {session.get('focus', 'your first topic')}. "
                 f"Ready to begin?"
             )
 
@@ -307,13 +308,14 @@ class JarvisBot:
 
         if self.study_session_manager.has_active_plan():
             session = self.study_session_manager.get_next_session()
+            self.study_session_manager.mark_session_in_progress(session["session_id"])
             with self._study_state_lock:
                 self._active_session = session
                 self._study_state = "in_session"
                 context = self.study_session_manager.build_session_context(session)
                 self.llm_client.system_prompt = self.llm_client._base_system_prompt + context
             return (
-                f"Welcome back! Continuing with session {session.get('session_number', '?')}: "
+                f"Welcome back! Continuing with: "
                 f"{session.get('focus', 'your next topic')}. Ready to begin?"
             )
 

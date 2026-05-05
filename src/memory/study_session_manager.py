@@ -155,8 +155,13 @@ class StudySessionManager:
         """
         Call LLM to produce a structured study plan and persist it via backend.
 
-        Returns True on success, False if the LLM call or JSON parse fails.
+        Returns True on success, False if the LLM call or schema validation fails.
         """
+        import json as _json
+        from memory.schemas import StudyPlan, session_plan_llm_schema
+
+        session_schema = _json.dumps(session_plan_llm_schema(), indent=2)
+
         prompt = (
             f"You are a study planner for a K-8 student. Given the schedule text below, "
             f"create a study plan with exactly {num_sessions} sessions.\n\n"
@@ -164,17 +169,10 @@ class StudySessionManager:
             f'{{\n'
             f'  "total_sessions": {num_sessions},\n'
             f'  "source_summary": "<one sentence describing what the full schedule covers>",\n'
-            f'  "sessions": [\n'
-            f'    {{\n'
-            f'      "session_number": 1,\n'
-            f'      "focus": "<main topic for this session>",\n'
-            f'      "topics": ["<topic1>", "<topic2>"],\n'
-            f'      "key_concepts": ["<concept1>", "<concept2>"],\n'
-            f'      "practice": "<what the student should practise>",\n'
-            f'      "status": "not_started"\n'
-            f'    }}\n'
-            f'  ]\n'
+            f'  "sessions": [<array of {num_sessions} session objects matching the schema below>]\n'
             f'}}\n\n'
+            f"Each session object must match this schema exactly (no extra fields):\n"
+            f"{session_schema}\n\n"
             f"Schedule text:\n{schedule_text}\n\n"
             f"Return only valid JSON. No markdown fences. No explanation."
         )
@@ -185,19 +183,14 @@ class StudySessionManager:
             logger.error("generate_study_plan: LLM call failed: %s", e)
             return False
 
-        import json as _json
         try:
-            plan = _json.loads(raw)
-        except _json.JSONDecodeError as e:
-            logger.error("generate_study_plan: JSON parse failed: %s | raw=%s", e, raw[:300])
+            plan = StudyPlan.model_validate_json(raw)
+        except Exception as e:
+            logger.error("generate_study_plan: schema validation failed: %s | raw=%s", e, raw[:300])
             return False
 
-        for s in plan.get("sessions", []):
-            s.setdefault("status", "not_started")
-            s.setdefault("session_id", str(uuid.uuid4()))
-
-        self.backend.save_study_plan(plan)
-        logger.info("Study plan saved: %d sessions", plan.get("total_sessions", 0))
+        self.backend.save_study_plan(plan.model_dump())
+        logger.info("Study plan saved: %d sessions", plan.total_sessions)
         return True
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -210,6 +203,9 @@ class StudySessionManager:
     def get_next_session(self) -> Optional[Dict[str, Any]]:
         return self.backend.get_next_session()
 
+    def mark_session_in_progress(self, session_id: str) -> None:
+        self.backend.mark_session_in_progress(session_id)
+
     # ──────────────────────────────────────────────────────────────────────────
     # System prompt context injection
     # ──────────────────────────────────────────────────────────────────────────
@@ -220,7 +216,6 @@ class StudySessionManager:
 
         Tells Jarvis what to teach and when to emit [SESSION_COMPLETE].
         """
-        session_num = session.get("session_number", "?")
         focus = session.get("focus", "")
         topics = ", ".join(session.get("topics", []))
         concepts = ", ".join(session.get("key_concepts", []))
@@ -240,7 +235,7 @@ class StudySessionManager:
             )
 
         return (
-            f"\n\n--- ACTIVE STUDY SESSION (Session {session_num}) ---\n"
+            f"\n\n--- ACTIVE STUDY SESSION ---\n"
             f"Focus: {focus}\n"
             f"Topics to cover: {topics}\n"
             f"Key concepts: {concepts}\n"
@@ -267,7 +262,6 @@ class StudySessionManager:
             messages: Snapshot of conversation_manager.get_messages() taken
                       at the moment the session ended.
         """
-        session_number = session.get("session_number", 0)
         session_id = session.get("session_id", str(uuid.uuid4()))
         focus = session.get("focus", "unknown")
 
@@ -280,7 +274,7 @@ class StudySessionManager:
         transcript = "\n".join(transcript_lines)
 
         prompt = (
-            f'Summarize this tutoring session for session {session_number} focused on "{focus}".\n\n'
+            f'Summarize this tutoring session focused on "{focus}".\n\n'
             f"Conversation:\n{transcript}\n\n"
             f"Return JSON with this exact structure:\n"
             f'{{\n'
@@ -299,21 +293,20 @@ class StudySessionManager:
         except Exception as e:
             logger.error("complete_session: summarization failed: %s", e)
             summary_data = {
-                "summary": f"Session {session_number} completed.",
+                "summary": f'Session on "{focus}" completed.',
                 "struggles": [],
                 "next_focus": ""
             }
 
         record = {
             "date": datetime.date.today().isoformat(),
-            "session_number": session_number,
             "session_id": session_id,
             **summary_data
         }
 
         try:
-            self.backend.complete_session(session_number, record)
-            logger.info("Session %d marked complete and summarized", session_number)
+            self.backend.complete_session(session_id, record)
+            logger.info("Session %s marked complete and summarized", session_id)
         except Exception as e:
             logger.error("complete_session: backend.complete_session failed: %s", e)
 
