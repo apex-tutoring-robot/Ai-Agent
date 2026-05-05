@@ -11,6 +11,7 @@ StudyMemoryBackend. Responsible for:
 
 import os
 import re
+import uuid
 import logging
 import datetime
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
@@ -193,6 +194,7 @@ class StudySessionManager:
 
         for s in plan.get("sessions", []):
             s.setdefault("status", "not_started")
+            s.setdefault("session_id", str(uuid.uuid4()))
 
         self.backend.save_study_plan(plan)
         logger.info("Study plan saved: %d sessions", plan.get("total_sessions", 0))
@@ -266,6 +268,7 @@ class StudySessionManager:
                       at the moment the session ended.
         """
         session_number = session.get("session_number", 0)
+        session_id = session.get("session_id", str(uuid.uuid4()))
         focus = session.get("focus", "unknown")
 
         transcript_lines = []
@@ -304,6 +307,7 @@ class StudySessionManager:
         record = {
             "date": datetime.date.today().isoformat(),
             "session_number": session_number,
+            "session_id": session_id,
             **summary_data
         }
 
