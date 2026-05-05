@@ -20,6 +20,7 @@ from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
 from vision.camera import Camera
 from guardrails.guardrails_manager import GuardrailsManager
+from user_profile import get_user_id
 
 load_dotenv(".env")
 
@@ -56,19 +57,21 @@ class JarvisBot:
         """Initialize Jarvis with all components."""
         logger.info("Initializing Jarvis...")
         self.face = face
-        
+
+        self.user_id = get_user_id()
+
         # Initialize shared PyAudio instance
         import pyaudio
         self.pa = pyaudio.PyAudio()
-        
+
         # Initialize components with shared PyAudio
         self.wake_word_detector = WakeWordDetector(pa=self.pa)
         self.audio_player = AudioPlayer(
             pa=self.pa,
             on_level=self.face.push_mouth_level if self.face else None
         )
-        self.stt_client = SpeechToTextClient()
-        self.llm_client = LLMClient()
+        self.stt_client = SpeechToTextClient(user_id=self.user_id)
+        self.llm_client = LLMClient(user_id=self.user_id)
         self.tts_client = TextToSpeechClient()
         self.privacy_manager = PrivacyManager()
         self.guardrails = GuardrailsManager(

@@ -24,7 +24,8 @@ class SpeechToTextClient:
         self,
         speech_key: Optional[str] = None,
         speech_region: Optional[str] = None,
-        language: str = "en-US"
+        language: str = "en-US",
+        user_id: Optional[str] = None,
     ):
         """
         Initialize Speech-to-Text client.
@@ -37,7 +38,8 @@ class SpeechToTextClient:
         self.speech_key = speech_key or os.getenv('AZURE_SPEECH_KEY')
         self.speech_region = speech_region or os.getenv('AZURE_SPEECH_REGION')
         self.language = language
-        
+        self.user_id = user_id
+
         if not self.speech_key or not self.speech_region:
             raise ValueError("Azure Speech credentials not provided")
         

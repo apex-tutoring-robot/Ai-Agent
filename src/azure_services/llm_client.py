@@ -23,7 +23,8 @@ class LLMClient:
         endpoint: Optional[str] = None,
         deployment: Optional[str] = None,
         api_version: Optional[str] = None,
-        system_prompt_path: Optional[str] = None
+        system_prompt_path: Optional[str] = None,
+        user_id: Optional[str] = None,
     ):
         """
         Initialize Azure OpenAI client.
@@ -40,6 +41,7 @@ class LLMClient:
         self.deployment = deployment or os.getenv('AZURE_OPENAI_DEPLOYMENT')
         self.api_version = api_version or os.getenv('AZURE_OPENAI_API_VERSION', '2024-08-01-preview')
         self.system_prompt_path = system_prompt_path or os.getenv('SYSTEM_PROMPT_PATH', './config/system_prompt.txt')
+        self.user_id = user_id
         
         if not all([self.api_key, self.endpoint, self.deployment]):
             raise ValueError("Azure OpenAI credentials not fully provided")
@@ -99,7 +101,8 @@ class LLMClient:
                 messages=full_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                stream=True
+                stream=True,
+                user=self.user_id,
             )
             
             # Stream chunks
@@ -136,6 +139,7 @@ class LLMClient:
             messages=messages,
             max_tokens=max_tokens,
             stream=False,
+            user=self.user_id,
         )
         extracted = response.choices[0].message.content.strip()
         logger.info(f"📷 Image extracted ({len(extracted)} chars)")
