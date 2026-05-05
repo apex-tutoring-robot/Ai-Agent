@@ -20,6 +20,7 @@ from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
 from vision.camera import Camera
 from guardrails.guardrails_manager import GuardrailsManager
+from memory.study_session_manager import StudySessionManager, SESSION_COMPLETE_RE
 
 load_dotenv(".env")
 
@@ -69,6 +70,8 @@ class JarvisBot:
         )
         self.stt_client = SpeechToTextClient()
         self.llm_client = LLMClient()
+        # Preserve the original system prompt so session context can be appended/removed cleanly.
+        self.llm_client._base_system_prompt = self.llm_client.system_prompt
         self.tts_client = TextToSpeechClient()
         self.privacy_manager = PrivacyManager()
         self.guardrails = GuardrailsManager(
@@ -96,7 +99,18 @@ class JarvisBot:
         self._last_bot_response = ""           # Full text of last bot response
         self._playback_ended_time = 0.0        # time.time() when playback stopped
         self._barge_in_detected = threading.Event()  # Set by VAD when real user speech detected
-        
+
+        # ── Study Session State Machine ──
+        os.makedirs("config/schedule", exist_ok=True)
+        self.study_session_manager = StudySessionManager(llm_client=self.llm_client)
+        # States: "normal" | "awaiting_schedule" | "awaiting_session_count" | "in_session"
+        self._study_state: str = "normal"
+        self._pending_schedule_path: Optional[str] = None
+        self._pending_schedule_text: Optional[str] = None
+        self._active_session: Optional[dict] = None
+        self._pending_session_finalize: bool = False
+        self._study_state_lock = threading.Lock()
+
         logger.info("Jarvis initialized successfully!")
     
     def _recreate_audio_system(self):
@@ -177,10 +191,128 @@ class JarvisBot:
         "look at this", "check this", "show you",
     }
 
+    _STUDY_TRIGGERS = {
+        "study session", "study plan", "start studying", "begin session",
+        "start session", "load schedule", "new schedule", "upload schedule",
+        "study mode", "let's study", "lets study", "start a study",
+        "tutoring session", "start tutoring", "begin tutoring",
+    }
+
     @staticmethod
     def _is_camera_trigger(text: str) -> bool:
         t = text.lower()
         return any(kw in t for kw in JarvisBot._CAMERA_TRIGGERS)
+
+    @staticmethod
+    def _is_study_trigger(text: str) -> bool:
+        t = text.lower()
+        return any(kw in t for kw in JarvisBot._STUDY_TRIGGERS)
+
+    def _handle_study_input(self, user_text: str) -> Optional[str]:
+        """
+        Study session state machine. Called at the top of every speaker turn,
+        before camera and guardrails checks.
+
+        Returns a string to speak directly (bypasses camera/guardrails/LLM),
+        or None to let the normal pipeline handle the turn.
+
+        States:
+            normal               → check for study trigger; resume or start new plan
+            awaiting_schedule    → re-check schedule dir on every user utterance
+            awaiting_session_count → extract number, generate plan, start session
+            in_session           → return None (normal LLM handles it)
+        """
+        with self._study_state_lock:
+            state = self._study_state
+
+        # ── in_session: LLM handles everything; [SESSION_COMPLETE] caught in speaker loop ──
+        if state == "in_session":
+            return None
+
+        # ── awaiting_session_count: extract number and generate plan ──
+        if state == "awaiting_session_count":
+            num = StudySessionManager.extract_number(user_text)
+            if num is None:
+                return "I did not catch how many sessions. Please say a number, like five or ten."
+
+            logger.info("Generating study plan with %d sessions...", num)
+            success = self.study_session_manager.generate_study_plan(
+                self._pending_schedule_text, num
+            )
+            if not success:
+                with self._study_state_lock:
+                    self._pending_schedule_path = None
+                    self._pending_schedule_text = None
+                    self._study_state = "normal"
+                return "Sorry, I had trouble creating your study plan. Please try again."
+
+            self.study_session_manager.mark_schedule_processed(self._pending_schedule_path)
+            session = self.study_session_manager.get_next_session()
+            with self._study_state_lock:
+                self._pending_schedule_path = None
+                self._pending_schedule_text = None
+                self._active_session = session
+                self._study_state = "in_session"
+                context = self.study_session_manager.build_session_context(session)
+                self.llm_client.system_prompt = self.llm_client._base_system_prompt + context
+            return (
+                f"Your study plan is ready with {num} sessions! "
+                f"Starting session one now: {session.get('focus', 'your first topic')}. "
+                f"Ready to begin?"
+            )
+
+        # ── awaiting_schedule: re-check for file on every utterance ──
+        if state == "awaiting_schedule":
+            schedule_path = self.study_session_manager.get_new_schedule_file()
+            if not schedule_path:
+                return (
+                    "I still do not see a schedule file. "
+                    "Please add it to the config/schedule folder and let me know when it is ready."
+                )
+            return self._process_schedule_file(schedule_path)
+
+        # ── normal: only act on a study trigger ──
+        if not self._is_study_trigger(user_text):
+            return None
+
+        if self.study_session_manager.has_active_plan():
+            session = self.study_session_manager.get_next_session()
+            with self._study_state_lock:
+                self._active_session = session
+                self._study_state = "in_session"
+                context = self.study_session_manager.build_session_context(session)
+                self.llm_client.system_prompt = self.llm_client._base_system_prompt + context
+            return (
+                f"Welcome back! Continuing with session {session.get('session_number', '?')}: "
+                f"{session.get('focus', 'your next topic')}. Ready to begin?"
+            )
+
+        schedule_path = self.study_session_manager.get_new_schedule_file()
+        if not schedule_path:
+            with self._study_state_lock:
+                self._study_state = "awaiting_schedule"
+            return (
+                "I would love to help you study! I do not have a schedule yet. "
+                "Please put your schedule file in the config/schedule folder "
+                "and say start study session again when it is ready. "
+                "I can read text files, images, and PDFs."
+            )
+
+        return self._process_schedule_file(schedule_path)
+
+    def _process_schedule_file(self, file_path: str) -> str:
+        """Read and extract a schedule file, then ask how many sessions to create."""
+        schedule_text = self.study_session_manager.extract_schedule_text(file_path)
+        if schedule_text.startswith("ERROR:"):
+            return schedule_text.replace("ERROR: ", "")
+        with self._study_state_lock:
+            self._pending_schedule_path = file_path
+            self._pending_schedule_text = schedule_text
+            self._study_state = "awaiting_session_count"
+        return (
+            "I found your schedule! How many study sessions would you like me to create? "
+            "For example, say five sessions or just say a number."
+        )
 
     def _listener_loop(self, continuous_vad, request_queue):
         """Producer: Always listening, detecting interruptions in real-time.
@@ -276,115 +408,117 @@ class JarvisBot:
                 try:
                     logger.info(f"📝 Processing Turn: {user_text}")
 
-                    # ── Camera Vision ──────────────────────────────────────────
-                    # If the user's phrase is a camera trigger, capture an image,
-                    # upload it to Azure Blob Storage, and store the SAS URL in
-                    # conversation history so follow-up questions can reference it.
-                    if self._is_camera_trigger(user_text):
-                        if self.face:
-                            self.face.start_scanning()
-                        try:
-                            saved_path = self.camera.capture_and_save()
-                            logger.info(f"📷 Image saved to {saved_path}")
-
-                            import base64 as _b64
-                            with open(saved_path, "rb") as _f:
-                                data_url = f"data:image/jpeg;base64,{_b64.b64encode(_f.read()).decode()}"
-
+                    # ── Study Session State Machine ────────────────────────────
+                    # Intercepts before camera/guardrails/LLM. Returns a direct
+                    # response string, or None to let the normal pipeline run.
+                    study_response = self._handle_study_input(user_text)
+                    if study_response is not None:
+                        final_text = study_response
+                        self.conversation_manager.add_assistant_message(final_text)
+                        self._last_bot_response = final_text
+                        continuous_vad.reset_idle_timer()
+                    else:
+                        # ── Camera Vision ──────────────────────────────────────
+                        if self._is_camera_trigger(user_text):
+                            if self.face:
+                                self.face.start_scanning()
                             try:
-                                extracted = self.llm_client.extract_image_content(data_url)
-                                continuous_vad.reset_idle_timer()  # extraction can take 5-10s
-                                combined = f"{user_text}\n\n[Scanned homework content:\n{extracted}]"
+                                saved_path = self.camera.capture_and_save()
+                                logger.info(f"📷 Image saved to {saved_path}")
+
+                                import base64 as _b64
+                                with open(saved_path, "rb") as _f:
+                                    data_url = f"data:image/jpeg;base64,{_b64.b64encode(_f.read()).decode()}"
+
+                                try:
+                                    extracted = self.llm_client.extract_image_content(data_url)
+                                    continuous_vad.reset_idle_timer()
+                                    combined = f"{user_text}\n\n[Scanned homework content:\n{extracted}]"
+                                    anonymized_text = self.privacy_manager.anonymize(combined)
+                                    logger.info("📷 Image extracted and stored as text")
+                                except Exception as extract_err:
+                                    logger.error(f"📷 Image extraction failed: {extract_err}")
+                                    if self.face:
+                                        self.face.start_talking()
+                                    error_audio = self.tts_client.synthesize_to_audio(
+                                        "Sorry, I had trouble reading the image. Please try again."
+                                    )
+                                    self.audio_player.start_streaming(output_device_index=output_device_index)
+                                    self.audio_player.queue_audio(error_audio)
+                                    self.audio_player.stop_streaming(immediate=False)
+                                    if self.face:
+                                        self.face.start_idle()
+                                    continue
+                            except Exception as cam_err:
+                                logger.error(f"📷 Camera failed to capture: {cam_err} — falling back to text-only")
+                                combined = f"{user_text}\n\nCamera is not working, please talk to me!"
                                 anonymized_text = self.privacy_manager.anonymize(combined)
-                                logger.info("📷 Image extracted and stored as text")
-                            except Exception as extract_err:
-                                logger.error(f"📷 Image extraction failed: {extract_err}")
-                                if self.face:
-                                    self.face.start_talking()
-                                error_audio = self.tts_client.synthesize_to_audio(
-                                    "Sorry, I had trouble reading the image. Please try again."
-                                )
-                                self.audio_player.start_streaming(output_device_index=output_device_index)
-                                self.audio_player.queue_audio(error_audio)
-                                self.audio_player.stop_streaming(immediate=False)
-                                if self.face:
-                                    self.face.start_idle()
-                                continue
-                        except Exception as cam_err:
-                            logger.error(f"📷 Camera failed to capture: {cam_err} — falling back to text-only")
-                            combined = f"{user_text}\n\nCamera is not working, please talk to me!"
-                            anonymized_text = self.privacy_manager.anonymize(combined)
-                    else:
-                        anonymized_text = self.privacy_manager.anonymize(user_text)
-                    # ──────────────────────────────────────────────────────────
-                    allowed, refusal_msg = self.guardrails.check_input(anonymized_text)
-                    continuous_vad.reset_idle_timer()  # guardrails LLM call can take 5-10s
-
-                    if allowed:
-                        # Add to conversation history only after input passes
-                        self.conversation_manager.add_user_message(anonymized_text)
-                        messages = self.conversation_manager.get_messages()
-
-                        # Buffer the FULL LLM response before starting TTS.
-                        # This is required so the output guardrail can check the
-                        # complete response before any audio is produced.
-                        llm_start = time.perf_counter()
-                        if self.face:
-                            self.face.start_thinking()
-                        response_chunks = []
-                        for chunk in self.llm_client.generate_response_stream(messages):
-                            if self._interruption_event.is_set():
-                                break
-                            response_chunks.append(chunk)
-
-                        # Handle interruption during LLM generation
-                        if self._interruption_event.is_set():
-                            partial = "".join(response_chunks)
-                            if partial:
-                                self._last_bot_response = partial  # for similarity filter
-                            continuous_vad.reset_idle_timer()
-                            continue
-
-                        full_response = "".join(response_chunks)
-                        if not full_response:
-                            continuous_vad.reset_idle_timer()
-                            continue
-
-                        # ── GUARDRAILS: OUTPUT CHECK ─────────────────────────
-                        # Checks complete LLM response before any audio plays.
-                        safe, final_text = self.guardrails.check_output(full_response)
-                        if safe:
-                            self.conversation_manager.add_assistant_message(final_text)
-                            self._last_bot_response = final_text
-                            logger.info(f"Bot: {final_text}")
                         else:
-                            logger.warning("🛡️ Guardrails blocked LLM output — substituting refusal")
-                            # final_text is already the kid-friendly refusal; history not updated
-                    else:
-                        # Input blocked — speak refusal, skip LLM entirely
-                        logger.info("🛡️ Guardrails blocked input — speaking refusal")
-                        final_text = refusal_msg
+                            anonymized_text = self.privacy_manager.anonymize(user_text)
 
-                    # Start audio playback (callback mode)
-                    # AEC: Provide reference audio back to VAD
+                        allowed, refusal_msg = self.guardrails.check_input(anonymized_text)
+                        continuous_vad.reset_idle_timer()
+
+                        if allowed:
+                            self.conversation_manager.add_user_message(anonymized_text)
+                            messages = self.conversation_manager.get_messages()
+
+                            if self.face:
+                                self.face.start_thinking()
+                            response_chunks = []
+                            for chunk in self.llm_client.generate_response_stream(messages):
+                                if self._interruption_event.is_set():
+                                    break
+                                response_chunks.append(chunk)
+
+                            if self._interruption_event.is_set():
+                                partial = "".join(response_chunks)
+                                if partial:
+                                    self._last_bot_response = partial
+                                continuous_vad.reset_idle_timer()
+                                continue
+
+                            full_response = "".join(response_chunks)
+
+                            # ── Session complete detection ─────────────────────
+                            # Strip tag before guardrails so it never reaches TTS.
+                            # Finalization runs in finally block after playback.
+                            if SESSION_COMPLETE_RE.search(full_response):
+                                full_response = SESSION_COMPLETE_RE.sub("", full_response).strip()
+                                self._pending_session_finalize = True
+                                logger.info("📚 Session complete tag detected")
+
+                            if not full_response:
+                                continuous_vad.reset_idle_timer()
+                                continue
+
+                            # ── Guardrails: output check ───────────────────────
+                            safe, final_text = self.guardrails.check_output(full_response)
+                            if safe:
+                                self.conversation_manager.add_assistant_message(final_text)
+                                self._last_bot_response = final_text
+                                logger.info(f"Bot: {final_text}")
+                            else:
+                                logger.warning("🛡️ Guardrails blocked LLM output — substituting refusal")
+                        else:
+                            logger.info("🛡️ Guardrails blocked input — speaking refusal")
+                            final_text = refusal_msg
+
+                    # ── Shared playback (study-machine and normal paths both land here) ──
                     self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
                     if self.face:
                         self.face.start_talking()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
 
-                    # ── ECHO GUARD: Signal that bot is now speaking ──
                     self._bot_is_speaking = True
                     continuous_vad.set_playback_state(True)
 
-                    # Stream final_text through TTS to audio player
                     tts_stream = self.tts_client.synthesize_stream(iter([final_text]))
 
                     for audio_chunk in tts_stream:
                         if self._interruption_event.is_set():
                             logger.warning("🛑 Speaker aborted due to interruption event")
                             break
-
-                        # Defensive check: ensure streaming is still active
                         if self.audio_player._is_playing:
                             try:
                                 self.audio_player.queue_audio(audio_chunk)
@@ -394,11 +528,9 @@ class JarvisBot:
                         else:
                             break
 
-                    # Wait for playback to finish naturally (if not interrupted)
                     if not self._interruption_event.is_set():
                         self.audio_player.stop_streaming(immediate=False)
 
-                    # Reset idle timer because we just finished a turn
                     continuous_vad.reset_idle_timer()
 
                 except Exception as turn_err:
@@ -406,14 +538,30 @@ class JarvisBot:
                 finally:
                     if self.face:
                         self.face.start_idle()
-                    # ── ECHO GUARD: Signal playback ended + start cooldown ──
+                    # ── Echo guard: signal playback ended ──
                     self._bot_is_speaking = False
                     self._playback_ended_time = time.time()
                     continuous_vad.set_playback_state(False)
                     self._barge_in_detected.clear()
-
                     self._speaker_busy.clear()
-                    self.audio_player.stop_streaming(immediate=True)  # Ensure closed
+                    self.audio_player.stop_streaming(immediate=True)
+
+                    # ── Session finalization (background thread, no latency hit) ──
+                    if self._pending_session_finalize:
+                        self._pending_session_finalize = False
+                        session_snapshot = self._active_session
+                        messages_snapshot = self.conversation_manager.get_messages()
+                        with self._study_state_lock:
+                            self._active_session = None
+                            self._study_state = "normal"
+                            self.llm_client.system_prompt = self.llm_client._base_system_prompt
+                        threading.Thread(
+                            target=self.study_session_manager.complete_session,
+                            args=(session_snapshot, messages_snapshot),
+                            daemon=True,
+                            name="SessionFinalizeThread"
+                        ).start()
+                        logger.info("📚 Session finalization dispatched to background thread")
                     
             logger.info("🔊 Speaker worker stopped cleanly")
         except Exception as e:
@@ -536,7 +684,18 @@ class JarvisBot:
         finally:
             # 1. SIGNAL WORKERS TO STOP
             self._conversation_active.clear()
-            self._request_queue.put(None) # Sentinel for speaker
+            self._request_queue.put(None)  # Sentinel for speaker
+
+            # Reset study state if conversation ended mid-flow (e.g. idle timeout
+            # while waiting for the student to answer "how many sessions?").
+            # "in_session" is intentionally NOT reset — the session persists across
+            # wake-word cycles until [SESSION_COMPLETE] is detected.
+            with self._study_state_lock:
+                if self._study_state in ("awaiting_schedule", "awaiting_session_count"):
+                    logger.info("Conversation ended mid-study-flow — resetting study state to normal")
+                    self._pending_schedule_path = None
+                    self._pending_schedule_text = None
+                    self._study_state = "normal"
             
             # 2. Stop VAD first — this closes the audio stream and unblocks the listener thread
             try:

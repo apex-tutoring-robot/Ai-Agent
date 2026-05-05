@@ -141,6 +141,57 @@ class LLMClient:
         logger.info(f"📷 Image extracted ({len(extracted)} chars)")
         return extracted
 
+    def generate_json_response(
+        self,
+        prompt: str,
+        max_tokens: int = 1000
+    ) -> str:
+        """
+        One-shot non-streaming call that requests a JSON object response.
+
+        Used for study plan generation and session summarization. Low temperature
+        (0.2) for deterministic structured output. Attempts response_format JSON
+        mode and falls back to a plain call if the deployment does not support it.
+
+        Args:
+            prompt: Full task prompt (system + instruction combined).
+            max_tokens: Maximum tokens to generate.
+
+        Returns:
+            Raw response string (should be valid JSON).
+
+        Raises:
+            Exception: Re-raises any non-format-related API error after logging.
+        """
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                stream=False,
+            )
+            result = response.choices[0].message.content.strip()
+            logger.info("generate_json_response: received %d chars", len(result))
+            return result
+        except Exception as e:
+            if "response_format" in str(e).lower() or "unsupported" in str(e).lower():
+                logger.warning(
+                    "generate_json_response: response_format unsupported, retrying without it: %s", e
+                )
+                response = self.client.chat.completions.create(
+                    model=self.deployment,
+                    messages=messages,
+                    temperature=0.2,
+                    max_tokens=max_tokens,
+                    stream=False,
+                )
+                return response.choices[0].message.content.strip()
+            logger.error("generate_json_response error: %s", e)
+            raise
+
     def generate_response(
         self,
         messages: List[Dict[str, str]],

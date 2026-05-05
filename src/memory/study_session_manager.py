@@ -1,0 +1,339 @@
+"""
+StudySessionManager — orchestrates the study session lifecycle.
+
+Knows nothing about HOW data is stored. Delegates all persistence to the
+StudyMemoryBackend. Responsible for:
+  - Detecting new schedule files in config/schedule/
+  - Extracting text from any supported file format
+  - Driving LLM calls for plan generation and session summarization
+  - Building the system-prompt context string injected during active sessions
+"""
+
+import os
+import re
+import logging
+import datetime
+from typing import Optional, Dict, Any, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from azure_services.llm_client import LLMClient
+    from memory.backend import StudyMemoryBackend
+
+logger = logging.getLogger(__name__)
+
+# Regex for the session-complete sentinel. Exported so main.py can import it.
+SESSION_COMPLETE_TAG = "[SESSION_COMPLETE]"
+SESSION_COMPLETE_RE = re.compile(r'\[SESSION_COMPLETE\]', re.IGNORECASE)
+
+_SUPPORTED_EXTENSIONS = {".txt", ".md", ".png", ".jpg", ".jpeg", ".pdf"}
+
+_WORD_TO_NUM = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20,
+}
+
+
+class StudySessionManager:
+    """
+    Orchestration layer for study session memory.
+
+    Args:
+        llm_client: Shared LLMClient instance (for plan generation, summarization,
+                    and schedule image extraction).
+        backend:    Any object satisfying the StudyMemoryBackend protocol.
+                    Defaults to JsonFileBackend when not provided.
+        schedule_dir: Directory where parents drop schedule files.
+    """
+
+    def __init__(
+        self,
+        llm_client: "LLMClient",
+        backend: Optional["StudyMemoryBackend"] = None,
+        schedule_dir: str = "config/schedule",
+    ):
+        self.llm_client = llm_client
+        self.schedule_dir = schedule_dir
+
+        if backend is None:
+            from memory.backend import JsonFileBackend
+            self.backend = JsonFileBackend()
+        else:
+            self.backend = backend
+
+        logger.info("StudySessionManager initialized (backend=%s)", type(self.backend).__name__)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Schedule detection
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def get_new_schedule_file(self) -> Optional[str]:
+        """
+        Scan schedule_dir for any file that has not yet been processed.
+
+        Returns the full path of the first unprocessed file, or None.
+        """
+        if not os.path.isdir(self.schedule_dir):
+            return None
+        data = self.backend.load()
+        processed = set(data.get("processed_schedules", []))
+        for filename in sorted(os.listdir(self.schedule_dir)):
+            if filename.startswith("."):
+                continue
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in _SUPPORTED_EXTENSIONS and filename not in processed:
+                return os.path.join(self.schedule_dir, filename)
+        return None
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Schedule text extraction
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def extract_schedule_text(self, file_path: str) -> str:
+        """
+        Extract schedule content as plain text from any supported format.
+
+        Returns a text string on success, or a string starting with "ERROR:"
+        that the caller can speak directly to the student.
+        """
+        ext = os.path.splitext(file_path)[1].lower()
+
+        if ext in {".txt", ".md"}:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    return f.read().strip()
+            except OSError as e:
+                logger.error("extract_schedule_text: failed to read %s: %s", file_path, e)
+                return f"ERROR: Could not read the file {os.path.basename(file_path)}."
+
+        elif ext in {".png", ".jpg", ".jpeg"}:
+            try:
+                import base64
+                with open(file_path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode()
+                mime = "image/png" if ext == ".png" else "image/jpeg"
+                data_url = f"data:{mime};base64,{b64}"
+                return self.llm_client.extract_image_content(data_url)
+            except Exception as e:
+                logger.error("extract_schedule_text: image extraction failed for %s: %s", file_path, e)
+                return "ERROR: Could not read the schedule image. Please try photographing it with the robot camera instead."
+
+        elif ext == ".pdf":
+            try:
+                import PyPDF2
+                text_parts = []
+                with open(file_path, "rb") as f:
+                    reader = PyPDF2.PdfReader(f)
+                    for page in reader.pages:
+                        text_parts.append(page.extract_text() or "")
+                text = "\n".join(text_parts).strip()
+                if text:
+                    return text
+                return "ERROR: The PDF appears to be a scanned image and has no readable text. Please photograph the schedule with the robot camera instead."
+            except ImportError:
+                return "ERROR: PDF reading is not available. Please photograph the schedule or save it as a text file."
+            except Exception as e:
+                logger.error("extract_schedule_text: PDF extraction failed for %s: %s", file_path, e)
+                return "ERROR: Could not read the PDF. Please photograph the schedule instead."
+
+        return f"ERROR: Unsupported file format {ext}. Please use a text file, image, or PDF."
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Schedule processed marking
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def mark_schedule_processed(self, file_path: str) -> None:
+        """Record the schedule file (by basename) as processed in the backend."""
+        self.backend.mark_schedule_processed(os.path.basename(file_path))
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Study plan generation
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def generate_study_plan(self, schedule_text: str, num_sessions: int) -> bool:
+        """
+        Call LLM to produce a structured study plan and persist it via backend.
+
+        Returns True on success, False if the LLM call or JSON parse fails.
+        """
+        prompt = (
+            f"You are a study planner for a K-8 student. Given the schedule text below, "
+            f"create a study plan with exactly {num_sessions} sessions.\n\n"
+            f"Return a JSON object with this exact structure:\n"
+            f'{{\n'
+            f'  "total_sessions": {num_sessions},\n'
+            f'  "source_summary": "<one sentence describing what the full schedule covers>",\n'
+            f'  "sessions": [\n'
+            f'    {{\n'
+            f'      "session_number": 1,\n'
+            f'      "focus": "<main topic for this session>",\n'
+            f'      "topics": ["<topic1>", "<topic2>"],\n'
+            f'      "key_concepts": ["<concept1>", "<concept2>"],\n'
+            f'      "practice": "<what the student should practise>",\n'
+            f'      "status": "not_started"\n'
+            f'    }}\n'
+            f'  ]\n'
+            f'}}\n\n'
+            f"Schedule text:\n{schedule_text}\n\n"
+            f"Return only valid JSON. No markdown fences. No explanation."
+        )
+
+        try:
+            raw = self.llm_client.generate_json_response(prompt, max_tokens=2000)
+        except Exception as e:
+            logger.error("generate_study_plan: LLM call failed: %s", e)
+            return False
+
+        import json as _json
+        try:
+            plan = _json.loads(raw)
+        except _json.JSONDecodeError as e:
+            logger.error("generate_study_plan: JSON parse failed: %s | raw=%s", e, raw[:300])
+            return False
+
+        for s in plan.get("sessions", []):
+            s.setdefault("status", "not_started")
+
+        self.backend.save_study_plan(plan)
+        logger.info("Study plan saved: %d sessions", plan.get("total_sessions", 0))
+        return True
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Session state queries
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def has_active_plan(self) -> bool:
+        return self.backend.has_active_plan()
+
+    def get_next_session(self) -> Optional[Dict[str, Any]]:
+        return self.backend.get_next_session()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # System prompt context injection
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def build_session_context(self, session: Dict[str, Any]) -> str:
+        """
+        Build the text block appended to the LLM system prompt for an active session.
+
+        Tells Jarvis what to teach and when to emit [SESSION_COMPLETE].
+        """
+        session_num = session.get("session_number", "?")
+        focus = session.get("focus", "")
+        topics = ", ".join(session.get("topics", []))
+        concepts = ", ".join(session.get("key_concepts", []))
+        practice = session.get("practice", "")
+
+        # Inject last session summary if one exists
+        data = self.backend.load()
+        history = data.get("session_history", [])
+        last_session_note = ""
+        if history:
+            last = history[-1]
+            struggles = ", ".join(last.get("struggles", [])) or "none noted"
+            next_focus = last.get("next_focus", "")
+            last_session_note = (
+                f"\nPrevious session note: student struggled with {struggles}. "
+                f"Carry-forward focus: {next_focus}."
+            )
+
+        return (
+            f"\n\n--- ACTIVE STUDY SESSION (Session {session_num}) ---\n"
+            f"Focus: {focus}\n"
+            f"Topics to cover: {topics}\n"
+            f"Key concepts: {concepts}\n"
+            f"Practice: {practice}"
+            f"{last_session_note}\n"
+            f"When the student explicitly says they are done, or when you have covered "
+            f"all the topics and key concepts above, end your response with exactly: "
+            f"[SESSION_COMPLETE]\n"
+            f"--- END SESSION CONTEXT ---"
+        )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Session completion
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def complete_session(self, session: Dict[str, Any], messages: List[Dict]) -> None:
+        """
+        Summarize the session via LLM and persist the result.
+
+        Called from a background daemon thread — errors are logged, not re-raised.
+
+        Args:
+            session:  The session dict returned by get_next_session().
+            messages: Snapshot of conversation_manager.get_messages() taken
+                      at the moment the session ended.
+        """
+        session_number = session.get("session_number", 0)
+        focus = session.get("focus", "unknown")
+
+        transcript_lines = []
+        for msg in messages[-30:]:
+            role = "Student" if msg["role"] == "user" else "Jarvis"
+            content = msg["content"]
+            if isinstance(content, str):
+                transcript_lines.append(f"{role}: {content}")
+        transcript = "\n".join(transcript_lines)
+
+        prompt = (
+            f'Summarize this tutoring session for session {session_number} focused on "{focus}".\n\n'
+            f"Conversation:\n{transcript}\n\n"
+            f"Return JSON with this exact structure:\n"
+            f'{{\n'
+            f'  "summary": "<2-3 sentence summary of what was covered>",\n'
+            f'  "struggles": ["<thing student struggled with>"],\n'
+            f'  "next_focus": "<what to prioritise at the start of the next session>"\n'
+            f'}}\n\n'
+            f"Return only valid JSON. No markdown fences."
+        )
+
+        import json as _json
+
+        try:
+            raw = self.llm_client.generate_json_response(prompt, max_tokens=400)
+            summary_data = _json.loads(raw)
+        except Exception as e:
+            logger.error("complete_session: summarization failed: %s", e)
+            summary_data = {
+                "summary": f"Session {session_number} completed.",
+                "struggles": [],
+                "next_focus": ""
+            }
+
+        record = {
+            "date": datetime.date.today().isoformat(),
+            "session_number": session_number,
+            **summary_data
+        }
+
+        try:
+            self.backend.complete_session(session_number, record)
+            logger.info("Session %d marked complete and summarized", session_number)
+        except Exception as e:
+            logger.error("complete_session: backend.complete_session failed: %s", e)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Number extraction utility
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def extract_number(text: str) -> Optional[int]:
+        """
+        Extract a session count from spoken text. No LLM call needed.
+
+        Handles digit strings ("5"), word numbers ("five"), and embedded phrases
+        ("I want five sessions"). Returns None if nothing recognizable is found.
+        Clamps accepted range to 1–20.
+        """
+        digit_match = re.search(r'\b(\d+)\b', text)
+        if digit_match:
+            val = int(digit_match.group(1))
+            return val if 1 <= val <= 20 else None
+
+        lowered = text.lower()
+        for word, num in _WORD_TO_NUM.items():
+            if re.search(rf'\b{word}\b', lowered):
+                return num
+
+        return None

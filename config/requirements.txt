@@ -67,3 +67,6 @@ speexdsp
 # Camera
 # IMPORTANT: Requires libcap-dev (see system deps above)
 picamera2
+
+# Study session memory — PDF schedule ingestion
+PyPDF2>=3.0.0
