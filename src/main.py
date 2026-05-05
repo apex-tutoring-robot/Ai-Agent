@@ -101,14 +101,14 @@ class JarvisBot:
         self._barge_in_detected = threading.Event()  # Set by VAD when real user speech detected
 
         # ── Study Session State Machine ──
-        os.makedirs("config/schedule", exist_ok=True)
+        os.makedirs("syllabus", exist_ok=True)
         self.study_session_manager = StudySessionManager(llm_client=self.llm_client)
-        # States: "normal" | "awaiting_schedule" | "awaiting_schedule_duration"
+        # States: "normal" | "awaiting_syllabus" | "awaiting_syllabus_duration"
         #         | "awaiting_weekly_hours" | "in_session"
         self._study_state: str = "normal"
-        self._pending_schedule_path: Optional[str] = None
-        self._pending_schedule_text: Optional[str] = None
-        self._pending_schedule_weeks: Optional[float] = None
+        self._pending_syllabus_path: Optional[str] = None
+        self._pending_syllabus_text: Optional[str] = None
+        self._pending_syllabus_weeks: Optional[float] = None
         self._active_session: Optional[dict] = None
         self._pending_session_finalize: bool = False
         self._study_state_lock = threading.Lock()
@@ -195,7 +195,7 @@ class JarvisBot:
 
     _STUDY_TRIGGERS = {
         "study session", "study plan", "start studying", "begin session",
-        "start session", "load schedule", "new schedule", "upload schedule",
+        "start session", "load syllabus", "new syllabus", "upload syllabus",
         "study mode", "let's study", "lets study", "start a study",
         "tutoring session", "start tutoring", "begin tutoring",
     }
@@ -219,11 +219,11 @@ class JarvisBot:
         or None to let the normal pipeline handle the turn.
 
         States:
-            normal                   → check for study trigger; resume or start new plan
-            awaiting_schedule        → re-check schedule dir on every user utterance
-            awaiting_schedule_duration → ask how long the schedule covers
-            awaiting_weekly_hours    → ask hours/week, then compute sessions and start
-            in_session               → return None (normal LLM handles it)
+            normal                    → check for study trigger; resume or start new plan
+            awaiting_syllabus         → re-check syllabus dir on every user utterance
+            awaiting_syllabus_duration → ask how long the syllabus covers
+            awaiting_weekly_hours     → ask hours/week, then compute sessions and start
+            in_session                → return None (normal LLM handles it)
         """
         with self._study_state_lock:
             state = self._study_state
@@ -232,16 +232,16 @@ class JarvisBot:
         if state == "in_session":
             return None
 
-        # ── awaiting_schedule_duration: parse how long the schedule covers ──
-        if state == "awaiting_schedule_duration":
+        # ── awaiting_syllabus_duration: parse how long the syllabus covers ──
+        if state == "awaiting_syllabus_duration":
             weeks = StudySessionManager.extract_duration_weeks(user_text)
             if weeks is None or weeks <= 0:
                 return (
-                    "I did not quite catch that. How long does the schedule cover? "
+                    "I did not quite catch that. How long does the syllabus cover? "
                     "For example, say two weeks, one month, or a semester."
                 )
             with self._study_state_lock:
-                self._pending_schedule_weeks = weeks
+                self._pending_syllabus_weeks = weeks
                 self._study_state = "awaiting_weekly_hours"
             return (
                 "Got it! And how many hours per week would you like to study? "
@@ -257,7 +257,7 @@ class JarvisBot:
                     "For example, say two hours or half an hour."
                 )
 
-            weeks = self._pending_schedule_weeks or 1.0
+            weeks = self._pending_syllabus_weeks or 1.0
             num_sessions = max(1, round(weeks * hours / 0.5))  # each session is 30 min
 
             logger.info(
@@ -265,23 +265,23 @@ class JarvisBot:
                 weeks, hours, num_sessions,
             )
             success = self.study_session_manager.generate_study_plan(
-                self._pending_schedule_text, num_sessions
+                self._pending_syllabus_text, num_sessions
             )
             if not success:
                 with self._study_state_lock:
-                    self._pending_schedule_path = None
-                    self._pending_schedule_text = None
-                    self._pending_schedule_weeks = None
+                    self._pending_syllabus_path = None
+                    self._pending_syllabus_text = None
+                    self._pending_syllabus_weeks = None
                     self._study_state = "normal"
                 return "Sorry, I had trouble creating your study plan. Please try again."
 
-            self.study_session_manager.mark_schedule_processed(self._pending_schedule_path)
+            self.study_session_manager.mark_syllabus_processed(self._pending_syllabus_path)
             session = self.study_session_manager.get_next_session()
             self.study_session_manager.mark_session_in_progress(session["session_id"])
             with self._study_state_lock:
-                self._pending_schedule_path = None
-                self._pending_schedule_text = None
-                self._pending_schedule_weeks = None
+                self._pending_syllabus_path = None
+                self._pending_syllabus_text = None
+                self._pending_syllabus_weeks = None
                 self._active_session = session
                 self._study_state = "in_session"
                 context = self.study_session_manager.build_session_context(session)
@@ -292,15 +292,15 @@ class JarvisBot:
                 f"Ready to begin?"
             )
 
-        # ── awaiting_schedule: re-check for file on every utterance ──
-        if state == "awaiting_schedule":
-            schedule_path = self.study_session_manager.get_new_schedule_file()
-            if not schedule_path:
+        # ── awaiting_syllabus: re-check for file on every utterance ──
+        if state == "awaiting_syllabus":
+            syllabus_path = self.study_session_manager.get_new_syllabus_file()
+            if not syllabus_path:
                 return (
-                    "I still do not see a schedule file. "
-                    "Please add it to the config/schedule folder and let me know when it is ready."
+                    "I still do not see a syllabus file. "
+                    "Please add it to the syllabus folder and let me know when it is ready."
                 )
-            return self._process_schedule_file(schedule_path)
+            return self._process_syllabus_file(syllabus_path)
 
         # ── normal: only act on a study trigger ──
         if not self._is_study_trigger(user_text):
@@ -319,30 +319,30 @@ class JarvisBot:
                 f"{session.get('focus', 'your next topic')}. Ready to begin?"
             )
 
-        schedule_path = self.study_session_manager.get_new_schedule_file()
-        if not schedule_path:
+        syllabus_path = self.study_session_manager.get_new_syllabus_file()
+        if not syllabus_path:
             with self._study_state_lock:
-                self._study_state = "awaiting_schedule"
+                self._study_state = "awaiting_syllabus"
             return (
-                "I would love to help you study! I do not have a schedule yet. "
-                "Please put your schedule file in the config/schedule folder "
+                "I would love to help you study! I do not have a syllabus yet. "
+                "Please put your syllabus file in the syllabus folder "
                 "and say start study session again when it is ready. "
                 "I can read text files, images, and PDFs."
             )
 
-        return self._process_schedule_file(schedule_path)
+        return self._process_syllabus_file(syllabus_path)
 
-    def _process_schedule_file(self, file_path: str) -> str:
-        """Read and extract a schedule file, then ask how long it covers."""
-        schedule_text = self.study_session_manager.extract_schedule_text(file_path)
-        if schedule_text.startswith("ERROR:"):
-            return schedule_text.replace("ERROR: ", "")
+    def _process_syllabus_file(self, file_path: str) -> str:
+        """Read and extract a syllabus file, then ask how long it covers."""
+        syllabus_text = self.study_session_manager.extract_syllabus_text(file_path)
+        if syllabus_text.startswith("ERROR:"):
+            return syllabus_text.replace("ERROR: ", "")
         with self._study_state_lock:
-            self._pending_schedule_path = file_path
-            self._pending_schedule_text = schedule_text
-            self._study_state = "awaiting_schedule_duration"
+            self._pending_syllabus_path = file_path
+            self._pending_syllabus_text = syllabus_text
+            self._study_state = "awaiting_syllabus_duration"
         return (
-            "I found your schedule! How long does it cover? "
+            "I found your syllabus! How long does it cover? "
             "For example, say two weeks, one month, or a semester."
         )
 
@@ -719,19 +719,19 @@ class JarvisBot:
             self._request_queue.put(None)  # Sentinel for speaker
 
             # Reset study state if conversation ended mid-flow (e.g. idle timeout
-            # while waiting for the student to answer schedule questions).
+            # while waiting for the student to answer syllabus questions).
             # "in_session" is intentionally NOT reset — the session persists across
             # wake-word cycles until [SESSION_COMPLETE] is detected.
             with self._study_state_lock:
                 if self._study_state in (
-                    "awaiting_schedule",
-                    "awaiting_schedule_duration",
+                    "awaiting_syllabus",
+                    "awaiting_syllabus_duration",
                     "awaiting_weekly_hours",
                 ):
                     logger.info("Conversation ended mid-study-flow — resetting study state to normal")
-                    self._pending_schedule_path = None
-                    self._pending_schedule_text = None
-                    self._pending_schedule_weeks = None
+                    self._pending_syllabus_path = None
+                    self._pending_syllabus_text = None
+                    self._pending_syllabus_weeks = None
                     self._study_state = "normal"
             
             # 2. Stop VAD first — this closes the audio stream and unblocks the listener thread

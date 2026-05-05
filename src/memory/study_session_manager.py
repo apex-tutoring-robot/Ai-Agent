@@ -3,7 +3,7 @@ StudySessionManager — orchestrates the study session lifecycle.
 
 Knows nothing about HOW data is stored. Delegates all persistence to the
 StudyMemoryBackend. Responsible for:
-  - Detecting new schedule files in config/schedule/
+  - Detecting new syllabus files in syllabus/
   - Extracting text from any supported file format
   - Driving LLM calls for plan generation and session summarization
   - Building the system-prompt context string injected during active sessions
@@ -41,20 +41,20 @@ class StudySessionManager:
 
     Args:
         llm_client: Shared LLMClient instance (for plan generation, summarization,
-                    and schedule image extraction).
+                    and syllabus image extraction).
         backend:    Any object satisfying the StudyMemoryBackend protocol.
                     Defaults to JsonFileBackend when not provided.
-        schedule_dir: Directory where parents drop schedule files.
+        syllabus_dir: Directory where parents drop syllabus files.
     """
 
     def __init__(
         self,
         llm_client: "LLMClient",
         backend: Optional["StudyMemoryBackend"] = None,
-        schedule_dir: str = "config/schedule",
+        syllabus_dir: str = "syllabus",
     ):
         self.llm_client = llm_client
-        self.schedule_dir = schedule_dir
+        self.syllabus_dir = syllabus_dir
 
         if backend is None:
             from memory.backend import JsonFileBackend
@@ -65,34 +65,34 @@ class StudySessionManager:
         logger.info("StudySessionManager initialized (backend=%s)", type(self.backend).__name__)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Schedule detection
+    # Syllabus detection
     # ──────────────────────────────────────────────────────────────────────────
 
-    def get_new_schedule_file(self) -> Optional[str]:
+    def get_new_syllabus_file(self) -> Optional[str]:
         """
-        Scan schedule_dir for any file that has not yet been processed.
+        Scan syllabus_dir for any file that has not yet been processed.
 
         Returns the full path of the first unprocessed file, or None.
         """
-        if not os.path.isdir(self.schedule_dir):
+        if not os.path.isdir(self.syllabus_dir):
             return None
         data = self.backend.load()
-        processed = set(data.get("processed_schedules", []))
-        for filename in sorted(os.listdir(self.schedule_dir)):
+        processed = set(data.get("processed_syllabi", []))
+        for filename in sorted(os.listdir(self.syllabus_dir)):
             if filename.startswith("."):
                 continue
             ext = os.path.splitext(filename)[1].lower()
             if ext in _SUPPORTED_EXTENSIONS and filename not in processed:
-                return os.path.join(self.schedule_dir, filename)
+                return os.path.join(self.syllabus_dir, filename)
         return None
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Schedule text extraction
+    # Syllabus text extraction
     # ──────────────────────────────────────────────────────────────────────────
 
-    def extract_schedule_text(self, file_path: str) -> str:
+    def extract_syllabus_text(self, file_path: str) -> str:
         """
-        Extract schedule content as plain text from any supported format.
+        Extract syllabus content as plain text from any supported format.
 
         Returns a text string on success, or a string starting with "ERROR:"
         that the caller can speak directly to the student.
@@ -104,7 +104,7 @@ class StudySessionManager:
                 with open(file_path, "r", encoding="utf-8") as f:
                     return f.read().strip()
             except OSError as e:
-                logger.error("extract_schedule_text: failed to read %s: %s", file_path, e)
+                logger.error("extract_syllabus_text: failed to read %s: %s", file_path, e)
                 return f"ERROR: Could not read the file {os.path.basename(file_path)}."
 
         elif ext in {".png", ".jpg", ".jpeg"}:
@@ -116,8 +116,8 @@ class StudySessionManager:
                 data_url = f"data:{mime};base64,{b64}"
                 return self.llm_client.extract_image_content(data_url)
             except Exception as e:
-                logger.error("extract_schedule_text: image extraction failed for %s: %s", file_path, e)
-                return "ERROR: Could not read the schedule image. Please try photographing it with the robot camera instead."
+                logger.error("extract_syllabus_text: image extraction failed for %s: %s", file_path, e)
+                return "ERROR: Could not read the syllabus image. Please try photographing it with the robot camera instead."
 
         elif ext == ".pdf":
             try:
@@ -130,28 +130,28 @@ class StudySessionManager:
                 text = "\n".join(text_parts).strip()
                 if text:
                     return text
-                return "ERROR: The PDF appears to be a scanned image and has no readable text. Please photograph the schedule with the robot camera instead."
+                return "ERROR: The PDF appears to be a scanned image and has no readable text. Please photograph the syllabus with the robot camera instead."
             except ImportError:
-                return "ERROR: PDF reading is not available. Please photograph the schedule or save it as a text file."
+                return "ERROR: PDF reading is not available. Please photograph the syllabus or save it as a text file."
             except Exception as e:
-                logger.error("extract_schedule_text: PDF extraction failed for %s: %s", file_path, e)
-                return "ERROR: Could not read the PDF. Please photograph the schedule instead."
+                logger.error("extract_syllabus_text: PDF extraction failed for %s: %s", file_path, e)
+                return "ERROR: Could not read the PDF. Please photograph the syllabus instead."
 
         return f"ERROR: Unsupported file format {ext}. Please use a text file, image, or PDF."
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Schedule processed marking
+    # Syllabus processed marking
     # ──────────────────────────────────────────────────────────────────────────
 
-    def mark_schedule_processed(self, file_path: str) -> None:
-        """Record the schedule file (by basename) as processed in the backend."""
-        self.backend.mark_schedule_processed(os.path.basename(file_path))
+    def mark_syllabus_processed(self, file_path: str) -> None:
+        """Record the syllabus file (by basename) as processed in the backend."""
+        self.backend.mark_syllabus_processed(os.path.basename(file_path))
 
     # ──────────────────────────────────────────────────────────────────────────
     # Study plan generation
     # ──────────────────────────────────────────────────────────────────────────
 
-    def generate_study_plan(self, schedule_text: str, num_sessions: int) -> bool:
+    def generate_study_plan(self, syllabus_text: str, num_sessions: int) -> bool:
         """
         Call LLM to produce a structured study plan and persist it via backend.
 
@@ -163,17 +163,17 @@ class StudySessionManager:
         session_schema = _json.dumps(session_plan_llm_schema(), indent=2)
 
         prompt = (
-            f"You are a study planner for a K-8 student. Given the schedule text below, "
+            f"You are a study planner for a K-8 student. Given the syllabus text below, "
             f"create a study plan with exactly {num_sessions} sessions.\n\n"
             f"Return a JSON object with this exact structure:\n"
             f'{{\n'
             f'  "total_sessions": {num_sessions},\n'
-            f'  "source_summary": "<one sentence describing what the full schedule covers>",\n'
+            f'  "source_summary": "<one sentence describing what the full syllabus covers>",\n'
             f'  "sessions": [<array of {num_sessions} session objects matching the schema below>]\n'
             f'}}\n\n'
             f"Each session object must match this schema exactly (no extra fields):\n"
             f"{session_schema}\n\n"
-            f"Schedule text:\n{schedule_text}\n\n"
+            f"Syllabus text:\n{syllabus_text}\n\n"
             f"Return only valid JSON. No markdown fences. No explanation."
         )
 
@@ -317,7 +317,7 @@ class StudySessionManager:
     @staticmethod
     def extract_duration_weeks(text: str) -> Optional[float]:
         """
-        Parse spoken schedule duration into weeks.
+        Parse spoken syllabus duration into weeks.
 
         Understands: "two weeks", "a month", "3 months", "a semester",
         "one year", bare numbers (treated as weeks). Returns None if not found.
