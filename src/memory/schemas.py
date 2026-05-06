@@ -1,26 +1,28 @@
 """
 Pydantic schemas for study plan generation and persistence.
 
-SessionPlan  — all details about a single study session.
-               LLM fills: focus, topics, key_concepts, practice.
-               System fills: session_id (UUID), status (lifecycle state).
+SessionPlan — represents a session through its full lifecycle.
+              LLM fills at plan creation: focus, topics, key_concepts, practice.
+              System fills: session_id (UUID), status.
+              LLM fills at session end: summary, struggles, next_focus.
 
-StudyPlan    — the full plan: a list of SessionPlans plus top-level metadata.
+StudyPlan   — the full plan: a list of SessionPlans plus top-level metadata.
 
 Usage:
   plan = StudyPlan.model_validate_json(raw_llm_output)
-  # session_id and status are auto-defaulted for every session.
+  # Validate end-of-session debrief by merging into the existing session:
+  updated = SessionPlan.model_validate({**existing_session, **llm_debrief})
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-# Fields the LLM must not populate — handled entirely by the system.
-_SYSTEM_FIELDS = {"session_id", "status"}
+# Fields the LLM must not populate during plan generation.
+_SYSTEM_FIELDS = {"session_id", "status", "summary", "struggles", "next_focus"}
 
 
 class SessionPlan(BaseModel):
@@ -30,6 +32,10 @@ class SessionPlan(BaseModel):
     key_concepts: List[str]
     practice: str
     status: Literal["not_started", "in_progress", "completed"] = "not_started"
+    # Populated by LLM after the session ends
+    summary: Optional[str] = None
+    struggles: List[str] = Field(default_factory=list)
+    next_focus: str = ""
 
 
 class StudyPlan(BaseModel):

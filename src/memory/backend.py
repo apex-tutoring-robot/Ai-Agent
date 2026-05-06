@@ -36,8 +36,7 @@ class StudyMemoryBackend(Protocol):
         Shape:
           {
             "processed_syllabi": List[str],
-            "study_plan": Optional[Dict],
-            "session_history": List[Dict]
+            "study_plan": Optional[Dict]
           }
         Return an empty scaffold dict if no data exists yet.
         """
@@ -82,13 +81,11 @@ class StudyMemoryBackend(Protocol):
         """Set the session with the given session_id to 'in_progress'."""
         ...
 
-    def complete_session(self, session_id: str, summary: Dict[str, Any]) -> None:
+    def complete_session(self, session_id: str, summary_fields: Dict[str, Any]) -> None:
         """
-        Mark the session with the given session_id as 'completed'.
-        Append summary to session_history.
-        summary shape:
-          {"date": str, "session_id": str,
-           "summary": str, "struggles": List[str], "next_focus": str}
+        Mark the session as 'completed' and write the debrief fields onto it.
+        summary_fields shape:
+          {"date": str, "summary": str, "struggles": List[str], "next_focus": str}
         """
         ...
 
@@ -175,7 +172,6 @@ class JsonFileBackend:
         scaffold: Dict[str, Any] = {
             "processed_syllabi": [],
             "study_plan": None,
-            "session_history": [],
         }
         index = self._load_index()
         scaffold["processed_syllabi"] = index.get("processed_syllabi", [])
@@ -184,7 +180,6 @@ class JsonFileBackend:
         if plan_path and os.path.exists(plan_path):
             plan_file = self._load_plan_file(plan_path)
             if plan_file:
-                scaffold["session_history"] = plan_file.pop("session_history", [])
                 scaffold["study_plan"] = plan_file
 
         return scaffold
@@ -196,9 +191,7 @@ class JsonFileBackend:
 
         plan_path = self._active_plan_path(index)
         if plan_path and data.get("study_plan") is not None:
-            plan_file = dict(data["study_plan"])
-            plan_file["session_history"] = data.get("session_history", [])
-            self._atomic_write(plan_path, plan_file)
+            self._atomic_write(plan_path, data["study_plan"])
 
     def mark_syllabus_processed(self, filename: str) -> None:
         index = self._load_index()
@@ -208,9 +201,7 @@ class JsonFileBackend:
 
     def save_study_plan(self, plan: Dict[str, Any]) -> None:
         filename = self._plan_filename(plan.get("source_summary", "plan"))
-        plan_file = dict(plan)
-        plan_file["session_history"] = []
-        self._atomic_write(os.path.join(self._dir, filename), plan_file)
+        self._atomic_write(os.path.join(self._dir, filename), plan)
 
         index = self._load_index()
         index["active_plan"] = filename
@@ -246,12 +237,12 @@ class JsonFileBackend:
                     break
         self.save(data)
 
-    def complete_session(self, session_id: str, summary: Dict[str, Any]) -> None:
+    def complete_session(self, session_id: str, summary_fields: Dict[str, Any]) -> None:
         data = self.load()
         if data.get("study_plan"):
             for session in data["study_plan"].get("sessions", []):
                 if session.get("session_id") == session_id:
                     session["status"] = "completed"
+                    session.update(summary_fields)
                     break
-        data["session_history"].append(summary)
         self.save(data)

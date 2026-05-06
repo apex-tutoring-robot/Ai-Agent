@@ -221,12 +221,13 @@ class StudySessionManager:
         concepts = ", ".join(session.get("key_concepts", []))
         practice = session.get("practice", "")
 
-        # Inject last session summary if one exists
+        # Inject carry-forward note from the last completed session if one exists
         data = self.backend.load()
-        history = data.get("session_history", [])
+        sessions = (data.get("study_plan") or {}).get("sessions", [])
+        completed = [s for s in sessions if s.get("status") == "completed"]
         last_session_note = ""
-        if history:
-            last = history[-1]
+        if completed:
+            last = completed[-1]
             struggles = ", ".join(last.get("struggles", [])) or "none noted"
             next_focus = last.get("next_focus", "")
             last_session_note = (
@@ -285,27 +286,31 @@ class StudySessionManager:
             f"Return only valid JSON. No markdown fences."
         )
 
-        import json as _json
+        from memory.schemas import SessionPlan
 
         try:
             raw = self.llm_client.generate_json_response(prompt, max_tokens=400)
-            summary_data = _json.loads(raw)
+            import json as _json
+            llm_data = _json.loads(raw)
+            # Validate debrief fields by merging into the existing session object
+            validated = SessionPlan.model_validate({**session, **llm_data})
+            summary_fields = {
+                "date": datetime.date.today().isoformat(),
+                "summary": validated.summary,
+                "struggles": validated.struggles,
+                "next_focus": validated.next_focus,
+            }
         except Exception as e:
             logger.error("complete_session: summarization failed: %s", e)
-            summary_data = {
+            summary_fields = {
+                "date": datetime.date.today().isoformat(),
                 "summary": f'Session on "{focus}" completed.',
                 "struggles": [],
-                "next_focus": ""
+                "next_focus": "",
             }
 
-        record = {
-            "date": datetime.date.today().isoformat(),
-            "session_id": session_id,
-            **summary_data
-        }
-
         try:
-            self.backend.complete_session(session_id, record)
+            self.backend.complete_session(session_id, summary_fields)
             logger.info("Session %s marked complete and summarized", session_id)
         except Exception as e:
             logger.error("complete_session: backend.complete_session failed: %s", e)
