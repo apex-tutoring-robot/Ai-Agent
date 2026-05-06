@@ -166,7 +166,25 @@ class JarvisBot:
         t = text.lower().strip()
         
         math_keywords = [
-            "solve", "equations", "add", "subtract", "multiply", "divide", "area", "perimeter", "radius", "diameter", "rectangle", "circle", "triangle", "fraction", "algebra", "geometry", "graph"
+            # arithmetic / algebra
+            "solve", "equation", "equations", "add", "subtract", "multiply", "divide",
+            "fraction", "algebra", "calculate", "compute", "simplify", "evaluate",
+            "factor", "expand", "expression", "variable", "coefficient",
+            # geometry — shapes
+            "area", "perimeter", "volume", "surface area",
+            "radius", "diameter", "circumference",
+            "rectangle", "square", "circle", "triangle", "polygon",
+            "pentagon", "hexagon", "heptagon", "octagon", "nonagon", "decagon",
+            "trapezoid", "trapezium", "parallelogram", "rhombus", "kite",
+            "ellipse", "oval", "sector", "segment",
+            "sided", "sides", "shape", "diagonal", "hypotenuse",
+            # geometry — measurements
+            "angle", "degree", "height", "width", "length", "base", "depth",
+            "pythagorean", "theorem", "congruent", "similar",
+            # misc math
+            "graph", "geometry", "probability", "percent", "ratio", "proportion",
+            "mean", "median", "mode", "average", "prime", "exponent", "power",
+            "square root", "cube root", "logarithm",
         ]
         
         if any(word in t for word in math_keywords):
@@ -241,66 +259,166 @@ class JarvisBot:
             self._conversation_active.clear()
             
     def force_shape_if_missing(self, plan, user_text):
-        import re
+        """
+        Guarantee that a shape diagram exists in the visual plan.
+
+        Strategy:
+          1. Detect what shape the user asked about (by name or N-sided).
+          2. Check whether the LLM already drew that shape type.
+          3. Only inject a fallback shape when the LLM forgot it entirely.
+          4. Never strip visuals that the LLM correctly generated — only add missing ones.
+          5. Always ensure labels go OUTSIDE the shape (above/below, never on edges).
+        """
+        import re, math
+
         text = user_text.lower()
         visuals = plan.get("visuals", [])
-        
-        shape_map = {
-            "triangle": 3,
-            "pentagon": 5,
-            "hexagon": 6,
-            "heptagon": 7,
-            "octagon": 8,
-            "nonagon": 9,
-            "decagon": 10,
-        }
-        
-        sides = None
-        for word, n in shape_map.items():
-            if word in text:
-                sides = n
-                break 
-        
-        match = re.search(r"(\d+)\s*[- ]?sided|(\d+)\s+sides", text)
-        if match:
-            sides = int(match.group(1) or match.group(2))
-            
-        if not sides:
-            plan["visuals"] = visuals
-            return plan
-            
-        visuals = [
-            v for v in visuals
-            if v.get("action") not in ["draw_regular_polygon", "draw_polygon"]
-        ]
-        
-        speech = paln.get("speech", [])
+        speech  = plan.get("speech", [])
         speech_id = speech[0].get("id", 1) if speech else 1
 
+        # ── Map shape names → sides (for regular polygons) ──
+        poly_map = {
+            "triangle": 3, "pentagon": 5, "hexagon": 6,
+            "heptagon": 7, "octagon": 8, "nonagon": 9, "decagon": 10,
+        }
+
+        # ── Map shape names → draw action we expect ──
+        draw_action_for = {
+            "rectangle": "draw_rect", "square": "draw_rect",
+            "circle": "draw_circle", "ellipse": "draw_circle",
+            "triangle": "draw_polygon",
+            "pentagon": "draw_regular_polygon", "hexagon": "draw_regular_polygon",
+            "heptagon": "draw_regular_polygon", "octagon": "draw_regular_polygon",
+            "nonagon": "draw_regular_polygon",  "decagon": "draw_regular_polygon",
+            "trapezoid": "draw_polygon", "trapezium": "draw_polygon",
+            "parallelogram": "draw_polygon", "rhombus": "draw_polygon",
+        }
+
+        # Detect the shape name in user text
+        detected_shape = None
+        for name in draw_action_for:
+            if name in text:
+                detected_shape = name
+                break
+
+        # Detect N-sided polygon
+        sides = None
+        if detected_shape in poly_map:
+            sides = poly_map[detected_shape]
+        m = re.search(r"(\d+)\s*[- ]?sided|(\d+)\s+sides", text)
+        if m:
+            sides = int(m.group(1) or m.group(2))
+            if not detected_shape:
+                detected_shape = f"{sides}-sided"
+
+        if not detected_shape:
+            # Nothing geometry-specific detected — return unchanged
+            return plan
+
+        # ── Check whether LLM already drew the expected shape ──
+        expected_actions = {draw_action_for.get(detected_shape, "draw_regular_polygon")}
+        # Also accept draw_line clusters as triangle proxies
+        if detected_shape == "triangle":
+            expected_actions.add("draw_line")
+
+        existing_draw_actions = {v.get("action") for v in visuals}
+        shape_already_drawn = bool(expected_actions & existing_draw_actions - {"draw_text", "draw_line", "clear"})
+
+        # For triangle: need at least 3 draw_line actions
+        if detected_shape == "triangle":
+            line_count = sum(1 for v in visuals if v.get("action") == "draw_line")
+            shape_already_drawn = line_count >= 3
+
+        if shape_already_drawn:
+            # LLM drew the shape — only fix label positions if they overlap the shape
+            plan["visuals"] = self._fix_label_positions(visuals, detected_shape)
+            return plan
+
+        # ── LLM forgot the shape — inject it ──
+        logger.warning(f"[force_shape] LLM omitted diagram for '{detected_shape}' — injecting fallback")
+
         has_clear = any(v.get("action") == "clear" for v in visuals)
+        insert_at = 0
         if not has_clear:
             visuals.insert(0, {"speech_id": speech_id, "action": "clear"})
+            insert_at = 1
 
-            visuals.insert(1, {
-                "speech_id": speech_id,
-                "action": "draw_regular_polygon",
-                "sides": max(3, min(12, sides)),
-                "cx": 700,
-                "cy": 270,
-                "radius": 125
-            })
+        if detected_shape in ("rectangle", "square"):
+            visuals.insert(insert_at, {"speech_id": speech_id, "action": "draw_rect",
+                                        "x": 500, "y": 160, "w": 220, "h": 160})
+            visuals.insert(insert_at + 1, {"speech_id": speech_id, "action": "draw_text",
+                                            "text": "shape", "x": 580, "y": 145})
 
-            visuals.insert(2, {
-                "speech_id": speech_id,
-                "action": "draw_text",
-                "text": f"{sides}-sided shape",
-                "sides": max(3, min(12, sides)),
-                "x": 610,
-                "y": 430
-            })
+        elif detected_shape == "circle":
+            visuals.insert(insert_at, {"speech_id": speech_id, "action": "draw_circle",
+                                        "x": 620, "y": 270, "r": 100})
+            visuals.insert(insert_at + 1, {"speech_id": speech_id, "action": "draw_text",
+                                            "text": "r", "x": 635, "y": 260})
+
+        elif detected_shape == "triangle":
+            # Right triangle pointing right
+            pts = [[500, 380], [700, 380], [500, 160]]
+            visuals.insert(insert_at,     {"speech_id": speech_id, "action": "draw_line",
+                                            "x1": 500, "y1": 380, "x2": 700, "y2": 380})
+            visuals.insert(insert_at + 1, {"speech_id": speech_id, "action": "draw_line",
+                                            "x1": 700, "y1": 380, "x2": 500, "y2": 160})
+            visuals.insert(insert_at + 2, {"speech_id": speech_id, "action": "draw_line",
+                                            "x1": 500, "y1": 160, "x2": 500, "y2": 380})
+            # Labels: base below bottom edge, height left of vertical edge
+            visuals.insert(insert_at + 3, {"speech_id": speech_id, "action": "draw_text",
+                                            "text": "base", "x": 575, "y": 410})
+            visuals.insert(insert_at + 4, {"speech_id": speech_id, "action": "draw_text",
+                                            "text": "height", "x": 430, "y": 275})
+
+        elif detected_shape in ("trapezoid", "trapezium"):
+            visuals.insert(insert_at,     {"speech_id": speech_id, "action": "draw_polygon",
+                                            "points": [[520,170],[680,170],[720,360],[480,360]]})
+            visuals.insert(insert_at + 1, {"speech_id": speech_id, "action": "draw_text",
+                                            "text": "a (top)", "x": 560, "y": 155})
+            visuals.insert(insert_at + 2, {"speech_id": speech_id, "action": "draw_text",
+                                            "text": "b (bottom)", "x": 540, "y": 390})
+
+        elif detected_shape in ("parallelogram", "rhombus"):
+            visuals.insert(insert_at,     {"speech_id": speech_id, "action": "draw_polygon",
+                                            "points": [[540,170],[740,170],[680,360],[480,360]]})
+            visuals.insert(insert_at + 1, {"speech_id": speech_id, "action": "draw_text",
+                                            "text": "base", "x": 575, "y": 390})
+
+        elif sides:  # Regular polygon fallback
+            clamped = max(3, min(12, sides))
+            visuals.insert(insert_at,     {"speech_id": speech_id, "action": "draw_regular_polygon",
+                                            "sides": clamped, "cx": 620, "cy": 270, "radius": 110})
+            visuals.insert(insert_at + 1, {"speech_id": speech_id, "action": "draw_text",
+                                            "text": f"s = side length", "x": 545, "y": 405})
 
         plan["visuals"] = visuals
         return plan
+
+    def _fix_label_positions(self, visuals, shape_name):
+        """
+        Post-process visuals: push any draw_text that overlaps the diagram zone
+        to safe positions above or below the shape.
+        Diagram zone x: 480-750. Safe label y: above=130, below=430.
+        """
+        DIAGRAM_X_MIN = 480
+        DIAGRAM_X_MAX = 750
+        LABEL_Y_ABOVE = 130   # safe y for labels above shape
+        LABEL_Y_BELOW = 430   # safe y for labels below shape
+
+        fixed = []
+        for v in visuals:
+            if v.get("action") == "draw_text":
+                x = v.get("x", 0)
+                y = v.get("y", 0)
+                # Only adjust labels that are in the diagram zone
+                if DIAGRAM_X_MIN <= x <= DIAGRAM_X_MAX:
+                    # If y is in the middle of the shape area (160-420), push to below
+                    if 160 <= y <= 420:
+                        v = dict(v)  # don't mutate original
+                        v["y"] = LABEL_Y_BELOW
+                        LABEL_Y_BELOW += 30  # stack multiple labels
+            fixed.append(v)
+        return fixed
 
     def _speaker_loop(self, continuous_vad, output_device_index):
         """Consumer: Processes requests and speaks."""
@@ -337,10 +455,8 @@ class JarvisBot:
                             messages = self.conversation_manager.get_messages()
                             plan = self.llm_client.generate_teaching_plan(messages)
                             plan = self.force_shape_if_missing(plan, user_text)
-                            self.run_teaching_plan(plan, output_device_index, continuous_vad)
                             if self.ui_signals:
                                 self.ui_signals.show_teaching_layout.emit()
-                        
                             self.run_teaching_plan(plan, output_device_index, continuous_vad)
                             continue
                         

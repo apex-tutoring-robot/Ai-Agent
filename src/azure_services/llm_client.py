@@ -140,12 +140,26 @@ class LLMClient:
       ],
       "visuals": [
         {"speech_id": 1, "action": "clear"},
-        {"speech_id": 1, "action": "draw_text", "text": "string", "x": 100, "y": 120}
+        {"speech_id": 1, "action": "draw_text", "text": "string", "x": 100, "y": 120},
+        {"speech_id": 1, "action": "draw_line", "x1": 0, "y1": 0, "x2": 100, "y2": 100},
+        {"speech_id": 1, "action": "draw_rect", "x": 580, "y": 160, "w": 220, "h": 160},
+        {"speech_id": 1, "action": "draw_circle", "x": 620, "y": 270, "r": 100},
+        {"speech_id": 1, "action": "draw_circle", "x": 620, "y": 270, "rx": 110, "ry": 75},
+        {"speech_id": 1, "action": "draw_polygon", "points": [[580,160],[780,160],[780,360],[580,360]]},
+        {"speech_id": 1, "action": "draw_regular_polygon", "sides": 6, "cx": 620, "cy": 270, "radius": 110},
+        {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360}
       ]
     }
 
+    Action field reference:
+    - draw_circle: x,y = CENTER of circle. r = radius (for circles). rx,ry = separate radii (for ellipses).
+    - draw_rect: x,y = top-left corner. w,h = width and height.
+    - draw_regular_polygon: sides=number of sides, cx/cy=center, radius=circumscribed radius.
+    - draw_polygon: points = list of [x,y] pairs (minimum 3 points).
+    - draw_arc: x,y = top-left of bounding box, w/h = bounding box size, start_angle/span_angle in degrees.
+
     Rules:
-    - Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon
+    - Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc
     - Use 2–5 speech steps
     - Keep explanations short and teacher-like
     - Every visual must map to a valid speech_id
@@ -160,33 +174,86 @@ class LLMClient:
         2. substituted values
         3. simplified result
         4. final answer
-    If the problem involves geometry, shapes, area, perimeter, radius, diameter, rectangle, square, triangle, or circle:
-    - Always include a diagram on the canvas
-    - place the diagram beside the equations, not on top of them
-    - Always label dimensions or key values on the diagram using draw_text
-    - Never place labels on top of the shape boundary
-    - For rectangles and squares, put width labels above the shape and height label to the left or right
-    - For circles, always draw the circle and place the radius label outside the circle
-    - For triangles, use draw_line for all three edges and place side labels near, but not on, the edges
-    - For regular polygons:
-        - MUST use draw_regular_polygon
-        - Do not use draw_circle or partial arcs
-        - Do not skip the shape
-        - The first diagram action after clear must be draw_regular_polygon
-        - provide sides, cx, cy, radius 
-        - use cx=700, cy=260, radius=120 unless there is a reason to change it
-        - label the side length below or beside the polygon using draw_text
-    - use draw_line for triangle edges and markings
-    - use draw_rect for rectangles and squares
-    - use draw_circle for circles
-    - Always include both:
-        1. the visual diagram
-        2. the calculation steps
+    GEOMETRY DIAGRAM RULES — MANDATORY, NO EXCEPTIONS:
+    - You MUST draw a shape diagram for EVERY geometry problem. Never omit it.
+    - Equations go LEFT side (x: 60–420). Diagrams go MIDDLE zone (x: 480–750).
+    - x > 780 is reserved for the face widget — NEVER place any shape or label there.
+    - The face widget occupies x: 800–1280. Keep all drawing strictly left of x=780.
+    - y range for both: 130 to 420.
+
+    LABEL PLACEMENT — CRITICAL RULE:
+    - Labels must be OUTSIDE the shape, never on or crossing an edge.
+    - Place labels for the BOTTOM of a shape at y = shape_bottom + 30 (e.g. y=410 if shape ends at y=380).
+    - Place labels for the TOP of a shape at y = shape_top - 15 (e.g. y=145 if shape starts at y=160).
+    - Place labels for the LEFT side at x = shape_left - 70 (e.g. x=510 if shape starts at x=580).
+    - Place labels for the RIGHT side at x = shape_right + 15.
+    - Stack multiple bottom labels 30px apart: y=410, y=440, etc.
+    - Stack multiple top labels 25px apart: y=145, y=120, etc.
+
+    SHAPE-BY-SHAPE RULES (with exact coordinate examples):
+
+    TRIANGLE (right, scalene, isosceles, equilateral — any):
+      Use 3x draw_line for edges. Example right triangle:
+        draw_line x1=500 y1=380 x2=700 y2=380  (base, horizontal)
+        draw_line x1=700 y1=380 x2=500 y2=160  (hypotenuse)
+        draw_line x1=500 y1=160 x2=500 y2=380  (height, vertical)
+      Labels OUTSIDE:
+        Base label:   draw_text "Base=5"   x=575 y=410  (30px BELOW the base line)
+        Height label: draw_text "Height=10" x=420 y=270  (70px LEFT of the vertical edge)
+        Hyp label:    draw_text "Hyp=11"   x=615 y=265  (beside the slant, not on it)
+
+    RECTANGLE / SQUARE:
+      draw_rect x=500 y=160 w=220 h=160
+      Labels:
+        Width:  draw_text "w=10" x=580 y=145   (15px ABOVE top edge, y=160-15=145)
+        Height: draw_text "h=8"  x=735 y=245   (15px RIGHT of right edge, x=500+220+15=735)
+
+    CIRCLE:
+      draw_circle x=620 y=270 r=100   (x,y = CENTER)
+      Labels:
+        draw_line x1=620 y1=270 x2=720 y2=270  (radius line from center to edge)
+        draw_text "r=7" x=655 y=260            (above the radius line)
+
+    REGULAR POLYGON (pentagon, hexagon, octagon, etc.):
+      ALWAYS use draw_regular_polygon — NEVER draw_circle for these shapes.
+      draw_regular_polygon sides=5 cx=620 cy=270 radius=110
+      Label side length BELOW the shape:
+        draw_text "s=10" x=565 y=405   (cy + radius + 25 = 270+110+25 = 405)
+      CRITICAL: cx=620 keeps the whole polygon left of x=750. NEVER use cx > 650.
+
+    TRAPEZOID:
+      draw_polygon points=[[520,170],[680,170],[720,360],[480,360]]
+      Labels:
+        Top side:    draw_text "a=6"  x=570 y=150  (20px above top edge y=170)
+        Bottom side: draw_text "b=10" x=550 y=390  (30px below bottom edge y=360)
+        Height:      draw_text "h=8"  x=420 y=265  (left of shape)
+
+    PARALLELOGRAM / RHOMBUS:
+      draw_polygon points=[[540,170],[740,170],[680,360],[480,360]]
+      Labels:
+        Base:   draw_text "b=10" x=575 y=390
+        Height: draw_text "h=8"  x=415 y=265
+
+    ELLIPSE:
+      draw_circle x=620 y=270 rx=110 ry=75   (use rx and ry, not r)
+      Labels: draw_text "a=11" x=635 y=260 and draw_text "b=7.5" x=620 y=185
+
+    SECTOR (pie slice):
+      draw_line x1=620 y1=270 x2=740 y2=270   (radius 1)
+      draw_line x1=620 y1=270 x2=684 y2=166   (radius 2, at the sector angle)
+      draw_arc  x=500 y=150 w=240 h=240 start_angle=0 span_angle=60
+      Labels:
+        draw_text "r=6"     x=665 y=260
+        draw_text "60°"     x=640 y=245
+
+    Always include BOTH:
+      1. The visual diagram with labeled dimensions
+      2. The full calculation steps as draw_text on the left (x: 60–420)
         
     Canvas layout:
     - equations on the left: x between 60 and 420
-    - diagrams in the middle-right: x between 560 and 860
-    - keep the far-right area x > 900 empty for the face
+    - diagrams in the middle zone: x between 480 and 750
+    - HARD LIMIT: nothing at x > 780 — face widget lives there
     - use y values between 130 and 420
     - space equation rows at least 55 pixels apart
     - never place text labels on top of other text

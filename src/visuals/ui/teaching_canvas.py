@@ -15,13 +15,14 @@ class TeachingCanvas(QGraphicsItem):
         self.rect_items = []
         self.circle_items = []
         self.polygon_items = []
+        self.arc_items = []        # NEW: for ellipses/arcs: (x, y, w, h, start_angle, span_angle)
+        self.arrow_items = []      # NEW: for labeled arrows
 
     def boundingRect(self):
         return QRectF(0, 0, 1280, 720)
 
     def paint(self, painter: QPainter, option, widget=None):
         painter.setRenderHint(QPainter.Antialiasing)
-
         painter.fillRect(self.boundingRect(), Qt.white)
 
         pen = QPen(Qt.black, 3)
@@ -29,16 +30,24 @@ class TeachingCanvas(QGraphicsItem):
 
         for (x1, y1, x2, y2) in self.lines:
             painter.drawLine(x1, y1, x2, y2)
-            
+
         for (x, y, w, h) in self.rect_items:
             painter.drawRect(x, y, w, h)
-            
-        for (x, y, r) in self.circle_items:
-            painter.drawEllipse(x, y, r * 2, r * 2)
-            
+
+        for (x, y, rx, ry) in self.circle_items:
+            # x,y is CENTER, rx/ry are radii (rx==ry for circles)
+            painter.drawEllipse(
+                QPointF(float(x), float(y)),
+                float(rx),
+                float(ry)
+            )
+
         for points in self.polygon_items:
             polygon = QPolygonF([QPointF(x, y) for x, y in points])
             painter.drawPolygon(polygon)
+
+        for (x, y, w, h, start_angle, span_angle) in self.arc_items:
+            painter.drawArc(x, y, w, h, start_angle, span_angle)
 
         for text, x, y in self.text_items:
             if x < 500:
@@ -47,7 +56,6 @@ class TeachingCanvas(QGraphicsItem):
             else:
                 font = QFont("Arial", 16)
                 font.setBold(True)
-                
             painter.setFont(font)
             painter.drawText(x, y, text)
 
@@ -65,6 +73,8 @@ class TeachingCanvas(QGraphicsItem):
         self.rect_items = []
         self.circle_items = []
         self.polygon_items = []
+        self.arc_items = []
+        self.arrow_items = []
         self.update()
 
     def add_line(self, x1, y1, x2, y2):
@@ -74,43 +84,93 @@ class TeachingCanvas(QGraphicsItem):
     def add_text(self, text, x, y):
         self.text_items.append((text, x, y))
         self.update()
-        
+
     def add_rect(self, x, y, w, h):
-            self.rect_items.append((x, y, w, h))
-            self.update()
-            
-    def add_circle(self, x, y, r):
-            self.circle_items.append((x, y, r))
-            self.update()
-            
+        self.rect_items.append((x, y, w, h))
+        self.update()
+
+    def add_circle(self, x, y, rx, ry=None):
+        """x, y = center. rx = x-radius, ry = y-radius (defaults to rx for circles)."""
+        if ry is None:
+            ry = rx
+        self.circle_items.append((x, y, rx, ry))
+        self.update()
+
     def add_polygon(self, points):
         self.polygon_items.append(points)
         self.update()
-            
+
+    def add_arc(self, x, y, w, h, start_angle=0, span_angle=5760):
+        """Draw an arc/ellipse. Angles in 1/16th of a degree (Qt convention)."""
+        self.arc_items.append((x, y, w, h, start_angle, span_angle))
+        self.update()
+
     def handle_draw_actions(self, actions):
-            for action in actions:
-                    action_type = action.get("action")
-                    
-                    if action_type == "clear":
-                            self.clear_canvas()
-                        
-                    elif action_type == "draw_text":
-                            self.add_text(
-                                action.get("text", ""),
-                                action.get("x", 100),
-                                action.get("y", 100)
-                            )
-                            
-                    elif action_type == "draw_line":
-                            self.add_line(
-                                action.get("x1", 0),
-                                action.get("y1", 0),
-                                action.get("x2", 100),
-                                action.get("y2", 100)
-                            )
-                            
-                    elif action_type == "draw_rect":
-                            pass
-                            
-                    elif action_type == "draw_circle":
-                            pass
+        for action in actions:
+            action_type = action.get("action")
+
+            if action_type == "clear":
+                self.clear_canvas()
+
+            elif action_type == "draw_text":
+                self.add_text(
+                    action.get("text", ""),
+                    action.get("x", 100),
+                    action.get("y", 100)
+                )
+
+            elif action_type == "draw_line":
+                self.add_line(
+                    action.get("x1", 0),
+                    action.get("y1", 0),
+                    action.get("x2", 100),
+                    action.get("y2", 100)
+                )
+
+            elif action_type == "draw_rect":
+                self.add_rect(
+                    action.get("x", 100),
+                    action.get("y", 100),
+                    action.get("w", 200),
+                    action.get("h", 150)
+                )
+
+            elif action_type == "draw_circle":
+                # Support both r (radius) and rx/ry (for ellipses)
+                rx = action.get("rx", action.get("r", 80))
+                ry = action.get("ry", rx)
+                self.add_circle(
+                    action.get("x", 700),
+                    action.get("y", 270),
+                    rx,
+                    ry
+                )
+
+            elif action_type == "draw_polygon":
+                points = action.get("points", [])
+                if len(points) >= 3:
+                    self.add_polygon([(p[0], p[1]) for p in points])
+
+            elif action_type == "draw_regular_polygon":
+                import math
+                sides = max(3, min(12, int(action.get("sides", 5))))
+                cx = action.get("cx", 700)
+                cy = action.get("cy", 270)
+                radius = action.get("radius", 120)
+                points = []
+                for i in range(sides):
+                    angle = 2 * math.pi * i / sides - math.pi / 2
+                    x = cx + radius * math.cos(angle)
+                    y = cy + radius * math.sin(angle)
+                    points.append((int(x), int(y)))
+                self.add_polygon(points)
+
+            elif action_type == "draw_arc":
+                self.add_arc(
+                    action.get("x", 600),
+                    action.get("y", 160),
+                    action.get("w", 200),
+                    action.get("h", 200),
+                    int(action.get("start_angle", 0) * 16),
+                    int(action.get("span_angle", 360) * 16)
+                )
