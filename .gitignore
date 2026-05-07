@@ -40,3 +40,4 @@ config/*.ppn
 
 # test images captured for testing
 captures/
+.agents/

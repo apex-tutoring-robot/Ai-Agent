@@ -25,7 +25,7 @@ from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
 from vision.camera import Camera
 from guardrails.guardrails_manager import GuardrailsManager
-from user_profile import get_user_id
+from user_profile import get_user_id, get_user_name, set_user_name
 import logging
 
 load_dotenv(".env")
@@ -65,6 +65,7 @@ class JarvisBot:
         self.ui_signals = ui_signals
 
         self.user_id = get_user_id()
+        self._awaiting_name: bool = False
 
         # Initialize shared PyAudio instance
         import pyaudio
@@ -84,6 +85,9 @@ class JarvisBot:
         )
         self.stt_client = SpeechToTextClient(user_id=self.user_id)
         self.llm_client = LLMClient(user_id=self.user_id)
+        user_name = get_user_name()
+        if user_name:
+            self._apply_user_name_to_prompt(user_name)
         self.tts_client = TextToSpeechClient()
         self.privacy_manager = PrivacyManager()
         self.guardrails = GuardrailsManager(
@@ -318,6 +322,23 @@ class JarvisBot:
         plan["visuals"] = visuals
         return plan
 
+    def _apply_user_name_to_prompt(self, name: str) -> None:
+        self.llm_client.system_prompt += (
+            f"\n\nThe student's name is {name}. "
+            "Use their name occasionally to make the interaction feel personal."
+        )
+
+    @staticmethod
+    def _extract_name(text: str) -> str:
+        """Extract a first name from phrases like 'My name is John' or 'I'm John'."""
+        t = text.strip()
+        for prefix in ("my name is ", "i'm ", "i am ", "it's ", "its ", "call me ", "name is "):
+            if t.lower().startswith(prefix):
+                t = t[len(prefix):]
+                break
+        words = t.split()[:2]
+        return " ".join(w.capitalize() for w in words) if words else text.strip().title()
+
     def _listener_loop(self, continuous_vad, request_queue):
         """Producer: Always listening, detecting interruptions in real-time.
 
@@ -413,107 +434,120 @@ class JarvisBot:
 
                 try:
                     logger.info(f"📝 Processing Turn: {user_text}")
+                    final_text = None
 
-                    # ── Camera Vision ──────────────────────────────────────────
-                    # If the user's phrase is a camera trigger, capture an image,
-                    # upload it to Azure Blob Storage, and store the SAS URL in
-                    # conversation history so follow-up questions can reference it.
-                    if self._is_camera_trigger(user_text):
-                        try:
-                            saved_path = self.camera.capture_and_save()
-                            logger.info(f"📷 Image saved to {saved_path}")
-
-                            import base64 as _b64
-                            with open(saved_path, "rb") as _f:
-                                data_url = f"data:image/jpeg;base64,{_b64.b64encode(_f.read()).decode()}"
-
-                            try:
-                                extracted = self.llm_client.extract_image_content(data_url)
-                                continuous_vad.reset_idle_timer()  # extraction can take 5-10s
-                                combined = f"{user_text}\n\n[Scanned homework content:\n{extracted}]"
-                                anonymized_text = self.privacy_manager.anonymize(combined)
-                                logger.info("📷 Image extracted and stored as text")
-                            except Exception as extract_err:
-                                logger.error(f"📷 Image extraction failed: {extract_err}")
-                                error_audio = self.tts_client.synthesize_to_audio(
-                                    "Sorry, I had trouble reading the image. Please try again."
-                                )
-                                self.audio_player.start_streaming(output_device_index=output_device_index)
-                                self.audio_player.queue_audio(error_audio)
-                                self.audio_player.stop_streaming(immediate=False)
-                                continue
-                        except Exception as cam_err:
-                            logger.error(f"📷 Camera failed to capture: {cam_err} — falling back to text-only")
-                            combined = f"{user_text}\n\nCamera is not working, please talk to me!"
-                            anonymized_text = self.privacy_manager.anonymize(combined)
+                    # ── Greeting / name-collection (bypass normal pipeline) ────
+                    if user_text == "__GREET__":
+                        name = get_user_name()
+                        if name:
+                            final_text = f"Welcome back, {name}! What would you like to learn today?"
+                        else:
+                            self._awaiting_name = True
+                            final_text = "Hi there! I am Jarvis, your personal tutor. What is your name?"
+                    elif self._awaiting_name:
+                        name = self._extract_name(user_text)
+                        set_user_name(name)
+                        self._apply_user_name_to_prompt(name)
+                        self._awaiting_name = False
+                        final_text = f"Nice to meet you, {name}! I am here to help you learn. What would you like to study today?"
                     else:
-                        anonymized_text = self.privacy_manager.anonymize(user_text)
-                    # ──────────────────────────────────────────────────────────
+                        # ── Camera Vision ──────────────────────────────────────
+                        if self._is_camera_trigger(user_text):
+                            try:
+                                saved_path = self.camera.capture_and_save()
+                                logger.info(f"📷 Image saved to {saved_path}")
 
-                    # ── Guardrails: Input Check ───────────────────────────────
-                    allowed, refusal_msg = self.guardrails.check_input(anonymized_text)
-                    continuous_vad.reset_idle_timer()  # guardrails LLM call can take 5-10s
+                                import base64 as _b64
+                                with open(saved_path, "rb") as _f:
+                                    data_url = f"data:image/jpeg;base64,{_b64.b64encode(_f.read()).decode()}"
 
-                    if allowed:
-                        self.conversation_manager.add_user_message(anonymized_text)
-                        messages = self.conversation_manager.get_messages()
+                                try:
+                                    extracted = self.llm_client.extract_image_content(data_url)
+                                    continuous_vad.reset_idle_timer()  # extraction can take 5-10s
+                                    combined = f"{user_text}\n\n[Scanned homework content:\n{extracted}]"
+                                    anonymized_text = self.privacy_manager.anonymize(combined)
+                                    logger.info("📷 Image extracted and stored as text")
+                                except Exception as extract_err:
+                                    logger.error(f"📷 Image extraction failed: {extract_err}")
+                                    error_audio = self.tts_client.synthesize_to_audio(
+                                        "Sorry, I had trouble reading the image. Please try again."
+                                    )
+                                    self.audio_player.start_streaming(output_device_index=output_device_index)
+                                    self.audio_player.queue_audio(error_audio)
+                                    self.audio_player.stop_streaming(immediate=False)
+                                    continue
+                            except Exception as cam_err:
+                                logger.error(f"📷 Camera failed to capture: {cam_err} — falling back to text-only")
+                                combined = f"{user_text}\n\nCamera is not working, please talk to me!"
+                                anonymized_text = self.privacy_manager.anonymize(combined)
+                        else:
+                            anonymized_text = self.privacy_manager.anonymize(user_text)
+                        # ──────────────────────────────────────────────────────
 
-                        # ── Teaching Plan Path (math/visual queries) ──────────
-                        if self.is_math_query(user_text):
-                            logger.info("DEBUG: math query detected - generating teaching plan")
+                    # ── Guardrails + LLM (skipped for greeting/name turns) ────
+                    if final_text is None:
+                        allowed, refusal_msg = self.guardrails.check_input(anonymized_text)
+                        continuous_vad.reset_idle_timer()  # guardrails LLM call can take 5-10s
+
+                        if allowed:
+                            self.conversation_manager.add_user_message(anonymized_text)
+                            messages = self.conversation_manager.get_messages()
+
+                            # ── Teaching Plan Path (math/visual queries) ──────
+                            if self.is_math_query(user_text):
+                                logger.info("DEBUG: math query detected - generating teaching plan")
+                                if self.ui_signals:
+                                    self.ui_signals.thinking.emit()
+                                try:
+                                    plan = self.llm_client.generate_teaching_plan(messages)
+                                    plan = self.force_shape_if_missing(plan, user_text)
+                                    if self.ui_signals:
+                                        self.ui_signals.show_teaching_layout.emit()
+                                    self.run_teaching_plan(plan, output_device_index, continuous_vad)
+                                    continuous_vad.reset_idle_timer()
+                                    continue
+                                except Exception as e:
+                                    logger.error(f"Teaching plan failed, falling back to normal response: {e}")
+                                    # Fall through to regular LLM path
+
+                            # ── Regular LLM Path ──────────────────────────────
+                            llm_start = time.perf_counter()
                             if self.ui_signals:
                                 self.ui_signals.thinking.emit()
-                            try:
-                                plan = self.llm_client.generate_teaching_plan(messages)
-                                plan = self.force_shape_if_missing(plan, user_text)
-                                if self.ui_signals:
-                                    self.ui_signals.show_teaching_layout.emit()
-                                self.run_teaching_plan(plan, output_device_index, continuous_vad)
+
+                            response_chunks = []
+                            for chunk in self.llm_client.generate_response_stream(messages):
+                                if self._interruption_event.is_set():
+                                    break
+                                response_chunks.append(chunk)
+
+                            if self._interruption_event.is_set():
+                                partial = "".join(response_chunks)
+                                if partial:
+                                    self._last_bot_response = partial
                                 continuous_vad.reset_idle_timer()
                                 continue
-                            except Exception as e:
-                                logger.error(f"Teaching plan failed, falling back to normal response: {e}")
-                                # Fall through to regular LLM path
 
-                        # ── Regular LLM Path ──────────────────────────────────
-                        llm_start = time.perf_counter()
-                        if self.ui_signals:
-                            self.ui_signals.thinking.emit()
+                            full_response = "".join(response_chunks)
+                            if not full_response:
+                                continuous_vad.reset_idle_timer()
+                                continue
 
-                        # Buffer the FULL LLM response before starting TTS.
-                        # Required so the output guardrail can check the complete
-                        # response before any audio is produced.
-                        response_chunks = []
-                        for chunk in self.llm_client.generate_response_stream(messages):
-                            if self._interruption_event.is_set():
-                                break
-                            response_chunks.append(chunk)
-
-                        # Handle interruption during LLM generation
-                        if self._interruption_event.is_set():
-                            partial = "".join(response_chunks)
-                            if partial:
-                                self._last_bot_response = partial
-                            continuous_vad.reset_idle_timer()
-                            continue
-
-                        full_response = "".join(response_chunks)
-                        if not full_response:
-                            continuous_vad.reset_idle_timer()
-                            continue
-
-                        # ── Guardrails: Output Check ─────────────────────────
-                        safe, final_text = self.guardrails.check_output(full_response)
-                        if safe:
-                            self.conversation_manager.add_assistant_message(final_text)
-                            self._last_bot_response = final_text
-                            logger.info(f"Bot: {final_text}")
+                            # ── Guardrails: Output Check ──────────────────────
+                            safe, final_text = self.guardrails.check_output(full_response)
+                            if safe:
+                                self.conversation_manager.add_assistant_message(final_text)
+                                self._last_bot_response = final_text
+                                logger.info(f"Bot: {final_text}")
+                            else:
+                                logger.warning("🛡️ Guardrails blocked LLM output — substituting refusal")
                         else:
-                            logger.warning("🛡️ Guardrails blocked LLM output — substituting refusal")
-                    else:
-                        # Input blocked — speak refusal, skip LLM entirely
-                        logger.info("🛡️ Guardrails blocked input — speaking refusal")
-                        final_text = refusal_msg
+                            logger.info("🛡️ Guardrails blocked input — speaking refusal")
+                            final_text = refusal_msg
+
+                    if not final_text:
+                        continuous_vad.reset_idle_timer()
+                        continue
 
                     # ── TTS + Playback ────────────────────────────────────────
                     self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
@@ -654,6 +688,9 @@ class JarvisBot:
             listener_thread.start()
             speaker_thread.start()
 
+            # Greet by name if known, otherwise ask for it
+            self._request_queue.put("__GREET__")
+
             logger.info("🚀 Full-Duplex engines started")
 
             # Wait for conversation to end (timeout or manual stop)
@@ -684,7 +721,8 @@ class JarvisBot:
         finally:
             # 1. SIGNAL WORKERS TO STOP
             self._conversation_active.clear()
-            self._request_queue.put(None) # Sentinel for speaker
+            self._request_queue.put(None)  # Sentinel for speaker
+            self._awaiting_name = False    # Reset if conversation timed out mid-onboarding
 
             # 2. Stop VAD first — this closes the audio stream and unblocks the listener thread
             try:
