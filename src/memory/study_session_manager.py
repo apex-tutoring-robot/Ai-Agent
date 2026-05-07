@@ -147,8 +147,13 @@ class StudySessionManager:
     # ──────────────────────────────────────────────────────────────────────────
 
     def mark_syllabus_processed(self, file_path: str) -> None:
-        """Record the syllabus file (by basename) as processed in the backend."""
+        """Record the syllabus file (by basename) as processed and delete it."""
         self.backend.mark_syllabus_processed(os.path.basename(file_path))
+        try:
+            os.remove(file_path)
+            logger.info("mark_syllabus_processed: deleted %s", file_path)
+        except OSError as e:
+            logger.warning("mark_syllabus_processed: could not delete %s: %s", file_path, e)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Study plan generation
