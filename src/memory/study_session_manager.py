@@ -22,9 +22,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Regex for the session-complete sentinel. Exported so main.py can import it.
+# Sentinels emitted by the LLM — exported so main.py can import them.
 SESSION_COMPLETE_TAG = "[SESSION_COMPLETE]"
 SESSION_COMPLETE_RE = re.compile(r'\[SESSION_COMPLETE\]', re.IGNORECASE)
+
+OFF_TOPIC_TAG = "[OFF_TOPIC]"
+OFF_TOPIC_RE = re.compile(r'\[OFF_TOPIC\]', re.IGNORECASE)
 
 _SUPPORTED_EXTENSIONS = {".txt", ".md", ".png", ".jpg", ".jpeg", ".pdf"}
 
@@ -245,6 +248,8 @@ class StudySessionManager:
             f"When the student explicitly says they are done, or when you have covered "
             f"all the topics and key concepts above, end your response with exactly: "
             f"[SESSION_COMPLETE]\n"
+            f"If the student asks something clearly unrelated to the session topics above, "
+            f"respond with only: [OFF_TOPIC]\n"
             f"--- END SESSION CONTEXT ---"
         )
 

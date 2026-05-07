@@ -20,7 +20,7 @@ from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
 from vision.camera import Camera
 from guardrails.guardrails_manager import GuardrailsManager
-from memory.study_session_manager import StudySessionManager, SESSION_COMPLETE_RE
+from memory.study_session_manager import StudySessionManager, SESSION_COMPLETE_RE, OFF_TOPIC_RE
 
 load_dotenv(".env")
 
@@ -103,12 +103,14 @@ class JarvisBot:
         # ── Study Session State Machine ──
         os.makedirs("syllabus", exist_ok=True)
         self.study_session_manager = StudySessionManager(llm_client=self.llm_client)
-        # States: "normal" | "awaiting_syllabus" | "awaiting_syllabus_duration"
-        #         | "awaiting_weekly_hours" | "in_session"
+        # States: "normal" | "awaiting_syllabus" | "extracting_syllabus"
+        #         | "awaiting_syllabus_duration" | "awaiting_weekly_hours"
+        #         | "generating_plan" | "in_session" | "awaiting_session_redirect"
         self._study_state: str = "normal"
         self._pending_syllabus_path: Optional[str] = None
         self._pending_syllabus_text: Optional[str] = None
         self._pending_syllabus_weeks: Optional[float] = None
+        self._pending_syllabus_num_sessions: Optional[int] = None
         self._active_session: Optional[dict] = None
         self._pending_session_finalize: bool = False
         self._study_state_lock = threading.Lock()
@@ -185,7 +187,7 @@ class JarvisBot:
         if not words_a or not words_b:
             return 0.0
         overlap = words_a & words_b
-        return len(overlap) / min(len(words_a), len(words_b))
+        return len(overlap) / max(len(words_a), len(words_b))
 
     _CAMERA_TRIGGERS = {
         "scan", "photo", "picture", "camera",
@@ -228,9 +230,38 @@ class JarvisBot:
         with self._study_state_lock:
             state = self._study_state
 
-        # ── in_session: LLM handles everything; [SESSION_COMPLETE] caught in speaker loop ──
+        # ── in_session: LLM handles everything; sentinels caught in speaker loop ──
         if state == "in_session":
             return None
+
+        # ── awaiting_session_redirect: user chose to continue or end after off-topic ──
+        if state == "awaiting_session_redirect":
+            text = user_text.lower()
+            if any(w in text for w in ("end", "stop", "later", "done", "finish", "pause", "save", "no")):
+                self._pending_session_finalize = True
+                return "Got it. I will save your progress and you can pick up where we left off next time."
+            # Anything else (yes, continue, ok, sure, …) resumes the session
+            with self._study_state_lock:
+                self._study_state = "in_session"
+            return "Okay! Let us get back to it."
+
+        # ── extracting_syllabus: blocking text/image/PDF extraction isolated here ──
+        if state == "extracting_syllabus":
+            syllabus_text = self.study_session_manager.extract_syllabus_text(
+                self._pending_syllabus_path
+            )
+            if syllabus_text.startswith("ERROR:"):
+                with self._study_state_lock:
+                    self._pending_syllabus_path = None
+                    self._study_state = "awaiting_syllabus"
+                return syllabus_text.replace("ERROR: ", "")
+            with self._study_state_lock:
+                self._pending_syllabus_text = syllabus_text
+                self._study_state = "awaiting_syllabus_duration"
+            return (
+                "I have read your syllabus! How long does it cover? "
+                # "For example, say two weeks, one month, or a semester."
+            )
 
         # ── awaiting_syllabus_duration: parse how long the syllabus covers ──
         if state == "awaiting_syllabus_duration":
@@ -238,32 +269,46 @@ class JarvisBot:
             if weeks is None or weeks <= 0:
                 return (
                     "I did not quite catch that. How long does the syllabus cover? "
-                    "For example, say two weeks, one month, or a semester."
+                    # "For example, say two weeks, one month, or a semester."
                 )
             with self._study_state_lock:
                 self._pending_syllabus_weeks = weeks
                 self._study_state = "awaiting_weekly_hours"
             return (
                 "Got it! And how many hours per week would you like to study? "
-                "For example, say two hours or one hour."
+                # "For example, say two hours or one hour."
             )
 
-        # ── awaiting_weekly_hours: parse hours/week, compute sessions, generate plan ──
+        # ── awaiting_weekly_hours: parse hours/week, compute sessions, then hand off ──
         if state == "awaiting_weekly_hours":
             hours = StudySessionManager.extract_hours_per_week(user_text)
             if hours is None or hours <= 0:
                 return (
                     "I did not catch that. How many hours per week would you like to study? "
-                    "For example, say two hours or half an hour."
+                    # "For example, say two hours or half an hour."
                 )
 
             weeks = self._pending_syllabus_weeks or 1.0
             num_sessions = max(1, round(weeks * hours / 0.5))  # each session is 30 min
 
             logger.info(
-                "Generating study plan: %.1f weeks x %.1f hrs/week = %d sessions",
+                "Study plan requested: %.1f weeks x %.1f hrs/week = %d sessions",
                 weeks, hours, num_sessions,
             )
+            with self._study_state_lock:
+                self._pending_syllabus_num_sessions = num_sessions
+                self._study_state = "generating_plan"
+            # Synthetic turn so the speaker loop immediately runs plan generation
+            # after playing the interim response below — no waiting for user speech.
+            self._request_queue.put("__GENERATE_PLAN__")
+            return (
+                f"Got it! I will put together a {num_sessions}-session study plan for you. "
+                f"One moment while I work on that."
+            )
+
+        # ── generating_plan: blocking LLM call isolated here, not in awaiting_weekly_hours ──
+        if state == "generating_plan":
+            num_sessions = self._pending_syllabus_num_sessions or 1
             success = self.study_session_manager.generate_study_plan(
                 self._pending_syllabus_text, num_sessions
             )
@@ -272,6 +317,7 @@ class JarvisBot:
                     self._pending_syllabus_path = None
                     self._pending_syllabus_text = None
                     self._pending_syllabus_weeks = None
+                    self._pending_syllabus_num_sessions = None
                     self._study_state = "normal"
                 return "Sorry, I had trouble creating your study plan. Please try again."
 
@@ -282,6 +328,7 @@ class JarvisBot:
                 self._pending_syllabus_path = None
                 self._pending_syllabus_text = None
                 self._pending_syllabus_weeks = None
+                self._pending_syllabus_num_sessions = None
                 self._active_session = session
                 self._study_state = "in_session"
                 context = self.study_session_manager.build_session_context(session)
@@ -333,18 +380,12 @@ class JarvisBot:
         return self._process_syllabus_file(syllabus_path)
 
     def _process_syllabus_file(self, file_path: str) -> str:
-        """Read and extract a syllabus file, then ask how long it covers."""
-        syllabus_text = self.study_session_manager.extract_syllabus_text(file_path)
-        if syllabus_text.startswith("ERROR:"):
-            return syllabus_text.replace("ERROR: ", "")
+        """Queue syllabus extraction as a synthetic turn and return an interim response."""
         with self._study_state_lock:
             self._pending_syllabus_path = file_path
-            self._pending_syllabus_text = syllabus_text
-            self._study_state = "awaiting_syllabus_duration"
-        return (
-            "I found your syllabus! How long does it cover? "
-            "For example, say two weeks, one month, or a semester."
-        )
+            self._study_state = "extracting_syllabus"
+        self._request_queue.put("__EXTRACT_SYLLABUS__")
+        return "I found a syllabus file! Let me read through it, one moment."
 
     def _listener_loop(self, continuous_vad, request_queue):
         """Producer: Always listening, detecting interruptions in real-time.
@@ -513,12 +554,23 @@ class JarvisBot:
                             full_response = "".join(response_chunks)
 
                             # ── Session complete detection ─────────────────────
-                            # Strip tag before guardrails so it never reaches TTS.
-                            # Finalization runs in finally block after playback.
+                            # Strip sentinels before guardrails so they never reach TTS.
                             if SESSION_COMPLETE_RE.search(full_response):
                                 full_response = SESSION_COMPLETE_RE.sub("", full_response).strip()
                                 self._pending_session_finalize = True
                                 logger.info("📚 Session complete tag detected")
+
+                            if OFF_TOPIC_RE.search(full_response):
+                                full_response = OFF_TOPIC_RE.sub("", full_response).strip()
+                                focus = (self._active_session or {}).get("focus", "our current topic")
+                                with self._study_state_lock:
+                                    self._study_state = "awaiting_session_redirect"
+                                full_response = (
+                                    f"That seems to be outside our session on {focus}. "
+                                    f"Would you like to continue the session, "
+                                    f"or save your progress and come back to it later?"
+                                )
+                                logger.info("📚 Off-topic tag detected — asking redirect question")
 
                             if not full_response:
                                 continuous_vad.reset_idle_timer()
@@ -725,13 +777,16 @@ class JarvisBot:
             with self._study_state_lock:
                 if self._study_state in (
                     "awaiting_syllabus",
+                    "extracting_syllabus",
                     "awaiting_syllabus_duration",
                     "awaiting_weekly_hours",
+                    "generating_plan",
                 ):
                     logger.info("Conversation ended mid-study-flow — resetting study state to normal")
                     self._pending_syllabus_path = None
                     self._pending_syllabus_text = None
                     self._pending_syllabus_weeks = None
+                    self._pending_syllabus_num_sessions = None
                     self._study_state = "normal"
             
             # 2. Stop VAD first — this closes the audio stream and unblocks the listener thread
