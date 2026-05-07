@@ -48,7 +48,7 @@ class FaceAnimator:
     # Public API
     # --------------------------------------------------
 
-    def start_idle(self):
+    def stop_talking(self):
         self.emotion = "neutral"
         self.is_talking = False
 
