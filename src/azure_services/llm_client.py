@@ -10,6 +10,7 @@ from openai import AzureOpenAI
 from dotenv import load_dotenv
 import json
 import re
+from azure_services.local_llm_client import LocalLLMClient
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -57,6 +58,14 @@ class LLMClient:
         
         # Load system prompt
         self.system_prompt = self._load_system_prompt()
+
+        # Initialize local fallback (llama.cpp)
+        try:
+            self._local_client = LocalLLMClient(system_prompt=self.system_prompt)
+        except Exception as e:
+            logger.warning(f"Local LLM fallback unavailable: {e}")
+            self._local_client = None
+
         logger.info("Azure OpenAI client initialized")
     
     def _load_system_prompt(self) -> str:
@@ -115,9 +124,14 @@ class LLMClient:
                         yield delta.content
         
         except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            raise
-    
+            logger.warning(f"Azure LLM stream failed ({type(e).__name__}: {e}), trying local model")
+            if self._local_client:
+                self._local_client.system_prompt = self.system_prompt
+                yield from self._local_client.generate_response_stream(messages, temperature, max_tokens)
+            else:
+                logger.error(f"Error generating response: {e}")
+                raise
+
     def extract_image_content(self, image_url: str, max_tokens: int = 1000) -> str:
         """
         One-shot GPT-4V call to extract all image content as plain text.
@@ -260,9 +274,13 @@ class LLMClient:
             return plan
 
         except Exception as e:
+            logger.warning(f"Azure teaching plan failed ({type(e).__name__}: {e}), trying local model")
+            if self._local_client:
+                self._local_client.system_prompt = self.system_prompt
+                return self._local_client.generate_teaching_plan(messages, temperature, max_tokens)
             logger.error(f"Error generating teaching plan: {e}")
             raise
-        
+
     def generate_response(
         self,
         messages: List[Dict[str, str]],
