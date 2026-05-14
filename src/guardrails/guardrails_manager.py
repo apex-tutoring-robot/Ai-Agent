@@ -1,5 +1,5 @@
 """
-NeMo Guardrails manager for Jarvis K-8 tutoring robot.
+NeMo Guardrails manager for Jarvis tutoring robot.
 
 Provides input and output safety rails:
   - Input: school-subject allowlist + safety (no harmful/jailbreak content)
@@ -22,13 +22,12 @@ logger = logging.getLogger(__name__)
 # Kid-friendly refusal messages keyed by block reason
 REFUSAL_MESSAGES = {
     "off_topic": (
-        "That is not something I can help with. I am here to help with school subjects — "
-        "English, math, science, history, civics, computers, arts, sports, and more. "
-        "What would you like to learn today?"
+        "That is not something I can help with. I am here to help with your learning"
+
     ),
     "harmful_input": (
         "I cannot help with that. Let us focus on learning! "
-        "What school subject would you like to explore today?"
+        "Anything else you would like to explore today?"
     ),
     "jailbreak": (
         "I am Jarvis, your school tutor! "
@@ -36,7 +35,7 @@ REFUSAL_MESSAGES = {
     ),
     "harmful_output": (
         "I am not sure how to answer that. "
-        "Let us get back to learning! What school subject can I help you with?"
+        "Let us get back to learning!"
     ),
 }
 
@@ -53,13 +52,13 @@ _IMAGE_CONTENT_MARKER = "[Scanned homework content:"
 # Intentionally more restrictive than the general input prompt: only clearly
 # math/science homework/diagrams pass — portraits, objects, scenes do not.
 _IMAGE_EVAL_PROMPT = """\
-You are a content filter for Jarvis, an AI tutor for K-8 students covering all school subjects.
+You are a content filter for Jarvis, an AI tutor for students
 
 A student has shared an image. Below is what the image shows.
 
 Image content: "{image_content}"
 
-The image is APPROPRIATE (answer No) if it clearly shows educational content from any school subject:
+The image is APPROPRIATE (answer No) if it clearly shows educational content:
 - Mathematics: equations, numbers, word problems, graphs, geometry, fractions, worksheets
 - Science: biology diagrams, chemistry equations, physics problems, experiments, nature diagrams
 - English/language arts: text passages, grammar exercises, writing prompts, literature excerpts
@@ -87,7 +86,7 @@ _JAILBREAK_KEYWORDS = {
 }
 _HARM_KEYWORDS = {
     "hurt", "kill", "weapon", "bomb", "hate", "fight", "punch",
-    "bad word", "curse", "swear", "naked", "sex", "inappropriate",
+    "bad word", "curse", "swear", "naked", "sex",
 }
 
 

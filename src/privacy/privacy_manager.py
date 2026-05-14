@@ -1,6 +1,6 @@
 """
 Privacy Manager for PII anonymization.
-Regex-based detection tuned for K-8 tutoring speech-to-text output.
+Regex-based detection tuned for tutoring speech-to-text output.
 """
 
 import re

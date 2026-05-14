@@ -1,5 +1,5 @@
 # Jarvis Guardrails - Colang 1.0
-# Safety rails for a K-8 general school tutor covering all subjects.
+# Safety rails for a general school tutor.
 # NOTE: Topic and input evaluation is handled by direct LLM calls in
 # guardrails_manager.py — these Colang flows serve as documentation and
 # as a fast-path fallback for the most obvious safety cases.
@@ -76,7 +76,6 @@ define user greet
   "what is your name"
   "who are you"
   "what can you help me with"
-  "what subjects do you teach"
   "thanks"
   "thank you"
   "that was helpful"
@@ -87,19 +86,19 @@ define user greet
 # ── BOT RESPONSE DEFINITIONS ─────────────────────────────────────────────────
 
 define bot refuse off topic
-  "I am here to help with school subjects! I can help with English, math, science, history, civics, computers, arts, sports, and more. What would you like to learn today?"
+  "I am here to help with your studies!"
 
 define bot refuse harmful input
-  "I cannot help with that. Let us focus on learning! What school subject can I help you with today?"
+  "I cannot help with that. Let us focus on learning! What can I help you with today?"
 
 define bot refuse jailbreak
   "I am Jarvis, your school tutor! What would you like to learn today?"
 
 define bot refuse harmful output
-  "I am not sure how to answer that. Let us get back to learning! What school subject can I help you with?"
+  "I am not sure how to answer that. Let us get back to learning! What can I help you with?"
 
 define bot inform cannot answer
-  "I am not able to help with that. What school subject would you like to explore?"
+  "I am not able to help with that. What would you like to explore?"
 
 # ── INPUT RAIL FLOWS ─────────────────────────────────────────────────────────
 
@@ -125,7 +124,7 @@ define flow handle greeting
   bot respond to greeting
 
 define bot respond to greeting
-  "Hello! I am Jarvis, your school tutor. I can help with English, math, science, history, civics, computers, arts, sports, and more. What would you like to learn today?"
+  "Hello! I am Jarvis, your school tutor. What would you like to learn today?"
 
 # ── ALLOWED LEARNING FLOW ────────────────────────────────────────────────────
 
