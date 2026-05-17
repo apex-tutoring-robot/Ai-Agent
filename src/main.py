@@ -138,7 +138,6 @@ class JarvisBot:
             self.continuous_vad = ContinuousVADCapture(pa=self.pa)
             self.audio_player = AudioPlayer(
                 pa=self.pa,
-                on_audio_played=self.continuous_vad.on_audio_played
             )
             self.wake_word_detector = WakeWordDetector(pa=self.pa)
 
@@ -550,7 +549,6 @@ class JarvisBot:
                         continue
 
                     # ── TTS + Playback ────────────────────────────────────────
-                    self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
                     if self.ui_signals:
                         self.ui_signals.start_talking.emit()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
@@ -659,9 +657,6 @@ class JarvisBot:
                 input_device_index=pulse_index,
                 player=self.audio_player
             )
-
-            # Wire callback so VAD knows when bot is speaking (for AEC/Duck)
-            self.audio_player.on_audio_played = continuous_vad.on_audio_played
 
             # Wire barge-in event so VAD can signal listener when user interrupts
             continuous_vad.set_barge_in_event(self._barge_in_detected)
@@ -816,7 +811,6 @@ class JarvisBot:
             try:
                 # Start audio player BEFORE first audio arrives for lower latency
                 # CRITICAL: Use dedicated PulseAudio output stream
-                self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
                 if self.ui_signals:
                     self.ui_signals.start_talking.emit()
                 self.audio_player.start_streaming(output_device_index=output_device_index)
