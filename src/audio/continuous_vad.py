@@ -48,10 +48,7 @@ except Exception:
 
 # Debug: Track if AEC is available
 if HAS_SPEEX:
-    if HAS_PREPROCESSOR:
-        logger.info("✅ SpeexDSP loaded - AEC and Preprocessor available")
-    else:
-        logger.info("✅ SpeexDSP loaded - AEC active (Preprocessor/NS missing)")
+    logger.info(f"✅ SpeexDSP loaded (Preprocessor={'available' if HAS_PREPROCESSOR else 'unavailable'})")
 else:
     logger.warning("⚠️  SpeexDSP NOT found - using Digital Ducking fallback for interruptions")
 
@@ -160,41 +157,35 @@ class ContinuousVADCapture:
         self._aec_locked_offset = None # Permanent lock per session
         
         self.preprocessor = None
-        #if HAS_SPEEX:
-            # Speex echo canceller needs (frame_size, filter_length)
-            # frame_size must match chunk_size (320 for 20ms at 16kHz)
-            # filter_length is typically 2000-4000
-         #   try:
-               # 4096 taps = 256ms of tail length. Better for Pi rooms.
-          #     self.echo_canceller = EchoCanceller(self.chunk_size, 4096, self.sample_rate)
-           # except Exception as e:
-            #    if "No constructor defined" in str(e) or "abstract" in str(e).lower():
-             #       logger.info("ℹ️  Using EchoCanceller_create factory (SWIG abstract class workaround)")
-              #      import speexdsp
-               #     self.echo_canceller = speexdsp.EchoCanceller_create(self.chunk_size, 2048, self.sample_rate)
-                #else:
-                 #   raise
-            
-            # Initialize Preprocessor (Denoise + AGC)
-            # Control via env variable (default: True)
-            #enable_ns = os.getenv('ENABLE_SPEEX_NOISE_SUPPRESSION', 'true').lower() == 'true'
-            
-            #if enable_ns and HAS_PREPROCESSOR:
-             #   try:
-              #      self.preprocessor = Preprocessor(self.chunk_size, self.sample_rate)
-               #     self.preprocessor.denoise = True
-                #    self.preprocessor.agc = True
-                 #   self.preprocessor.dereverb = True
-                  #  self.preprocessor.agc_level = 8000
-                   # logger.info("✅ Speex Preprocessor (Denoise/AGC) initialized")
-                #except Exception as e:
-                 #   logger.warning(f"Failed to init Speex Preprocessor: {e}")
-            #elif enable_ns and not HAS_PREPROCESSOR:
-             #   logger.warning("ℹ️  Speex Preprocessor requested but not available in this version")
-            #else:
-             #   logger.info("ℹ️  Speex Preprocessor disabled via env var")
-            
-            #logger.info("✅ Speex Echo Canceller initialized")
+        self._aec_debug_done = False
+
+        _speex_aec_enabled = os.getenv('ENABLE_SPEEX_AEC', 'true').lower() == 'true'
+        if HAS_SPEEX and _speex_aec_enabled:
+            try:
+                # 4096 taps = 256ms of echo tail — better for reflective Pi rooms.
+                # EchoCanceller_create is the SWIG factory (direct class constructor is abstract).
+                if hasattr(speexdsp, 'EchoCanceller_create'):
+                    self.echo_canceller = speexdsp.EchoCanceller_create(self.chunk_size, 4096, self.sample_rate)
+                else:
+                    self.echo_canceller = EchoCanceller(self.chunk_size, 4096, self.sample_rate)
+                logger.info(f"✅ Speex Echo Canceller initialized (frame={self.chunk_size}, tail=4096, rate={self.sample_rate})")
+            except Exception as e:
+                logger.warning(f"Failed to init Speex Echo Canceller: {e}")
+                self.echo_canceller = None
+        elif not _speex_aec_enabled:
+            logger.info("ℹ️  Speex AEC disabled (ENABLE_SPEEX_AEC=false) — relying on PipeWire AEC")
+
+        enable_ns = os.getenv('ENABLE_SPEEX_NOISE_SUPPRESSION', 'true').lower() == 'true'
+        if enable_ns and HAS_PREPROCESSOR:
+            try:
+                self.preprocessor = Preprocessor(self.chunk_size, self.sample_rate)
+                self.preprocessor.denoise = True
+                self.preprocessor.agc = True
+                self.preprocessor.dereverb = True
+                self.preprocessor.agc_level = 8000
+                logger.info("✅ Speex Preprocessor (Denoise/AGC/Dereverb) initialized")
+            except Exception as e:
+                logger.warning(f"Failed to init Speex Preprocessor: {e}")
             
     def on_audio_played(self, audio_data: bytes) -> None:
         """Alias for provide_reference_audio to match AudioPlayer callback signature."""
@@ -591,6 +582,8 @@ class ContinuousVADCapture:
         barge_in_active = False  # Once true, stays true until playback ends
         _barge_in_peak_rms = 0.0        # Track peak RMS this playback session
         _barge_in_log_time = 0.0        # Throttle RMS telemetry to once/sec
+        _playback_start_time = 0.0      # When current playback session began
+        _barge_in_grace_s = float(os.getenv('BARGE_IN_GRACE_MS', '1000')) / 1000.0
         
         logger.info("📡 Continuous audio streaming started")
         
@@ -693,7 +686,19 @@ class ContinuousVADCapture:
                 if self._is_bot_playing:
                     # Bot speaking counts as activity — keep conversation alive
                     self.last_speech_time = time.time()
-                    
+
+                    # Record when this playback session started
+                    if _playback_start_time == 0.0:
+                        _playback_start_time = time.time()
+                        logger.debug(f"🔒 Barge-in grace period started ({_barge_in_grace_s*1000:.0f}ms)")
+
+                    # During grace period, AEC ring buffer is zeros and filter hasn't
+                    # converged — bot echo leaks through at full RMS. Block barge-in.
+                    in_grace = (time.time() - _playback_start_time) < _barge_in_grace_s
+                    if in_grace:
+                        yield silence_chunk
+                        continue
+
                     # Measure mic energy AFTER AEC to detect user speech above residual echo
                     mic_samples = np.frombuffer(audio_chunk, dtype=np.int16)
                     rms = np.sqrt(np.mean(mic_samples.astype(np.float32)**2))
@@ -727,12 +732,13 @@ class ContinuousVADCapture:
                 else:
                     # Bot is NOT playing — normal operation
                     # Reset barge-in state for next playback session
-                    if barge_in_active or barge_in_consecutive > 0 or _barge_in_peak_rms > 0:
+                    if barge_in_active or barge_in_consecutive > 0 or _barge_in_peak_rms > 0 or _playback_start_time > 0.0:
                         if _barge_in_peak_rms > 0:
                             logger.debug(f"🔉 Barge-in session ended: peak RMS={_barge_in_peak_rms:.0f}, threshold={self._barge_in_energy_threshold}")
                         barge_in_active = False
                         barge_in_consecutive = 0
                         _barge_in_peak_rms = 0.0
+                        _playback_start_time = 0.0
                     
                     # VAD check to update idle timer
                     try:
@@ -800,9 +806,9 @@ class ContinuousVADCapture:
             energy_threshold_base = int(os.getenv('INTERRUPTION_ENERGY_THRESHOLD', '500'))
             
             # Buffer 500ms (25 chunks) to ensure we don't clipped the start of interruptions
-            monitoring_pre_buffer = deque(maxlen=25) 
+            monitoring_pre_buffer = deque(maxlen=25)
+            consecutive_speech_chunks = 0
 
-            
             while self._is_monitoring:
                 try:
                     if not self.audio_stream or not self._is_monitoring:
@@ -926,18 +932,15 @@ class ContinuousVADCapture:
     def provide_reference_audio(self, audio_data: bytes) -> None:
         """
         Provide reference audio (what's playing) for echo cancellation.
-        Accumulates data until it hits chunk_size for AEC.
+        Always writes to the ring buffer so always_streaming has aligned reference data.
         """
         # Trigger immediate correlation check if this is the start of a turn
         if time.time() - self.last_reference_time > 1.0:
-            self._last_correlation_time = 0 # Force immediate scan in always_streaming
-            
+            self._last_correlation_time = 0  # Force immediate scan in always_streaming
+
         self.last_reference_time = time.time()
-        
-        if not self.echo_canceller:
-            return
-            
-        # 1. Add to Ring Buffer with Wall-Clock Timestamp
+
+        # 1. Add to Ring Buffer with Wall-Clock Timestamp (always, even if AEC not init'd)
         with self.ref_lock:
             # Shared time baseline with VAD
             self.ref_ring_timestamp = time.time()
