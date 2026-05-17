@@ -520,8 +520,6 @@ class ContinuousVADCapture:
         barge_in_active = False  # Once true, stays true until playback ends
         _barge_in_peak_rms = 0.0        # Track peak RMS this playback session
         _barge_in_log_time = 0.0        # Throttle RMS telemetry to once/sec
-        _playback_start_time = 0.0      # When current playback session began
-        _barge_in_grace_s = float(os.getenv('BARGE_IN_GRACE_MS', '1000')) / 1000.0
         
         logger.info("📡 Continuous audio streaming started")
         
@@ -549,18 +547,6 @@ class ContinuousVADCapture:
                 if self._is_bot_playing:
                     # Bot speaking counts as activity — keep conversation alive
                     self.last_speech_time = time.time()
-
-                    # Record when this playback session started
-                    if _playback_start_time == 0.0:
-                        _playback_start_time = time.time()
-                        logger.debug(f"🔒 Barge-in grace period started ({_barge_in_grace_s*1000:.0f}ms)")
-
-                    # During grace period, AEC ring buffer is zeros and filter hasn't
-                    # converged — bot echo leaks through at full RMS. Block barge-in.
-                    in_grace = (time.time() - _playback_start_time) < _barge_in_grace_s
-                    if in_grace:
-                        yield silence_chunk
-                        continue
 
                     # Measure mic energy AFTER AEC to detect user speech above residual echo
                     mic_samples = np.frombuffer(audio_chunk, dtype=np.int16)
@@ -595,13 +581,12 @@ class ContinuousVADCapture:
                 else:
                     # Bot is NOT playing — normal operation
                     # Reset barge-in state for next playback session
-                    if barge_in_active or barge_in_consecutive > 0 or _barge_in_peak_rms > 0 or _playback_start_time > 0.0:
+                    if barge_in_active or barge_in_consecutive > 0 or _barge_in_peak_rms > 0:
                         if _barge_in_peak_rms > 0:
                             logger.debug(f"🔉 Barge-in session ended: peak RMS={_barge_in_peak_rms:.0f}, threshold={self._barge_in_energy_threshold}")
                         barge_in_active = False
                         barge_in_consecutive = 0
                         _barge_in_peak_rms = 0.0
-                        _playback_start_time = 0.0
                     
                     # VAD check to update idle timer
                     try:
