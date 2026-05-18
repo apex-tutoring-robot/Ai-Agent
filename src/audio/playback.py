@@ -214,22 +214,23 @@ class AudioPlayer:
         original_output = bytes(output[:required])
         self._callback_buf = output[required:]
 
+        is_silence = not any(original_output)
+
         # CRITICAL AEC FIX: Notify VAD ONLY about the EXACT samples being played NOW.
         # This ensures the Reference Buffer in AEC is perfectly aligned with the Speakers.
-        if self.on_audio_played and original_output != b'\x00' * len(original_output):
+        if self.on_audio_played and not is_silence:
             try:
                 self.on_audio_played(original_output)
             except Exception as e:
                 # Use a flag to avoid log spamming if VAD is not ready
                 pass
-                
+
         # --- LIP SYNC RMS ---
         if self.on_level:
-            if original_output == b'\x00' * len(original_output):
+            if is_silence:
                 self.on_level(0.0)
             else:
                 try:
-                    import numpy as np
                     a = np.frombuffer(original_output, dtype=np.int16).astype(np.float32)
                     rms = np.sqrt(np.mean(a * a)) / 32768.0
                     if rms < 0.02:

@@ -14,6 +14,15 @@ load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
 
+_SENTENCE_ENDINGS = re.compile(r'[.!?]\s+|[.!?]$')
+
+
+class SynthesisBlockedError(Exception):
+    """Raised by synthesize_stream when pre_synthesis_check rejects a sentence."""
+    def __init__(self, refusal_text: str):
+        self.refusal_text = refusal_text
+        super().__init__(refusal_text)
+
 
 class TextToSpeechClient:
     """Azure Text-to-Speech client with streaming support."""
@@ -51,16 +60,9 @@ class TextToSpeechClient:
         logger.info(f"TTS client configured for region: {self.speech_region}")
         self.speech_config.speech_synthesis_voice_name = self.voice
         
-        # Set speech rate if not default
-        if self.speech_rate != 1.0:
-            rate_percent = int((self.speech_rate - 1.0) * 100)
-            self.speech_config.set_speech_synthesis_output_format(
-                speechsdk.SpeechSynthesisOutputFormat.Raw16Khz16BitMonoPcm
-            )
-        else:
-            self.speech_config.set_speech_synthesis_output_format(
-                speechsdk.SpeechSynthesisOutputFormat.Raw16Khz16BitMonoPcm
-            )
+        self.speech_config.set_speech_synthesis_output_format(
+            speechsdk.SpeechSynthesisOutputFormat.Raw16Khz16BitMonoPcm
+        )
         
         logger.info(f"TTS client initialized with voice: {self.voice}")
         
@@ -105,6 +107,16 @@ class TextToSpeechClient:
         except Exception as e:
             logger.warning(f"TTS warm-up failed (non-critical): {e}")
     
+    def _build_ssml(self, text: str) -> str:
+        rate_percent = int((self.speech_rate - 1.0) * 100)
+        sign = "+" if rate_percent >= 0 else ""
+        return (
+            f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">'
+            f'<voice name="{self.voice}">'
+            f'<prosody rate="{sign}{rate_percent}%">{text}</prosody>'
+            f'</voice></speak>'
+        )
+
     @staticmethod
     def _strip_latex(text: str) -> str:
         """Remove LaTeX math notation so Azure TTS doesn't read backslashes aloud."""
@@ -139,7 +151,10 @@ class TextToSpeechClient:
             # Reuse persistent synthesizer instance (no initialization overhead)
             text = self._strip_latex(text)
             logger.info(f"Synthesizing: {text[:50]}...")
-            result = self.synthesizer.speak_text(text)
+            if self.speech_rate != 1.0:
+                result = self.synthesizer.speak_ssml(self._build_ssml(text))
+            else:
+                result = self.synthesizer.speak_text(text)
             
             if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
                 logger.info("Speech synthesis completed")
@@ -157,53 +172,52 @@ class TextToSpeechClient:
             logger.error(f"Error in speech synthesis: {e}")
             raise
 
-    def synthesize_stream(self, text_stream: Iterator[str]) -> Iterator[bytes]:
+    def synthesize_stream(self, text_stream: Iterator[str], pre_synthesis_check=None) -> Iterator[bytes]:
         """
-        Synthesize streaming text to audio chunks.
-        Buffers text until sentence boundaries are detected for natural speech.
-        
+        Synthesize streaming text to audio chunks sentence by sentence.
+
         Args:
-            text_stream: Iterator yielding text chunks
-        
+            text_stream: Iterator yielding text chunks (e.g. LLM token stream)
+            pre_synthesis_check: Optional callable(sentence) -> (bool, str).
+                Called before each sentence is synthesized. If it returns
+                (False, refusal_text), raises SynthesisBlockedError immediately.
+
         Yields:
-            Audio data chunks
+            Audio data chunks (one per sentence)
         """
         sentence_buffer = ""
-        
-        # Sentence boundary patterns
-        sentence_endings = re.compile(r'[.!?]\s+|[.!?]$')
-        
+
         try:
             for text_chunk in text_stream:
                 sentence_buffer += text_chunk
-                
-                # Check for sentence boundaries
-                match = sentence_endings.search(sentence_buffer)
-                
+
+                match = _SENTENCE_ENDINGS.search(sentence_buffer)
+
                 if match:
-                    # Extract complete sentence(s)
                     end_pos = match.end()
                     complete_text = sentence_buffer[:end_pos].strip()
                     sentence_buffer = sentence_buffer[end_pos:]
-                    
+
                     if complete_text:
-                        # Synthesize the complete sentence(s)
+                        if pre_synthesis_check:
+                            safe, refused = pre_synthesis_check(complete_text)
+                            if not safe:
+                                raise SynthesisBlockedError(refused)
                         audio_data = self.synthesize_to_audio(complete_text)
                         if audio_data:
                             yield audio_data
-            
-            # Synthesize any remaining text
+
             if sentence_buffer.strip():
-                logger.info(f"📝 Synthesizing remaining text buffer ({len(sentence_buffer)} chars): '{sentence_buffer.strip()[:100]}...'")
+                if pre_synthesis_check:
+                    safe, refused = pre_synthesis_check(sentence_buffer.strip())
+                    if not safe:
+                        raise SynthesisBlockedError(refused)
                 audio_data = self.synthesize_to_audio(sentence_buffer.strip())
                 if audio_data:
-                    logger.info(f"✓ Final buffer synthesized: {len(audio_data)} bytes")
                     yield audio_data
-                else:
-                    logger.warning("⚠️  Final buffer synthesis returned no audio!")
-            else:
-                logger.info("✓ No remaining text in buffer (all sentences complete)")
-        
+
+        except SynthesisBlockedError:
+            raise
         except Exception as e:
             logger.error(f"Error in streaming synthesis: {e}")
             if sentence_buffer:

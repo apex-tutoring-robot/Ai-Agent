@@ -20,7 +20,7 @@ from audio.continuous_vad import ContinuousVADCapture
 from audio.playback import AudioPlayer
 from azure_services.stt_client import SpeechToTextClient
 from azure_services.llm_client import LLMClient
-from azure_services.tts_client import TextToSpeechClient
+from azure_services.tts_client import TextToSpeechClient, SynthesisBlockedError
 from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
 from vision.camera import Camera
@@ -138,7 +138,6 @@ class JarvisBot:
             self.continuous_vad = ContinuousVADCapture(pa=self.pa)
             self.audio_player = AudioPlayer(
                 pa=self.pa,
-                on_audio_played=self.continuous_vad.on_audio_played
             )
             self.wake_word_detector = WakeWordDetector(pa=self.pa)
 
@@ -510,37 +509,79 @@ class JarvisBot:
                                     logger.error(f"Teaching plan failed, falling back to normal response: {e}")
                                     # Fall through to regular LLM path
 
-                            # ── Regular LLM Path ──────────────────────────────
-                            llm_start = time.perf_counter()
+                            # ── Regular LLM Path (streaming LLM → TTS) ────────
+                            # synthesize_stream handles sentence detection and calls
+                            # check_output_fast before each sentence is synthesized.
+                            # LLM generation and TTS synthesis overlap sentence-by-sentence.
                             if self.ui_signals:
                                 self.ui_signals.thinking.emit()
 
                             response_chunks = []
-                            for chunk in self.llm_client.generate_response_stream(messages):
-                                if self._interruption_event.is_set():
-                                    break
-                                response_chunks.append(chunk)
 
-                            if self._interruption_event.is_set():
-                                partial = "".join(response_chunks)
-                                if partial:
-                                    self._last_bot_response = partial
-                                continuous_vad.reset_idle_timer()
-                                continue
+                            def _llm_stream():
+                                for chunk in self.llm_client.generate_response_stream(messages):
+                                    if self._interruption_event.is_set():
+                                        break
+                                    response_chunks.append(chunk)
+                                    yield chunk
+
+                            self.audio_player.start_streaming(output_device_index=output_device_index)
+                            self._bot_is_speaking = True
+                            continuous_vad.set_playback_state(True)
+
+                            blocked_refusal = None
+                            first_audio = True
+                            try:
+                                for audio_chunk in self.tts_client.synthesize_stream(
+                                    _llm_stream(),
+                                    pre_synthesis_check=self.guardrails.check_output_fast
+                                ):
+                                    if self._interruption_event.is_set():
+                                        logger.warning("🛑 Speaker aborted due to interruption event")
+                                        break
+                                    if first_audio:
+                                        if self.ui_signals:
+                                            self.ui_signals.start_talking.emit()
+                                        first_audio = False
+                                    if self.audio_player._is_playing:
+                                        try:
+                                            self.audio_player.queue_audio(audio_chunk)
+                                        except RuntimeError as e:
+                                            logger.warning(f"⚠️ Playback queueing failed: {e}")
+                                            break
+                                    else:
+                                        break
+                            except SynthesisBlockedError as e:
+                                blocked_refusal = e.refusal_text
+
+                            if blocked_refusal or self._interruption_event.is_set():
+                                self.audio_player.stop_streaming(immediate=True)
+                            else:
+                                self.audio_player.stop_streaming(immediate=False)
 
                             full_response = "".join(response_chunks)
-                            if not full_response:
-                                continuous_vad.reset_idle_timer()
-                                continue
 
-                            # ── Guardrails: Output Check ──────────────────────
-                            safe, final_text = self.guardrails.check_output(full_response)
-                            if safe:
-                                self.conversation_manager.add_assistant_message(final_text)
-                                self._last_bot_response = final_text
-                                logger.info(f"Bot: {final_text}")
-                            else:
-                                logger.warning("🛡️ Guardrails blocked LLM output — substituting refusal")
+                            if blocked_refusal:
+                                logger.warning("🛡️ Output check blocked LLM response — speaking refusal")
+                                refusal_audio = self.tts_client.synthesize_to_audio(blocked_refusal)
+                                if refusal_audio:
+                                    self.audio_player.start_streaming(output_device_index=output_device_index)
+                                    self._bot_is_speaking = True
+                                    continuous_vad.set_playback_state(True)
+                                    if self.ui_signals:
+                                        self.ui_signals.start_talking.emit()
+                                    self.audio_player.queue_audio(refusal_audio)
+                                    self.audio_player.stop_streaming(immediate=False)
+                                self._last_bot_response = blocked_refusal
+                            elif full_response and not self._interruption_event.is_set():
+                                self.conversation_manager.add_assistant_message(full_response)
+                                self._last_bot_response = full_response
+                                logger.info(f"Bot: {full_response}")
+                            elif full_response:
+                                self._last_bot_response = full_response  # echo detection only
+
+                            continuous_vad.reset_idle_timer()
+                            continue  # finally block still runs for echo-guard cleanup
                         else:
                             logger.info("🛡️ Guardrails blocked input — speaking refusal")
                             final_text = refusal_msg
@@ -550,7 +591,6 @@ class JarvisBot:
                         continue
 
                     # ── TTS + Playback ────────────────────────────────────────
-                    self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
                     if self.ui_signals:
                         self.ui_signals.start_talking.emit()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
@@ -659,9 +699,6 @@ class JarvisBot:
                 input_device_index=pulse_index,
                 player=self.audio_player
             )
-
-            # Wire callback so VAD knows when bot is speaking (for AEC/Duck)
-            self.audio_player.on_audio_played = continuous_vad.on_audio_played
 
             # Wire barge-in event so VAD can signal listener when user interrupts
             continuous_vad.set_barge_in_event(self._barge_in_detected)
@@ -816,7 +853,6 @@ class JarvisBot:
             try:
                 # Start audio player BEFORE first audio arrives for lower latency
                 # CRITICAL: Use dedicated PulseAudio output stream
-                self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
                 if self.ui_signals:
                     self.ui_signals.start_talking.emit()
                 self.audio_player.start_streaming(output_device_index=output_device_index)

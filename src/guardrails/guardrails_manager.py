@@ -12,10 +12,21 @@ rather than silently breaking the conversation.
 import os
 import re
 import asyncio
+import threading
 import logging
 from typing import Optional, Tuple
 
 _ENV_PATTERN = re.compile(r'\$\{env:([^}]+)\}')
+
+# Persistent event loop running in a dedicated daemon thread.
+# Reusing one loop avoids the ~20-60ms create/teardown cost of asyncio.run() per check.
+_loop = asyncio.new_event_loop()
+threading.Thread(target=_loop.run_forever, daemon=True, name="guardrails-loop").start()
+
+
+def _run_async(coro):
+    """Submit a coroutine to the persistent loop and block until it completes."""
+    return asyncio.run_coroutine_threadsafe(coro, _loop).result()
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +100,16 @@ _HARM_KEYWORDS = {
     "bad word", "curse", "swear", "naked", "sex",
 }
 
+# Narrower set for per-sentence output checks — avoids false positives on legitimate
+# educational content (history, biology, chemistry) while catching clear violations.
+# Primary safety net is Azure's own content moderation running at the API level.
+_OUTPUT_HARM_KEYWORDS = {
+    "naked", "nude", "pornography", "erotic", "masturbat",
+    "suicide", "self-harm", "kill yourself", "hurt yourself",
+    "cocaine", "heroin", "methamphetamine",
+    "fuck", "shit", "bitch", "cunt", "asshole",
+}
+
 
 class GuardrailsManager:
     """
@@ -104,10 +125,9 @@ class GuardrailsManager:
         safe, final_text = guardrails.check_output(llm_response)
         speak(final_text)
 
-    Both methods are synchronous (blocking) and safe to call from a non-async
-    thread. They use asyncio.run() internally, which creates a fresh event loop
-    for each call and tears it down after — correct behaviour for Python threads
-    that have no running event loop.
+    Both methods are synchronous (blocking) and safe to call from any thread.
+    Async coroutines are dispatched to a persistent background event loop via
+    _run_async(), avoiding the overhead of creating a new loop per call.
     """
 
     def __init__(self, config_path: str = "config/guardrails"):
@@ -201,7 +221,7 @@ class GuardrailsManager:
             if not image_content:
                 return True, None
             try:
-                allowed = asyncio.run(self._check_image_content_async(image_content))
+                allowed = _run_async(self._check_image_content_async(image_content))
                 if not allowed:
                     logger.info("Guardrails BLOCKED image content (not math/science)")
                     return False, REFUSAL_MESSAGES["off_topic"]
@@ -223,7 +243,7 @@ class GuardrailsManager:
             return False, REFUSAL_MESSAGES["harmful_input"]
 
         try:
-            allowed = asyncio.run(self._self_check_input_async(user_text))
+            allowed = _run_async(self._self_check_input_async(user_text))
             if not allowed:
                 refusal = self._classify_refusal(user_text)
                 logger.info("Guardrails BLOCKED input: '%.60s'", user_text)
@@ -249,7 +269,7 @@ class GuardrailsManager:
             return True, bot_response
 
         try:
-            allowed = asyncio.run(self._self_check_output_async(bot_response))
+            allowed = _run_async(self._self_check_output_async(bot_response))
             if not allowed:
                 logger.warning("Guardrails BLOCKED output: '%.80s'", bot_response)
                 return False, REFUSAL_MESSAGES["harmful_output"]
@@ -260,6 +280,20 @@ class GuardrailsManager:
                 "Guardrails output check error: %s — passing through (fail-open).", exc
             )
             return True, bot_response
+
+    def check_output_fast(self, text: str) -> Tuple[bool, str]:
+        """
+        Keyword-only output safety gate — microseconds, no LLM call.
+        Called per-sentence before audio is queued when streaming LLM output to TTS.
+        Falls back gracefully: if no keywords match, the sentence is allowed through.
+        """
+        if not self._enabled or not text:
+            return True, text
+        lowered = text.lower()
+        if any(kw in lowered for kw in _OUTPUT_HARM_KEYWORDS):
+            logger.warning("Fast output check BLOCKED: '%.60s'", text)
+            return False, REFUSAL_MESSAGES["harmful_output"]
+        return True, text
 
     async def _check_image_content_async(self, image_content: str) -> bool:
         """

@@ -591,6 +591,10 @@ class ContinuousVADCapture:
         barge_in_active = False  # Once true, stays true until playback ends
         _barge_in_peak_rms = 0.0        # Track peak RMS this playback session
         _barge_in_log_time = 0.0        # Throttle RMS telemetry to once/sec
+        # After barge-in activates, drain this many frames as silence before opening STT.
+        # Gives PipeWire AEC time to suppress the ongoing bot speech (default 40ms = 2 frames).
+        _barge_in_echo_drain = int(os.getenv('BARGE_IN_ECHO_DRAIN_FRAMES', '2'))
+        _barge_in_drain_remaining = 0
         
         logger.info("📡 Continuous audio streaming started")
         
@@ -713,13 +717,18 @@ class ContinuousVADCapture:
                     if barge_in_consecutive >= self._barge_in_consecutive_needed and not barge_in_active:
                         # BARGE-IN DETECTED! Open the gate.
                         barge_in_active = True
+                        _barge_in_drain_remaining = _barge_in_echo_drain
                         logger.info(f"🎤🔥 BARGE-IN detected! RMS={rms:.0f} for {barge_in_consecutive} chunks — opening STT gate")
                         if self._barge_in_event:
                             self._barge_in_event.set()
-                    
+
                     if barge_in_active:
-                        # Gate is open — feed real audio to STT
-                        yield audio_chunk
+                        if _barge_in_drain_remaining > 0:
+                            # Drain echo tail before feeding real audio to STT
+                            _barge_in_drain_remaining -= 1
+                            yield silence_chunk
+                        else:
+                            yield audio_chunk
                     else:
                         # Gate is closed — feed silence to prevent echo transcription
                         yield silence_chunk
