@@ -6,7 +6,6 @@ import time
 import queue
 from queue import Queue
 from typing import Optional
-from difflib import SequenceMatcher
 from dotenv import load_dotenv
 import numpy as np
 from PyQt5.QtWidgets import QApplication
@@ -222,7 +221,7 @@ class JarvisBot:
                     logger.info(f"DEBUG: emitting draw actions for step {step_id}: {actions}")
                     self.ui_signals.draw_actions.emit(actions)
 
-                time.sleep(0.15)
+                # time.sleep(0.15)
 
                 audio_bytes = self.tts_client.synthesize_to_audio(step_text)
                 if audio_bytes and self.audio_player._is_playing:

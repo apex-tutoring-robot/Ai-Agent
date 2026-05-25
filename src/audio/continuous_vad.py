@@ -429,7 +429,6 @@ class ContinuousVADCapture:
             self.silence_detected_time = None
             
             # PRE-BUFFER: Keep recent chunks BEFORE confirmed speech detected.
-            from collections import deque
             pre_buffer = deque(maxlen=7)  # 7 chunks * 20ms = 140ms
 
 
