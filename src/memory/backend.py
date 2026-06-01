@@ -89,6 +89,15 @@ class StudyMemoryBackend(Protocol):
         """
         ...
 
+    def save_partial_progress(self, session_id: str, partial_fields: Dict[str, Any]) -> None:
+        """
+        Persist partial session progress without changing the session status.
+        Session remains 'in_progress' so it can be resumed later.
+        partial_fields shape:
+          {"summary": str, "topics_covered": List[str], "performance_notes": str}
+        """
+        ...
+
 
 class JsonFileBackend:
     """
@@ -244,5 +253,15 @@ class JsonFileBackend:
                 if session.get("session_id") == session_id:
                     session["status"] = "completed"
                     session.update(summary_fields)
+                    break
+        self.save(data)
+
+    def save_partial_progress(self, session_id: str, partial_fields: Dict[str, Any]) -> None:
+        data = self.load()
+        if data.get("study_plan"):
+            for session in data["study_plan"].get("sessions", []):
+                if session.get("session_id") == session_id:
+                    session.update(partial_fields)
+                    # Intentionally do not touch status — session stays in_progress
                     break
         self.save(data)

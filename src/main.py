@@ -104,15 +104,17 @@ class JarvisBot:
         os.makedirs("syllabus", exist_ok=True)
         self.study_session_manager = StudySessionManager(llm_client=self.llm_client)
         # States: "normal" | "awaiting_syllabus" | "extracting_syllabus"
-        #         | "awaiting_syllabus_duration" | "awaiting_weekly_hours"
+        #         | "generating_diagnostic" | "asking_diagnostic"
         #         | "generating_plan" | "in_session" | "awaiting_session_redirect"
         self._study_state: str = "normal"
         self._pending_syllabus_path: Optional[str] = None
         self._pending_syllabus_text: Optional[str] = None
-        self._pending_syllabus_weeks: Optional[float] = None
-        self._pending_syllabus_num_sessions: Optional[int] = None
+        self._diagnostic_questions: list = []
+        self._diagnostic_answers: list = []
+        self._diagnostic_index: int = 0
         self._active_session: Optional[dict] = None
         self._pending_session_finalize: bool = False
+        self._pending_partial_save: bool = False
         self._study_state_lock = threading.Lock()
 
         logger.info("Jarvis initialized successfully!")
@@ -221,11 +223,14 @@ class JarvisBot:
         or None to let the normal pipeline handle the turn.
 
         States:
-            normal                    → check for study trigger; resume or start new plan
-            awaiting_syllabus         → re-check syllabus dir on every user utterance
-            awaiting_syllabus_duration → ask how long the syllabus covers
-            awaiting_weekly_hours     → ask hours/week, then compute sessions and start
-            in_session                → return None (normal LLM handles it)
+            normal                  → check for study trigger; resume or start new plan
+            awaiting_syllabus       → re-check syllabus dir on every user utterance
+            extracting_syllabus     → blocking file extraction (synthetic turn)
+            generating_diagnostic   → LLM generates diagnostic questions (synthetic turn)
+            asking_diagnostic       → iterating through Q&A to gauge prior knowledge
+            generating_plan         → LLM builds personalised plan (synthetic turn)
+            in_session              → return None (normal LLM handles everything)
+            awaiting_session_redirect → off-topic detected; user decides to continue or end
         """
         with self._study_state_lock:
             state = self._study_state
@@ -234,18 +239,19 @@ class JarvisBot:
         if state == "in_session":
             return None
 
-        # ── awaiting_session_redirect: user chose to continue or end after off-topic ──
+        # ── awaiting_session_redirect: user chose to continue or take a break ──
         if state == "awaiting_session_redirect":
             text = user_text.lower()
-            if any(w in text for w in ("end", "stop", "later", "done", "finish", "pause", "save", "no")):
-                self._pending_session_finalize = True
-                return "Got it. I will save your progress and you can pick up where we left off next time."
+            if any(w in text for w in ("end", "stop", "later", "done", "finish", "pause", "save", "break", "no")):
+                # Partial save — session stays in_progress so it can be resumed
+                self._pending_partial_save = True
+                return "Sure! I will save your progress. Pick up where we left off whenever you are ready."
             # Anything else (yes, continue, ok, sure, …) resumes the session
             with self._study_state_lock:
                 self._study_state = "in_session"
             return "Okay! Let us get back to it."
 
-        # ── extracting_syllabus: blocking text/image/PDF extraction isolated here ──
+        # ── extracting_syllabus: blocking text/image/PDF extraction ──
         if state == "extracting_syllabus":
             syllabus_text = self.study_session_manager.extract_syllabus_text(
                 self._pending_syllabus_path
@@ -257,84 +263,71 @@ class JarvisBot:
                 return syllabus_text.replace("ERROR: ", "")
             with self._study_state_lock:
                 self._pending_syllabus_text = syllabus_text
-                self._study_state = "awaiting_syllabus_duration"
-            return (
-                "I have read your syllabus! How long does it cover? "
-                # "For example, say two weeks, one month, or a semester."
-            )
+                self._study_state = "generating_diagnostic"
+            self._request_queue.put("__GENERATE_DIAGNOSTIC__")
+            return "I have read your syllabus! Let me think of a couple of questions to see where you are starting from."
 
-        # ── awaiting_syllabus_duration: parse how long the syllabus covers ──
-        if state == "awaiting_syllabus_duration":
-            weeks = StudySessionManager.extract_duration_weeks(user_text)
-            if weeks is None or weeks <= 0:
-                return (
-                    "I did not quite catch that. How long does the syllabus cover? "
-                    # "For example, say two weeks, one month, or a semester."
-                )
-            with self._study_state_lock:
-                self._pending_syllabus_weeks = weeks
-                self._study_state = "awaiting_weekly_hours"
-            return (
-                "Got it! And how many hours per week would you like to study? "
-                # "For example, say two hours or one hour."
-            )
-
-        # ── awaiting_weekly_hours: parse hours/week, compute sessions, then hand off ──
-        if state == "awaiting_weekly_hours":
-            hours = StudySessionManager.extract_hours_per_week(user_text)
-            if hours is None or hours <= 0:
-                return (
-                    "I did not catch that. How many hours per week would you like to study? "
-                    # "For example, say two hours or half an hour."
-                )
-
-            weeks = self._pending_syllabus_weeks or 1.0
-            num_sessions = max(1, round(weeks * hours / 0.5))  # each session is 30 min
-
-            logger.info(
-                "Study plan requested: %.1f weeks x %.1f hrs/week = %d sessions",
-                weeks, hours, num_sessions,
+        # ── generating_diagnostic: LLM produces 2 questions, then ask the first ──
+        if state == "generating_diagnostic":
+            questions = self.study_session_manager.generate_diagnostic_questions(
+                self._pending_syllabus_text
             )
             with self._study_state_lock:
-                self._pending_syllabus_num_sessions = num_sessions
+                self._diagnostic_questions = questions
+                self._diagnostic_answers = []
+                self._diagnostic_index = 0
+                self._study_state = "asking_diagnostic"
+            return questions[0]
+
+        # ── asking_diagnostic: collect answer, advance to next question or plan ──
+        if state == "asking_diagnostic":
+            self._diagnostic_answers.append(user_text)
+            next_index = self._diagnostic_index + 1
+            with self._study_state_lock:
+                self._diagnostic_index = next_index
+            if next_index < len(self._diagnostic_questions):
+                return self._diagnostic_questions[next_index]
+            # All questions answered — generate plan
+            with self._study_state_lock:
                 self._study_state = "generating_plan"
-            # Synthetic turn so the speaker loop immediately runs plan generation
-            # after playing the interim response below — no waiting for user speech.
             self._request_queue.put("__GENERATE_PLAN__")
-            return (
-                f"Got it! I will put together a {num_sessions}-session study plan for you. "
-                f"One moment while I work on that."
-            )
+            return "Thanks! Let me put together a personalised study plan for you. One moment."
 
-        # ── generating_plan: blocking LLM call isolated here, not in awaiting_weekly_hours ──
+        # ── generating_plan: blocking LLM call to build the plan ──
         if state == "generating_plan":
-            num_sessions = self._pending_syllabus_num_sessions or 1
+            diagnostic_qa = [
+                {"question": q, "answer": a}
+                for q, a in zip(self._diagnostic_questions, self._diagnostic_answers)
+            ]
             success = self.study_session_manager.generate_study_plan(
-                self._pending_syllabus_text, num_sessions
+                self._pending_syllabus_text, diagnostic_qa
             )
             if not success:
                 with self._study_state_lock:
                     self._pending_syllabus_path = None
                     self._pending_syllabus_text = None
-                    self._pending_syllabus_weeks = None
-                    self._pending_syllabus_num_sessions = None
+                    self._diagnostic_questions = []
+                    self._diagnostic_answers = []
+                    self._diagnostic_index = 0
                     self._study_state = "normal"
                 return "Sorry, I had trouble creating your study plan. Please try again."
 
             self.study_session_manager.mark_syllabus_processed(self._pending_syllabus_path)
             session = self.study_session_manager.get_next_session()
             self.study_session_manager.mark_session_in_progress(session["session_id"])
+            total = self.study_session_manager.backend.load().get("study_plan", {}).get("total_sessions", "a few")
             with self._study_state_lock:
                 self._pending_syllabus_path = None
                 self._pending_syllabus_text = None
-                self._pending_syllabus_weeks = None
-                self._pending_syllabus_num_sessions = None
+                self._diagnostic_questions = []
+                self._diagnostic_answers = []
+                self._diagnostic_index = 0
                 self._active_session = session
                 self._study_state = "in_session"
                 context = self.study_session_manager.build_session_context(session)
                 self.llm_client.system_prompt = self.llm_client._base_system_prompt + context
             return (
-                f"Your study plan is ready with {num_sessions} sessions! "
+                f"Your study plan is ready with {total} sessions! "
                 f"Starting with: {session.get('focus', 'your first topic')}. "
                 f"Ready to begin?"
             )
@@ -646,6 +639,23 @@ class JarvisBot:
                             name="SessionFinalizeThread"
                         ).start()
                         logger.info("📚 Session finalization dispatched to background thread")
+
+                    # ── Partial save on break (session stays in_progress for later resume) ──
+                    if self._pending_partial_save:
+                        self._pending_partial_save = False
+                        session_snapshot = self._active_session
+                        messages_snapshot = self.conversation_manager.get_messages()
+                        with self._study_state_lock:
+                            self._active_session = None
+                            self._study_state = "normal"
+                            self.llm_client.system_prompt = self.llm_client._base_system_prompt
+                        threading.Thread(
+                            target=self.study_session_manager.save_session_progress,
+                            args=(session_snapshot, messages_snapshot),
+                            daemon=True,
+                            name="SessionPartialSaveThread"
+                        ).start()
+                        logger.info("📚 Partial session save dispatched to background thread")
                     
             logger.info("🔊 Speaker worker stopped cleanly")
         except Exception as e:
@@ -778,15 +788,16 @@ class JarvisBot:
                 if self._study_state in (
                     "awaiting_syllabus",
                     "extracting_syllabus",
-                    "awaiting_syllabus_duration",
-                    "awaiting_weekly_hours",
+                    "generating_diagnostic",
+                    "asking_diagnostic",
                     "generating_plan",
                 ):
                     logger.info("Conversation ended mid-study-flow — resetting study state to normal")
                     self._pending_syllabus_path = None
                     self._pending_syllabus_text = None
-                    self._pending_syllabus_weeks = None
-                    self._pending_syllabus_num_sessions = None
+                    self._diagnostic_questions = []
+                    self._diagnostic_answers = []
+                    self._diagnostic_index = 0
                     self._study_state = "normal"
             
             # 2. Stop VAD first — this closes the audio stream and unblocks the listener thread

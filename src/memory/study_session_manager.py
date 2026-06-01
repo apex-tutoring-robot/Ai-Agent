@@ -5,6 +5,7 @@ Knows nothing about HOW data is stored. Delegates all persistence to the
 StudyMemoryBackend. Responsible for:
   - Detecting new syllabus files in syllabus/
   - Extracting text from any supported file format
+  - Generating diagnostic questions to gauge student prior knowledge
   - Driving LLM calls for plan generation and session summarization
   - Building the system-prompt context string injected during active sessions
 """
@@ -31,22 +32,16 @@ OFF_TOPIC_RE = re.compile(r'\[OFF_TOPIC\]', re.IGNORECASE)
 
 _SUPPORTED_EXTENSIONS = {".txt", ".md", ".png", ".jpg", ".jpeg", ".pdf"}
 
-_WORD_TO_NUM = {
-    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-    "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20,
-}
-
 
 class StudySessionManager:
     """
     Orchestration layer for study session memory.
 
     Args:
-        llm_client: Shared LLMClient instance (for plan generation, summarization,
-                    and syllabus image extraction).
-        backend:    Any object satisfying the StudyMemoryBackend protocol.
-                    Defaults to JsonFileBackend when not provided.
+        llm_client:   Shared LLMClient instance (plan generation, summarization,
+                      syllabus image extraction, diagnostic questions).
+        backend:      Any object satisfying the StudyMemoryBackend protocol.
+                      Defaults to JsonFileBackend when not provided.
         syllabus_dir: Directory where parents drop syllabus files.
     """
 
@@ -156,12 +151,59 @@ class StudySessionManager:
             logger.warning("mark_syllabus_processed: could not delete %s: %s", file_path, e)
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Diagnostic questions
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def generate_diagnostic_questions(self, syllabus_text: str) -> List[str]:
+        """
+        Generate 2 conversational questions to gauge the student's prior knowledge.
+
+        Returns a list of question strings. Falls back to generic questions on failure.
+        """
+        import json as _json
+
+        prompt = (
+            "You are a tutor assessing a K-8 student's prior knowledge. "
+            "Based on the syllabus below, write exactly 2 short, conversational questions "
+            "to gauge the student's current understanding. "
+            "Questions should be open-ended but answerable in a sentence or two. "
+            "Do NOT ask about how much time they have or scheduling. "
+            "Return a JSON array of exactly 2 question strings. No explanation.\n\n"
+            f"Syllabus:\n{syllabus_text}\n\n"
+            "Return only valid JSON. Example: "
+            "[\"What do you already know about fractions?\", "
+            "\"Can you name any fraction types you have learned before?\"]"
+        )
+
+        try:
+            raw = self.llm_client.generate_json_response(prompt, max_tokens=300)
+            questions = _json.loads(raw)
+            if isinstance(questions, list) and len(questions) >= 1:
+                return [str(q) for q in questions[:2]]
+        except Exception as e:
+            logger.error("generate_diagnostic_questions: failed: %s", e)
+
+        return [
+            "What do you already know about this topic?",
+            "What parts feel most confusing or unfamiliar to you?",
+        ]
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Study plan generation
     # ──────────────────────────────────────────────────────────────────────────
 
-    def generate_study_plan(self, syllabus_text: str, num_sessions: int) -> bool:
+    def generate_study_plan(
+        self,
+        syllabus_text: str,
+        diagnostic_qa: List[Dict[str, str]],
+    ) -> bool:
         """
         Call LLM to produce a structured study plan and persist it via backend.
+
+        Args:
+            syllabus_text:  Extracted syllabus content.
+            diagnostic_qa:  List of {"question": ..., "answer": ...} dicts from
+                            the pre-plan diagnostic conversation.
 
         Returns True on success, False if the LLM call or schema validation fails.
         """
@@ -169,20 +211,29 @@ class StudySessionManager:
         from memory.schemas import StudyPlan, session_plan_llm_schema
 
         session_schema = _json.dumps(session_plan_llm_schema(), indent=2)
+        qa_text = "\n".join(
+            f"Q: {qa['question']}\nA: {qa['answer']}"
+            for qa in diagnostic_qa
+        )
 
         prompt = (
-            f"You are a study planner for a K-8 student. Given the syllabus text below, "
-            f"create a study plan with exactly {num_sessions} sessions.\n\n"
-            f"Return a JSON object with this exact structure:\n"
-            f'{{\n'
-            f'  "total_sessions": {num_sessions},\n'
-            f'  "source_summary": "<one sentence describing what the full syllabus covers>",\n'
-            f'  "sessions": [<array of {num_sessions} session objects matching the schema below>]\n'
-            f'}}\n\n'
+            "You are a study planner for a K-8 student. "
+            "Based on the syllabus and the student's diagnostic responses below, "
+            "create a personalised study plan.\n\n"
+            "Choose an appropriate number of sessions (typically 3–10) based on the "
+            "syllabus scope and the student's apparent level from the diagnostic.\n\n"
+            "Return a JSON object with this exact structure:\n"
+            "{\n"
+            '  "total_sessions": <number>,\n'
+            '  "source_summary": "<one sentence describing what the syllabus covers>",\n'
+            '  "assessment_summary": "<one sentence describing the student\'s prior knowledge level>",\n'
+            '  "sessions": [<array of session objects matching the schema below>]\n'
+            "}\n\n"
             f"Each session object must match this schema exactly (no extra fields):\n"
             f"{session_schema}\n\n"
-            f"Syllabus text:\n{syllabus_text}\n\n"
-            f"Return only valid JSON. No markdown fences. No explanation."
+            f"Syllabus:\n{syllabus_text}\n\n"
+            f"Student diagnostic:\n{qa_text}\n\n"
+            "Return only valid JSON. No markdown fences. No explanation."
         )
 
         try:
@@ -223,13 +274,25 @@ class StudySessionManager:
         Build the text block appended to the LLM system prompt for an active session.
 
         Tells Jarvis what to teach and when to emit [SESSION_COMPLETE].
+        Includes partial-progress context if this session was previously interrupted.
         """
         focus = session.get("focus", "")
         topics = ", ".join(session.get("topics", []))
         concepts = ", ".join(session.get("key_concepts", []))
         practice = session.get("practice", "")
 
-        # Inject carry-forward note from the last completed session if one exists
+        # If this session was previously interrupted, surface what was already covered
+        partial_note = ""
+        if session.get("topics_covered"):
+            covered = ", ".join(session["topics_covered"])
+            partial_note = f"\nThis session was previously started. Already covered: {covered}."
+            if session.get("summary"):
+                partial_note += f" Progress so far: {session['summary']}."
+            if session.get("performance_notes"):
+                partial_note += f" {session['performance_notes']}."
+            partial_note += " Resume from where we left off — do not repeat covered material."
+
+        # Carry-forward note from the last fully completed session
         data = self.backend.load()
         sessions = (data.get("study_plan") or {}).get("sessions", [])
         completed = [s for s in sessions if s.get("status") == "completed"]
@@ -238,9 +301,13 @@ class StudySessionManager:
             last = completed[-1]
             struggles = ", ".join(last.get("struggles", [])) or "none noted"
             next_focus = last.get("next_focus", "")
+            topics_covered = ", ".join(last.get("topics_covered", [])) or "not recorded"
+            performance_notes = last.get("performance_notes", "")
             last_session_note = (
-                f"\nPrevious session note: student struggled with {struggles}. "
-                f"Carry-forward focus: {next_focus}."
+                f"\nPrevious session: topics covered: {topics_covered}. "
+                f"Student struggled with: {struggles}. "
+                + (f"Performance: {performance_notes}. " if performance_notes else "")
+                + f"Carry-forward focus: {next_focus}."
             )
 
         return (
@@ -249,6 +316,7 @@ class StudySessionManager:
             f"Topics to cover: {topics}\n"
             f"Key concepts: {concepts}\n"
             f"Practice: {practice}"
+            f"{partial_note}"
             f"{last_session_note}\n"
             f"When the student explicitly says they are done, or when you have covered "
             f"all the topics and key concepts above, end your response with exactly: "
@@ -288,12 +356,14 @@ class StudySessionManager:
             f'Summarize this tutoring session focused on "{focus}".\n\n'
             f"Conversation:\n{transcript}\n\n"
             f"Return JSON with this exact structure:\n"
-            f'{{\n'
-            f'  "summary": "<2-3 sentence summary of what was covered>",\n'
-            f'  "struggles": ["<thing student struggled with>"],\n'
-            f'  "next_focus": "<what to prioritise at the start of the next session>"\n'
-            f'}}\n\n'
-            f"Return only valid JSON. No markdown fences."
+            "{\n"
+            '  "summary": "<2-3 sentence summary of what was covered>",\n'
+            '  "struggles": ["<concept or skill the student struggled with>"],\n'
+            '  "next_focus": "<what to prioritise at the start of the next session>",\n'
+            '  "topics_covered": ["<topic actually covered in this session>"],\n'
+            '  "performance_notes": "<brief assessment of student engagement and understanding>"\n'
+            "}\n\n"
+            "Return only valid JSON. No markdown fences."
         )
 
         from memory.schemas import SessionPlan
@@ -317,6 +387,8 @@ class StudySessionManager:
                 "summary": f'Session on "{focus}" completed.',
                 "struggles": [],
                 "next_focus": "",
+                "topics_covered": [],
+                "performance_notes": "",
             }
 
         try:
@@ -325,96 +397,56 @@ class StudySessionManager:
         except Exception as e:
             logger.error("complete_session: backend.complete_session failed: %s", e)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Input parsing utilities
-    # ──────────────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def extract_duration_weeks(text: str) -> Optional[float]:
+    def save_session_progress(self, session: Dict[str, Any], messages: List[Dict]) -> None:
         """
-        Parse spoken syllabus duration into weeks.
+        Save partial progress for a session the student is stepping away from.
 
-        Understands: "two weeks", "a month", "3 months", "a semester",
-        "one year", bare numbers (treated as weeks). Returns None if not found.
+        Session status stays 'in_progress' so it can be resumed later.
+        Called from a background daemon thread — errors are logged, not re-raised.
         """
-        lowered = text.lower()
+        session_id = session.get("session_id", str(uuid.uuid4()))
+        focus = session.get("focus", "unknown")
 
-        def _word_val(s: str) -> Optional[float]:
-            digit = re.search(r'\b(\d+(?:\.\d+)?)\b', s)
-            if digit:
-                return float(digit.group(1))
-            for word, num in _WORD_TO_NUM.items():
-                if re.search(rf'\b{word}\b', s):
-                    return float(num)
-            return None
+        transcript_lines = []
+        for msg in messages[-30:]:
+            role = "Student" if msg["role"] == "user" else "Jarvis"
+            content = msg["content"]
+            if isinstance(content, str):
+                transcript_lines.append(f"{role}: {content}")
+        transcript = "\n".join(transcript_lines)
 
-        # semester / term → ~18 weeks
-        if re.search(r'\b(semester|term|quarter)\b', lowered):
-            return 18.0
+        prompt = (
+            f'The student is taking a break from a tutoring session on "{focus}".\n\n'
+            f"Conversation so far:\n{transcript}\n\n"
+            "Summarise what was covered. Return JSON with this exact structure:\n"
+            "{\n"
+            '  "summary": "<what was covered so far in 1-2 sentences>",\n'
+            '  "topics_covered": ["<topic actually covered so far>"],\n'
+            '  "performance_notes": "<brief note on student understanding and engagement>"\n'
+            "}\n\n"
+            "Return only valid JSON. No markdown fences."
+        )
 
-        # year
-        m = re.search(r'\b(\w+)\s+year', lowered)
-        if m or re.search(r'\byear\b', lowered):
-            n = _word_val(m.group(1) if m else "") if m else None
-            return (n or 1.0) * 52.0
+        try:
+            raw = self.llm_client.generate_json_response(prompt, max_tokens=300)
+            import json as _json
+            data = _json.loads(raw)
+            partial_fields = {
+                "summary": str(data.get("summary", "")),
+                "topics_covered": list(data.get("topics_covered", [])),
+                "performance_notes": str(data.get("performance_notes", "")),
+            }
+        except Exception as e:
+            logger.error("save_session_progress: summarization failed: %s", e)
+            partial_fields = {
+                "summary": f'Partial session on "{focus}" — student took a break.',
+                "topics_covered": [],
+                "performance_notes": "",
+            }
 
-        # months
-        m = re.search(r'(\w+)\s+month', lowered)
-        if m or re.search(r'\bmonth\b', lowered):
-            n = _word_val(m.group(1) if m else "") if m else None
-            return (n or 1.0) * 4.0
+        try:
+            self.backend.save_partial_progress(session_id, partial_fields)
+            logger.info("Session %s partial progress saved", session_id)
+        except Exception as e:
+            logger.error("save_session_progress: backend call failed: %s", e)
 
-        # weeks
-        m = re.search(r'(\w+)\s+week', lowered)
-        if m or re.search(r'\bweek\b', lowered):
-            n = _word_val(m.group(1) if m else "") if m else None
-            return n or 1.0
-
-        # bare digit → weeks
-        digit = re.search(r'\b(\d+(?:\.\d+)?)\b', lowered)
-        if digit:
-            return float(digit.group(1))
-
-        return None
-
-    @staticmethod
-    def extract_hours_per_week(text: str) -> Optional[float]:
-        """
-        Parse spoken weekly study hours into a float.
-
-        Understands: "two hours", "an hour", "1.5 hours", "half an hour",
-        "thirty minutes". Returns None if not found.
-        """
-        lowered = text.lower()
-
-        # half an hour / 30 minutes
-        if re.search(r'\bhalf\b', lowered) or re.search(r'\b30\s*min', lowered):
-            return 0.5
-
-        # X hours and Y minutes  (e.g. "1 hour 30 minutes")
-        m = re.search(r'(\d+(?:\.\d+)?)\s*hour[s]?\s*(?:and\s*)?(\d+)\s*min', lowered)
-        if m:
-            return float(m.group(1)) + float(m.group(2)) / 60.0
-
-        # X minutes only
-        m = re.search(r'(\d+(?:\.\d+)?)\s*min', lowered)
-        if m:
-            return float(m.group(1)) / 60.0
-
-        # decimal digit + hours
-        m = re.search(r'(\d+(?:\.\d+)?)\s*hour', lowered)
-        if m:
-            return float(m.group(1))
-
-        # word number + hours / hour
-        if re.search(r'\bhour', lowered):
-            for word, num in _WORD_TO_NUM.items():
-                if re.search(rf'\b{word}\b', lowered):
-                    return float(num)
-
-        # bare digit → hours
-        digit = re.search(r'\b(\d+(?:\.\d+)?)\b', lowered)
-        if digit:
-            return float(digit.group(1))
-
-        return None

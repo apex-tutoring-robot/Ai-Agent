@@ -4,9 +4,11 @@ Pydantic schemas for study plan generation and persistence.
 SessionPlan — represents a session through its full lifecycle.
               LLM fills at plan creation: focus, topics, key_concepts, practice.
               System fills: session_id (UUID), status.
-              LLM fills at session end: summary, struggles, next_focus.
+              LLM fills at session end: summary, struggles, next_focus,
+                                        topics_covered, performance_notes.
 
 StudyPlan   — the full plan: a list of SessionPlans plus top-level metadata.
+              assessment_summary is filled at plan creation from diagnostic Q&A.
 
 Usage:
   plan = StudyPlan.model_validate_json(raw_llm_output)
@@ -22,7 +24,11 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 # Fields the LLM must not populate during plan generation.
-_SYSTEM_FIELDS = {"session_id", "status", "summary", "struggles", "next_focus"}
+_SYSTEM_FIELDS = {
+    "session_id", "status",
+    "summary", "struggles", "next_focus",
+    "topics_covered", "performance_notes",
+}
 
 
 class SessionPlan(BaseModel):
@@ -36,11 +42,14 @@ class SessionPlan(BaseModel):
     summary: Optional[str] = None
     struggles: List[str] = Field(default_factory=list)
     next_focus: str = ""
+    topics_covered: List[str] = Field(default_factory=list)
+    performance_notes: str = ""
 
 
 class StudyPlan(BaseModel):
     total_sessions: int
     source_summary: str
+    assessment_summary: str = ""
     sessions: List[SessionPlan]
 
 
