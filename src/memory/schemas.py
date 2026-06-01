@@ -47,7 +47,7 @@ class SessionPlan(BaseModel):
 
 
 class StudyPlan(BaseModel):
-    total_sessions: int
+    topic: str = ""
     source_summary: str
     assessment_summary: str = ""
     sessions: List[SessionPlan]

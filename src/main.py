@@ -104,11 +104,14 @@ class JarvisBot:
         os.makedirs("syllabus", exist_ok=True)
         self.study_session_manager = StudySessionManager(llm_client=self.llm_client)
         # States: "normal" | "awaiting_syllabus" | "extracting_syllabus"
+        #         | "identifying_topics" | "awaiting_topic_choice"
         #         | "generating_diagnostic" | "asking_diagnostic"
         #         | "generating_plan" | "in_session" | "awaiting_session_redirect"
+        #         | "generating_next_session"
         self._study_state: str = "normal"
         self._pending_syllabus_path: Optional[str] = None
         self._pending_syllabus_text: Optional[str] = None
+        self._pending_topic: Optional[str] = None
         self._diagnostic_questions: list = []
         self._diagnostic_answers: list = []
         self._diagnostic_index: int = 0
@@ -263,14 +266,34 @@ class JarvisBot:
                 return syllabus_text.replace("ERROR: ", "")
             with self._study_state_lock:
                 self._pending_syllabus_text = syllabus_text
+                self._study_state = "identifying_topics"
+            self._request_queue.put("__IDENTIFY_TOPICS__")
+            return "I have read your syllabus! Let me take a look at what is in here."
+
+        # ── identifying_topics: LLM finds topics, asks user to choose ──
+        if state == "identifying_topics":
+            topics = self.study_session_manager.identify_topics(self._pending_syllabus_text)
+            with self._study_state_lock:
+                self._study_state = "awaiting_topic_choice"
+            topic_list = ", ".join(topics)
+            return (
+                f"I can see a few topics in this syllabus: {topic_list}. "
+                f"Which one would you like to focus on?"
+            )
+
+        # ── awaiting_topic_choice: store chosen topic, start diagnostic ──
+        if state == "awaiting_topic_choice":
+            with self._study_state_lock:
+                self._pending_topic = user_text.strip()
                 self._study_state = "generating_diagnostic"
             self._request_queue.put("__GENERATE_DIAGNOSTIC__")
-            return "I have read your syllabus! Let me think of a couple of questions to see where you are starting from."
+            return f"Great, let us focus on {user_text.strip()}! Let me think of a couple of questions to see where you are starting from."
 
-        # ── generating_diagnostic: LLM produces 2 questions, then ask the first ──
+        # ── generating_diagnostic: LLM produces 2 questions scoped to chosen topic ──
         if state == "generating_diagnostic":
             questions = self.study_session_manager.generate_diagnostic_questions(
-                self._pending_syllabus_text
+                self._pending_syllabus_text,
+                topic=self._pending_topic or "",
             )
             with self._study_state_lock:
                 self._diagnostic_questions = questions
@@ -291,21 +314,24 @@ class JarvisBot:
             with self._study_state_lock:
                 self._study_state = "generating_plan"
             self._request_queue.put("__GENERATE_PLAN__")
-            return "Thanks! Let me put together a personalised study plan for you. One moment."
+            return "Thanks! Let me put together your first session. One moment."
 
-        # ── generating_plan: blocking LLM call to build the plan ──
+        # ── generating_plan: blocking LLM call to build the single first session ──
         if state == "generating_plan":
             diagnostic_qa = [
                 {"question": q, "answer": a}
                 for q, a in zip(self._diagnostic_questions, self._diagnostic_answers)
             ]
             success = self.study_session_manager.generate_study_plan(
-                self._pending_syllabus_text, diagnostic_qa
+                self._pending_syllabus_text,
+                self._pending_topic or "",
+                diagnostic_qa,
             )
             if not success:
                 with self._study_state_lock:
                     self._pending_syllabus_path = None
                     self._pending_syllabus_text = None
+                    self._pending_topic = None
                     self._diagnostic_questions = []
                     self._diagnostic_answers = []
                     self._diagnostic_index = 0
@@ -315,10 +341,10 @@ class JarvisBot:
             self.study_session_manager.mark_syllabus_processed(self._pending_syllabus_path)
             session = self.study_session_manager.get_next_session()
             self.study_session_manager.mark_session_in_progress(session["session_id"])
-            total = self.study_session_manager.backend.load().get("study_plan", {}).get("total_sessions", "a few")
             with self._study_state_lock:
                 self._pending_syllabus_path = None
                 self._pending_syllabus_text = None
+                self._pending_topic = None
                 self._diagnostic_questions = []
                 self._diagnostic_answers = []
                 self._diagnostic_index = 0
@@ -327,8 +353,27 @@ class JarvisBot:
                 context = self.study_session_manager.build_session_context(session)
                 self.llm_client.system_prompt = self.llm_client._base_system_prompt + context
             return (
-                f"Your study plan is ready with {total} sessions! "
-                f"Starting with: {session.get('focus', 'your first topic')}. "
+                f"Your first session is ready! "
+                f"We will start with: {session.get('focus', 'your topic')}. "
+                f"Ready to begin?"
+            )
+
+        # ── generating_next_session: deeper follow-up session generated on demand ──
+        if state == "generating_next_session":
+            session = self.study_session_manager.generate_next_session()
+            if not session:
+                with self._study_state_lock:
+                    self._study_state = "normal"
+                return "Sorry, I had trouble generating the next session. Please try again."
+            self.study_session_manager.mark_session_in_progress(session["session_id"])
+            with self._study_state_lock:
+                self._active_session = session
+                self._study_state = "in_session"
+                context = self.study_session_manager.build_session_context(session)
+                self.llm_client.system_prompt = self.llm_client._base_system_prompt + context
+            return (
+                f"Your next session is ready! "
+                f"We will go deeper into: {session.get('focus', 'your topic')}. "
                 f"Ready to begin?"
             )
 
@@ -346,8 +391,9 @@ class JarvisBot:
         if not self._is_study_trigger(user_text):
             return None
 
-        if self.study_session_manager.has_active_plan():
-            session = self.study_session_manager.get_next_session()
+        # Resume an in-progress or not-yet-started session
+        session = self.study_session_manager.get_next_session()
+        if session:
             self.study_session_manager.mark_session_in_progress(session["session_id"])
             with self._study_state_lock:
                 self._active_session = session
@@ -356,9 +402,17 @@ class JarvisBot:
                 self.llm_client.system_prompt = self.llm_client._base_system_prompt + context
             return (
                 f"Welcome back! Continuing with: "
-                f"{session.get('focus', 'your next topic')}. Ready to begin?"
+                f"{session.get('focus', 'your topic')}. Ready to begin?"
             )
 
+        # All prior sessions done — generate a deeper one on demand
+        if self.study_session_manager.backend.has_any_plan():
+            with self._study_state_lock:
+                self._study_state = "generating_next_session"
+            self._request_queue.put("__GENERATE_NEXT_SESSION__")
+            return "Great work so far! Let me put together the next deeper session for you. One moment."
+
+        # No plan yet — need a syllabus
         syllabus_path = self.study_session_manager.get_new_syllabus_file()
         if not syllabus_path:
             with self._study_state_lock:
@@ -788,13 +842,17 @@ class JarvisBot:
                 if self._study_state in (
                     "awaiting_syllabus",
                     "extracting_syllabus",
+                    "identifying_topics",
+                    "awaiting_topic_choice",
                     "generating_diagnostic",
                     "asking_diagnostic",
                     "generating_plan",
+                    "generating_next_session",
                 ):
                     logger.info("Conversation ended mid-study-flow — resetting study state to normal")
                     self._pending_syllabus_path = None
                     self._pending_syllabus_text = None
+                    self._pending_topic = None
                     self._diagnostic_questions = []
                     self._diagnostic_answers = []
                     self._diagnostic_index = 0

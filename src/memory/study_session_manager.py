@@ -154,7 +154,34 @@ class StudySessionManager:
     # Diagnostic questions
     # ──────────────────────────────────────────────────────────────────────────
 
-    def generate_diagnostic_questions(self, syllabus_text: str) -> List[str]:
+    def identify_topics(self, syllabus_text: str) -> List[str]:
+        """
+        Return a list of distinct topics found in the syllabus.
+
+        Falls back to a single generic entry on failure so the caller
+        can always present at least one option to the student.
+        """
+        import json as _json
+
+        prompt = (
+            "You are a tutor reviewing a K-8 syllabus. "
+            "List the distinct topics or subject areas covered. "
+            "Return a JSON array of short topic name strings (typically 2-8 items). "
+            "No explanation. Only valid JSON.\n\n"
+            f"Syllabus:\n{syllabus_text}"
+        )
+
+        try:
+            raw = self.llm_client.generate_json_response(prompt, max_tokens=200)
+            topics = _json.loads(raw)
+            if isinstance(topics, list) and len(topics) >= 1:
+                return [str(t) for t in topics]
+        except Exception as e:
+            logger.error("identify_topics: failed: %s", e)
+
+        return ["the main topic"]
+
+    def generate_diagnostic_questions(self, syllabus_text: str, topic: str = "") -> List[str]:
         """
         Generate 2 conversational questions to gauge the student's prior knowledge.
 
@@ -162,10 +189,11 @@ class StudySessionManager:
         """
         import json as _json
 
+        topic_clause = f' specifically about "{topic}"' if topic else ""
         prompt = (
             "You are a tutor assessing a K-8 student's prior knowledge. "
-            "Based on the syllabus below, write exactly 2 short, conversational questions "
-            "to gauge the student's current understanding. "
+            f"Based on the syllabus below, write exactly 2 short, conversational questions "
+            f"to gauge the student's current understanding{topic_clause}. "
             "Questions should be open-ended but answerable in a sentence or two. "
             "Do NOT ask about how much time they have or scheduling. "
             "Return a JSON array of exactly 2 question strings. No explanation.\n\n"
@@ -195,20 +223,25 @@ class StudySessionManager:
     def generate_study_plan(
         self,
         syllabus_text: str,
+        topic: str,
         diagnostic_qa: List[Dict[str, str]],
     ) -> bool:
         """
-        Call LLM to produce a structured study plan and persist it via backend.
+        Call LLM to produce a single-session study plan and persist it via backend.
+
+        Generates exactly one session. Additional sessions are appended on demand
+        via generate_next_session() as the student progresses.
 
         Args:
             syllabus_text:  Extracted syllabus content.
+            topic:          The specific topic the student chose to focus on.
             diagnostic_qa:  List of {"question": ..., "answer": ...} dicts from
                             the pre-plan diagnostic conversation.
 
         Returns True on success, False if the LLM call or schema validation fails.
         """
         import json as _json
-        from memory.schemas import StudyPlan, session_plan_llm_schema
+        from memory.schemas import StudyPlan, SessionPlan, session_plan_llm_schema
 
         session_schema = _json.dumps(session_plan_llm_schema(), indent=2)
         qa_text = "\n".join(
@@ -217,27 +250,24 @@ class StudySessionManager:
         )
 
         prompt = (
-            "You are a study planner for a K-8 student. "
-            "Based on the syllabus and the student's diagnostic responses below, "
-            "create a personalised study plan.\n\n"
-            "Choose an appropriate number of sessions (typically 3–10) based on the "
-            "syllabus scope and the student's apparent level from the diagnostic.\n\n"
+            f"You are a study planner for a K-8 student focusing on \"{topic}\".\n\n"
+            "Based on the syllabus and the student's diagnostic responses, "
+            "generate ONE introductory session tailored to their current level.\n\n"
             "Return a JSON object with this exact structure:\n"
             "{\n"
-            '  "total_sessions": <number>,\n'
+            f'  "topic": "{topic}",\n'
             '  "source_summary": "<one sentence describing what the syllabus covers>",\n'
             '  "assessment_summary": "<one sentence describing the student\'s prior knowledge level>",\n'
-            '  "sessions": [<array of session objects matching the schema below>]\n'
+            '  "sessions": [<exactly ONE session object matching the schema below>]\n'
             "}\n\n"
-            f"Each session object must match this schema exactly (no extra fields):\n"
-            f"{session_schema}\n\n"
+            f"Session schema (no extra fields):\n{session_schema}\n\n"
             f"Syllabus:\n{syllabus_text}\n\n"
             f"Student diagnostic:\n{qa_text}\n\n"
             "Return only valid JSON. No markdown fences. No explanation."
         )
 
         try:
-            raw = self.llm_client.generate_json_response(prompt, max_tokens=2000)
+            raw = self.llm_client.generate_json_response(prompt, max_tokens=1000)
         except Exception as e:
             logger.error("generate_study_plan: LLM call failed: %s", e)
             return False
@@ -249,8 +279,61 @@ class StudySessionManager:
             return False
 
         self.backend.save_study_plan(plan.model_dump())
-        logger.info("Study plan saved: %d sessions", plan.total_sessions)
+        logger.info("Study plan saved for topic '%s'", topic)
         return True
+
+    def generate_next_session(self) -> Optional[Dict[str, Any]]:
+        """
+        Generate the next deeper session for an existing plan and append it.
+
+        Builds on all completed session history so the LLM knows exactly what
+        was covered and where the student struggled.
+
+        Returns the new session dict on success, None on failure.
+        """
+        import json as _json
+        from memory.schemas import SessionPlan, session_plan_llm_schema
+
+        data = self.backend.load()
+        plan = data.get("study_plan")
+        if not plan:
+            logger.error("generate_next_session: no active plan found")
+            return None
+
+        topic = plan.get("topic", "the subject")
+        assessment_summary = plan.get("assessment_summary", "")
+        completed = [s for s in plan.get("sessions", []) if s.get("status") == "completed"]
+
+        history = "\n".join(
+            f"Session {i + 1}: covered {', '.join(s.get('topics_covered', []) or s.get('topics', []))}. "
+            f"Summary: {s.get('summary', '')}. "
+            f"Struggles: {', '.join(s.get('struggles', [])) or 'none'}."
+            for i, s in enumerate(completed)
+        ) or "No sessions completed yet."
+
+        session_schema = _json.dumps(session_plan_llm_schema(), indent=2)
+
+        prompt = (
+            f"You are a tutor for a K-8 student studying \"{topic}\".\n\n"
+            f"Student assessment: {assessment_summary}\n\n"
+            f"Sessions completed so far:\n{history}\n\n"
+            "Generate ONE next session that goes deeper into the material, "
+            "building on what was already covered and addressing any struggles.\n\n"
+            f"Return a single JSON session object matching this schema:\n{session_schema}\n\n"
+            "Return only valid JSON. No markdown fences."
+        )
+
+        try:
+            raw = self.llm_client.generate_json_response(prompt, max_tokens=800)
+            session = SessionPlan.model_validate_json(raw)
+        except Exception as e:
+            logger.error("generate_next_session: failed: %s", e)
+            return None
+
+        session_dict = session.model_dump()
+        self.backend.append_session(session_dict)
+        logger.info("Next session generated for topic '%s'", topic)
+        return session_dict
 
     # ──────────────────────────────────────────────────────────────────────────
     # Session state queries

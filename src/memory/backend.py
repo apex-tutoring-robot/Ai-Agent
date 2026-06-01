@@ -77,6 +77,14 @@ class StudyMemoryBackend(Protocol):
         """Return True if a study_plan exists with at least one in_progress or not_started session."""
         ...
 
+    def has_any_plan(self) -> bool:
+        """Return True if any study plan file exists, regardless of session completion status."""
+        ...
+
+    def append_session(self, session_dict: Dict[str, Any]) -> None:
+        """Append a new session to the active plan."""
+        ...
+
     def mark_session_in_progress(self, session_id: str) -> None:
         """Set the session with the given session_id to 'in_progress'."""
         ...
@@ -236,6 +244,17 @@ class JsonFileBackend:
 
     def has_active_plan(self) -> bool:
         return self.get_next_session() is not None
+
+    def has_any_plan(self) -> bool:
+        index = self._load_index()
+        plan_path = self._active_plan_path(index)
+        return plan_path is not None and os.path.exists(plan_path)
+
+    def append_session(self, session_dict: Dict[str, Any]) -> None:
+        data = self.load()
+        if data.get("study_plan") is not None:
+            data["study_plan"].setdefault("sessions", []).append(session_dict)
+            self.save(data)
 
     def mark_session_in_progress(self, session_id: str) -> None:
         data = self.load()
