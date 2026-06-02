@@ -278,7 +278,9 @@ class StudySessionManager:
             logger.error("generate_study_plan: schema validation failed: %s | raw=%s", e, raw[:300])
             return False
 
-        self.backend.save_study_plan(plan.model_dump())
+        plan_dict = plan.model_dump()
+        plan_dict["source_text"] = syllabus_text  # persist full text for future topic re-use
+        self.backend.save_study_plan(plan_dict)
         logger.info("Study plan saved for topic '%s'", topic)
         return True
 
@@ -338,6 +340,12 @@ class StudySessionManager:
     # ──────────────────────────────────────────────────────────────────────────
     # Session state queries
     # ──────────────────────────────────────────────────────────────────────────
+
+    def get_active_source_text(self) -> str:
+        """Return the full syllabus text stored in the active plan, or empty string."""
+        data = self.backend.load()
+        plan = data.get("study_plan") or {}
+        return plan.get("source_text", "")
 
     def has_active_plan(self) -> bool:
         return self.backend.has_active_plan()

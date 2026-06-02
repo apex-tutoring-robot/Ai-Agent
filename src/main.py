@@ -14,7 +14,7 @@ from audio.wake_word import WakeWordDetector
 from audio.continuous_vad import ContinuousVADCapture
 from audio.playback import AudioPlayer
 from azure_services.stt_client import SpeechToTextClient
-from azure_services.llm_client import LLMClient
+from azure_services.llm_client import LLMClient, ToolCall
 from azure_services.tts_client import TextToSpeechClient
 from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
@@ -118,6 +118,7 @@ class JarvisBot:
         self._active_session: Optional[dict] = None
         self._pending_session_finalize: bool = False
         self._pending_partial_save: bool = False
+        self._pending_new_session: bool = False
         self._study_state_lock = threading.Lock()
 
         logger.info("Jarvis initialized successfully!")
@@ -194,28 +195,37 @@ class JarvisBot:
         overlap = words_a & words_b
         return len(overlap) / max(len(words_a), len(words_b))
 
-    _CAMERA_TRIGGERS = {
-        "scan", "photo", "picture", "camera",
-        "take a photo", "take a picture", "scan my homework",
-        "look at this", "check this", "show you",
+    _CAMERA_TOOL = {
+        "type": "function",
+        "function": {
+            "name": "capture_photo",
+            "description": (
+                "Capture a photo using the robot's camera. Call this when the student "
+                "wants you to look at something, scan their homework, check a problem "
+                "on paper, or refers to something physical in front of them."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
     }
 
-    _STUDY_TRIGGERS = {
-        "study session", "study plan", "start studying", "begin session",
-        "start session", "load syllabus", "new syllabus", "upload syllabus",
-        "study mode", "let's study", "lets study", "start a study",
-        "tutoring session", "start tutoring", "begin tutoring",
+    _NEW_SESSION_PHRASES = (
+        "new session", "something new", "new topic", "different topic",
+        "start over", "start fresh", "start new", "new subject",
+        "something else", "different subject", "new syllabus",
+    )
+
+    _BEGIN_ONBOARDING_TOOL = {
+        "type": "function",
+        "function": {
+            "name": "begin_onboarding",
+            "description": (
+                "Start or resume a tutoring session. Call this when the student wants to "
+                "study, start a lesson, begin or resume a tutoring session, or continue "
+                "learning a subject."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
     }
-
-    @staticmethod
-    def _is_camera_trigger(text: str) -> bool:
-        t = text.lower()
-        return any(kw in t for kw in JarvisBot._CAMERA_TRIGGERS)
-
-    @staticmethod
-    def _is_study_trigger(text: str) -> bool:
-        t = text.lower()
-        return any(kw in t for kw in JarvisBot._STUDY_TRIGGERS)
 
     def _handle_study_input(self, user_text: str) -> Optional[str]:
         """
@@ -238,13 +248,28 @@ class JarvisBot:
         with self._study_state_lock:
             state = self._study_state
 
-        # ── in_session: LLM handles everything; sentinels caught in speaker loop ──
+        # ── in_session: intercept new-session intent before LLM sees it ──────────
         if state == "in_session":
+            text = user_text.lower()
+            if any(phrase in text for phrase in self._NEW_SESSION_PHRASES):
+                focus = (self._active_session or {}).get("focus", "our current topic")
+                with self._study_state_lock:
+                    self._study_state = "awaiting_session_redirect"
+                logger.info("📚 New-session intent detected in in_session — redirecting")
+                return (
+                    f"It sounds like you want to move on from our session on {focus}. "
+                    f"Would you like to save your progress and come back later, "
+                    f"or start something completely new?"
+                )
             return None
 
-        # ── awaiting_session_redirect: user chose to continue or take a break ──
+        # ── awaiting_session_redirect: user chose to continue, break, or start new ──
         if state == "awaiting_session_redirect":
             text = user_text.lower()
+            if any(phrase in text for phrase in self._NEW_SESSION_PHRASES):
+                self._pending_partial_save = True
+                self._pending_new_session = True
+                return "Of course! I will save your progress here. Let us get you set up with something new."
             if any(w in text for w in ("end", "stop", "later", "done", "finish", "pause", "save", "break", "no")):
                 # Partial save — session stays in_progress so it can be resumed
                 self._pending_partial_save = True
@@ -338,7 +363,8 @@ class JarvisBot:
                     self._study_state = "normal"
                 return "Sorry, I had trouble creating your study plan. Please try again."
 
-            self.study_session_manager.mark_syllabus_processed(self._pending_syllabus_path)
+            if self._pending_syllabus_path:
+                self.study_session_manager.mark_syllabus_processed(self._pending_syllabus_path)
             session = self.study_session_manager.get_next_session()
             self.study_session_manager.mark_session_in_progress(session["session_id"])
             with self._study_state_lock:
@@ -387,11 +413,25 @@ class JarvisBot:
                 )
             return self._process_syllabus_file(syllabus_path)
 
-        # ── normal: only act on a study trigger ──
-        if not self._is_study_trigger(user_text):
-            return None
+        # ── normal: study session start handled via begin_onboarding tool call ──
+        return None
 
-        # Resume an in-progress or not-yet-started session
+    def _process_syllabus_file(self, file_path: str) -> str:
+        """Queue syllabus extraction as a synthetic turn and return an interim response."""
+        with self._study_state_lock:
+            self._pending_syllabus_path = file_path
+            self._study_state = "extracting_syllabus"
+        self._request_queue.put("__EXTRACT_SYLLABUS__")
+        return "I found a syllabus file! Let me read through it, one moment."
+
+    def _execute_begin_onboarding(self) -> str:
+        """
+        Execute the begin_onboarding tool call.
+
+        Resumes the active session, generates the next deeper session, or starts
+        fresh onboarding — same routing logic as the old _is_study_trigger path.
+        Returns the spoken response directly; no second LLM call needed.
+        """
         session = self.study_session_manager.get_next_session()
         if session:
             self.study_session_manager.mark_session_in_progress(session["session_id"])
@@ -405,14 +445,12 @@ class JarvisBot:
                 f"{session.get('focus', 'your topic')}. Ready to begin?"
             )
 
-        # All prior sessions done — generate a deeper one on demand
         if self.study_session_manager.backend.has_any_plan():
             with self._study_state_lock:
                 self._study_state = "generating_next_session"
             self._request_queue.put("__GENERATE_NEXT_SESSION__")
             return "Great work so far! Let me put together the next deeper session for you. One moment."
 
-        # No plan yet — need a syllabus
         syllabus_path = self.study_session_manager.get_new_syllabus_file()
         if not syllabus_path:
             with self._study_state_lock:
@@ -420,19 +458,11 @@ class JarvisBot:
             return (
                 "I would love to help you study! I do not have a syllabus yet. "
                 "Please put your syllabus file in the syllabus folder "
-                "and say start study session again when it is ready. "
+                "and let me know when it is ready. "
                 "I can read text files, images, and PDFs."
             )
 
         return self._process_syllabus_file(syllabus_path)
-
-    def _process_syllabus_file(self, file_path: str) -> str:
-        """Queue syllabus extraction as a synthetic turn and return an interim response."""
-        with self._study_state_lock:
-            self._pending_syllabus_path = file_path
-            self._study_state = "extracting_syllabus"
-        self._request_queue.put("__EXTRACT_SYLLABUS__")
-        return "I found a syllabus file! Let me read through it, one moment."
 
     def _listener_loop(self, continuous_vad, request_queue):
         """Producer: Always listening, detecting interruptions in real-time.
@@ -538,44 +568,7 @@ class JarvisBot:
                         self._last_bot_response = final_text
                         continuous_vad.reset_idle_timer()
                     else:
-                        # ── Camera Vision ──────────────────────────────────────
-                        if self._is_camera_trigger(user_text):
-                            if self.face:
-                                self.face.start_scanning()
-                            try:
-                                saved_path = self.camera.capture_and_save()
-                                logger.info(f"📷 Image saved to {saved_path}")
-
-                                import base64 as _b64
-                                with open(saved_path, "rb") as _f:
-                                    data_url = f"data:image/jpeg;base64,{_b64.b64encode(_f.read()).decode()}"
-
-                                try:
-                                    extracted = self.llm_client.extract_image_content(data_url)
-                                    continuous_vad.reset_idle_timer()
-                                    combined = f"{user_text}\n\n[Scanned homework content:\n{extracted}]"
-                                    anonymized_text = self.privacy_manager.anonymize(combined)
-                                    logger.info("📷 Image extracted and stored as text")
-                                except Exception as extract_err:
-                                    logger.error(f"📷 Image extraction failed: {extract_err}")
-                                    if self.face:
-                                        self.face.start_talking()
-                                    error_audio = self.tts_client.synthesize_to_audio(
-                                        "Sorry, I had trouble reading the image. Please try again."
-                                    )
-                                    self.audio_player.start_streaming(output_device_index=output_device_index)
-                                    self.audio_player.queue_audio(error_audio)
-                                    self.audio_player.stop_streaming(immediate=False)
-                                    if self.face:
-                                        self.face.start_idle()
-                                    continue
-                            except Exception as cam_err:
-                                logger.error(f"📷 Camera failed to capture: {cam_err} — falling back to text-only")
-                                combined = f"{user_text}\n\nCamera is not working, please talk to me!"
-                                anonymized_text = self.privacy_manager.anonymize(combined)
-                        else:
-                            anonymized_text = self.privacy_manager.anonymize(user_text)
-
+                        anonymized_text = self.privacy_manager.anonymize(user_text)
                         allowed, refusal_msg = self.guardrails.check_input(anonymized_text)
                         continuous_vad.reset_idle_timer()
 
@@ -586,10 +579,69 @@ class JarvisBot:
                             if self.face:
                                 self.face.start_thinking()
                             response_chunks = []
-                            for chunk in self.llm_client.generate_response_stream(messages):
+                            tool_fired: Optional[ToolCall] = None
+
+                            # ── Tool-aware stream — LLM decides which tool to call ──
+                            _tools = [self._CAMERA_TOOL, self._BEGIN_ONBOARDING_TOOL]
+                            for item in self.llm_client.generate_response_stream_with_tools(
+                                messages, _tools
+                            ):
+                                if isinstance(item, ToolCall):
+                                    tool_fired = item
+                                    logger.info("🔧 Tool call: %s (id=%s)", tool_fired.name, tool_fired.call_id)
+                                    break
                                 if self._interruption_event.is_set():
                                     break
-                                response_chunks.append(chunk)
+                                response_chunks.append(item)
+
+                            if not tool_fired:
+                                logger.info("🔧 No tool called — LLM responded with text")
+
+                            if tool_fired and tool_fired.name == "begin_onboarding":
+                                logger.info("📚 Executing begin_onboarding (study_state=%s)", self._study_state)
+                                response_chunks = [self._execute_begin_onboarding()]
+                                logger.info("📚 begin_onboarding complete → study_state=%s", self._study_state)
+
+                            # ── Execute camera tool if requested ──────────────────
+                            elif tool_fired and tool_fired.name == "capture_photo":
+                                logger.info("📷 Executing capture_photo")
+                                if self.face:
+                                    self.face.start_scanning()
+                                try:
+                                    saved_path = self.camera.capture_and_save()
+                                    logger.info("📷 Image saved to %s", saved_path)
+                                    import base64 as _b64
+                                    with open(saved_path, "rb") as _f:
+                                        data_url = f"data:image/jpeg;base64,{_b64.b64encode(_f.read()).decode()}"
+                                    extracted = self.llm_client.extract_image_content(data_url)
+                                    continuous_vad.reset_idle_timer()
+                                    logger.info("📷 Image extracted (%d chars) — sending to LLM", len(extracted))
+                                    tool_messages = messages + [
+                                        {
+                                            "role": "assistant",
+                                            "content": None,
+                                            "tool_calls": [{
+                                                "id": tool_fired.call_id,
+                                                "type": "function",
+                                                "function": {"name": "capture_photo", "arguments": "{}"},
+                                            }],
+                                        },
+                                        {
+                                            "role": "tool",
+                                            "tool_call_id": tool_fired.call_id,
+                                            "content": extracted,
+                                        },
+                                    ]
+                                    if self.face:
+                                        self.face.start_thinking()
+                                    for chunk in self.llm_client.generate_response_stream(tool_messages):
+                                        if self._interruption_event.is_set():
+                                            break
+                                        response_chunks.append(chunk)
+                                    logger.info("📷 capture_photo complete — LLM follow-up streamed")
+                                except Exception as cam_err:
+                                    logger.error("📷 Camera tool failed: %s", cam_err)
+                                    response_chunks = ["Sorry, I had trouble with the camera. Please try again."]
 
                             if self._interruption_event.is_set():
                                 partial = "".join(response_chunks)
@@ -615,7 +667,8 @@ class JarvisBot:
                                 full_response = (
                                     f"That seems to be outside our session on {focus}. "
                                     f"Would you like to continue the session, "
-                                    f"or save your progress and come back to it later?"
+                                    f"save your progress and come back later, "
+                                    f"or start something new?"
                                 )
                                 logger.info("📚 Off-topic tag detected — asking redirect question")
 
@@ -697,12 +750,38 @@ class JarvisBot:
                     # ── Partial save on break (session stays in_progress for later resume) ──
                     if self._pending_partial_save:
                         self._pending_partial_save = False
+                        start_new = self._pending_new_session
+                        self._pending_new_session = False
                         session_snapshot = self._active_session
                         messages_snapshot = self.conversation_manager.get_messages()
-                        with self._study_state_lock:
-                            self._active_session = None
-                            self._study_state = "normal"
-                            self.llm_client.system_prompt = self.llm_client._base_system_prompt
+                        if start_new:
+                            # Priority: new unprocessed file > saved source_text > ask for upload
+                            syllabus_path = self.study_session_manager.get_new_syllabus_file()
+                            source_text = (
+                                None if syllabus_path
+                                else self.study_session_manager.get_active_source_text()
+                            )
+                            with self._study_state_lock:
+                                self._active_session = None
+                                self.llm_client.system_prompt = self.llm_client._base_system_prompt
+                                if syllabus_path:
+                                    self._pending_syllabus_path = syllabus_path
+                                    self._study_state = "extracting_syllabus"
+                                elif source_text:
+                                    self._pending_syllabus_text = source_text
+                                    self._study_state = "identifying_topics"
+                                else:
+                                    self._study_state = "awaiting_syllabus"
+                            if syllabus_path:
+                                self._request_queue.put("__EXTRACT_SYLLABUS__")
+                            elif source_text:
+                                self._request_queue.put("__IDENTIFY_TOPICS__")
+                            logger.info("📚 New session onboarding triggered after partial save")
+                        else:
+                            with self._study_state_lock:
+                                self._active_session = None
+                                self._study_state = "normal"
+                                self.llm_client.system_prompt = self.llm_client._base_system_prompt
                         threading.Thread(
                             target=self.study_session_manager.save_session_progress,
                             args=(session_snapshot, messages_snapshot),
@@ -856,6 +935,7 @@ class JarvisBot:
                     self._diagnostic_questions = []
                     self._diagnostic_answers = []
                     self._diagnostic_index = 0
+                    self._pending_new_session = False
                     self._study_state = "normal"
             
             # 2. Stop VAD first — this closes the audio stream and unblocks the listener thread

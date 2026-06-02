@@ -5,9 +5,18 @@ Generates tutoring responses using Azure OpenAI with streaming output.
 
 import os
 import logging
-from typing import Iterator, List, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Iterator, List, Dict, Optional, Union
 from openai import AzureOpenAI
 from dotenv import load_dotenv
+
+
+@dataclass
+class ToolCall:
+    """Returned by generate_response_stream_with_tools when the model requests a function call."""
+    name: str
+    args: dict
+    call_id: str
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -113,6 +122,68 @@ class LLMClient:
             logger.error(f"Error generating response: {e}")
             raise
     
+    def generate_response_stream_with_tools(
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        temperature: float = 0.7,
+        max_tokens: int = 500,
+    ) -> Iterator[Union[str, ToolCall]]:
+        """
+        Streaming completion with tool support.
+
+        Yields text chunks as usual. If the model decides to call a tool instead
+        of producing text, yields a single ToolCall object and stops — the caller
+        must execute the tool and make a follow-up call for the final response.
+        """
+        import json as _json
+
+        full_messages = [{"role": "system", "content": self.system_prompt}] + messages
+        response = self.client.chat.completions.create(
+            model=self.deployment,
+            messages=full_messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+
+        tool_calls_acc: Dict[int, Dict] = {}
+
+        for chunk in response:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {"id": "", "name": "", "args": ""}
+                    if tc.id:
+                        tool_calls_acc[idx]["id"] += tc.id
+                    if tc.function and tc.function.name:
+                        tool_calls_acc[idx]["name"] += tc.function.name
+                    if tc.function and tc.function.arguments:
+                        tool_calls_acc[idx]["args"] += tc.function.arguments
+
+            if delta.content:
+                yield delta.content
+
+            if choice.finish_reason == "tool_calls":
+                for tc_data in tool_calls_acc.values():
+                    try:
+                        args = _json.loads(tc_data["args"]) if tc_data["args"] else {}
+                    except _json.JSONDecodeError:
+                        args = {}
+                    yield ToolCall(
+                        name=tc_data["name"],
+                        args=args,
+                        call_id=tc_data["id"],
+                    )
+
     def extract_image_content(self, image_url: str, max_tokens: int = 1000) -> str:
         """
         One-shot GPT-4V call to extract all image content as plain text.
