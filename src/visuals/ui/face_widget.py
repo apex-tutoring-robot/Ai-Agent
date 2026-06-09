@@ -20,8 +20,13 @@ class FaceWidget(QWidget):
         self.blink = 0.0
 
         self.faces = {}
-        for name in ["neutral", "thinking", "happy", "blinking"]:
-            self.faces[name] = self._load(name + ".png")
+        for name in ["neutral", "thinking", "happy", "blinking",
+                     "encouraging", "surprised", "explaining"]:
+            path = os.path.join(self.face_dir, name + ".png")
+            if os.path.exists(path):
+                self.faces[name] = self._load(name + ".png")
+            else:
+                self.faces[name] = None  # graceful fallback to neutral
 
         self.talk_frames = [self._load(f"talk{i}.png") for i in range(1, 6)]
 
@@ -46,20 +51,35 @@ class FaceWidget(QWidget):
             raise RuntimeError(f"Failed to load {path}")
         return cv2.resize(img, (600, 600))
 
-    def stop_talking(self):
-        self.emotion = "neutral"
-        self.is_talking = False
-
     def start_thinking(self):
         self.emotion = "thinking"
         self.is_talking = False
 
     def start_talking(self):
         self.is_talking = True
+        # Preserve expressive emotions as the base frame while mouth animates on top
+        if self.emotion not in ("encouraging", "explaining", "surprised", "happy"):
+            self.emotion = "neutral"
 
     def stop_talking(self):
         self.is_talking = False
         self.external_mouth_level = 0.0
+        # Only reset to neutral if not in a deliberate expressive state
+        if self.emotion not in ("encouraging", "explaining", "surprised",
+                                "thinking", "happy"):
+            self.emotion = "neutral"
+
+    def start_encouraging(self):
+        self.emotion = "encouraging"
+        self.is_talking = False
+
+    def start_surprised(self):
+        self.emotion = "surprised"
+        self.is_talking = False
+
+    def start_explaining(self):
+        self.emotion = "explaining"
+        self.is_talking = False
 
     def push_mouth_level(self, level: float):
         self.external_mouth_level = float(level)
@@ -92,12 +112,15 @@ class FaceWidget(QWidget):
             idx = np.clip(idx, 0, len(self.talk_frames) - 1)
             frame = self.talk_frames[idx].copy()
         else:
-            frame = self.faces[self.emotion].copy()
+            face_img = self.faces.get(self.emotion) or self.faces["neutral"]
+            frame = face_img.copy()
 
         self._blink_update()
 
         if self.blink > 0.7:
-            frame = self.faces["blinking"].copy()
+            blink_img = self.faces.get("blinking")
+            if blink_img is not None:
+                frame = blink_img.copy()
 
         return frame
 

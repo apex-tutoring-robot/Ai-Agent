@@ -1,4 +1,34 @@
 import os
+
+# ── Qt / cv2 plugin conflict fix ──────────────────────────────────────────────
+# cv2 (OpenCV) ships its own bundled Qt and registers its plugin path via
+# QT_QPA_PLATFORM_PLUGIN_PATH. This causes PyQt5 to load cv2's incompatible
+# xcb plugin instead of the system one, aborting at startup on Raspberry Pi.
+# We must clear / override these env vars BEFORE any cv2 or Qt import occurs.
+import sys as _sys
+
+# 1. Point Qt at the system PyQt5 plugins, not cv2's bundled ones.
+import sysconfig as _sc
+_pyqt5_plugins = os.path.join(
+    _sc.get_path("platlib"), "PyQt5", "Qt5", "plugins"
+)
+if os.path.isdir(_pyqt5_plugins):
+    os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = _pyqt5_plugins
+
+# 2. On a physical display with no compositor, eglfs or linuxfb are more
+#    stable than xcb on Pi 4/5.  Let xcb stay as the default when DISPLAY
+#    is set (X11 session), otherwise force eglfs for direct framebuffer.
+#    You can override this with QT_QPA_PLATFORM=xcb in your .env if needed.
+if not os.environ.get("QT_QPA_PLATFORM"):
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    else:
+        os.environ["QT_QPA_PLATFORM"] = "eglfs"
+
+# 3. Suppress Qt debug noise that pollutes logs.
+os.environ.setdefault("QT_LOGGING_RULES", "*.debug=false;qt.qpa.*=false")
+# ──────────────────────────────────────────────────────────────────────────────
+
 # Allow the OS to use its default display and QT backend, rather than hardcoding.
 
 import threading
@@ -1099,10 +1129,17 @@ def main():
         logger.info("Running headless mode")
 
     # -----------------------------
-    # QT APP (NEW)
+    # QT APP
     # -----------------------------
     if face_enabled:
-        app = QApplication(sys.argv)
+        # QApplication MUST be the first Qt object — before UISignals, MainWindow,
+        # or any object that inherits QObject (including JarvisBot's PyAudio threads).
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        # Hide the mouse cursor for kiosk/touchscreen deployments
+        # (remove this line if you want a visible cursor)
+        # from PyQt5.QtCore import Qt as _Qt
+        # app.setOverrideCursor(_Qt.BlankCursor)
 
         ui_signals = UISignals()
         window = MainWindow(ui_signals)

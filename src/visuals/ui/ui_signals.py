@@ -12,3 +12,8 @@ class UISignals(QObject):
     draw_actions = pyqtSignal(object)
     show_face_fullscreen = pyqtSignal()
     show_teaching_layout = pyqtSignal()
+
+    # Expression signals (3 faces: encouraging, surprised, explaining)
+    encouraging = pyqtSignal()
+    surprised = pyqtSignal()
+    explaining = pyqtSignal()

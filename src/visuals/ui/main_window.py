@@ -1,7 +1,6 @@
 import os
 import math
 from PyQt5.QtWidgets import QMainWindow
-
 from visuals.ui.face_widget import FaceWidget
 from visuals.ui.teaching_canvas import TeachingCanvas
 from visuals.ui.tutor_scene import TutorScene
@@ -12,28 +11,21 @@ class MainWindow(QMainWindow):
     def __init__(self, signals):
         super().__init__()
         self.signals = signals
-
         base_dir = os.path.dirname(__file__)
         face_dir = os.path.abspath(os.path.join(base_dir, "..", "faces"))
-
         self.face_widget = FaceWidget(face_dir)
         self.canvas = TeachingCanvas()
         self.canvas.clear_canvas()
-
         self.scene = TutorScene(self.face_widget, self.canvas)
         self.view = TutorView(self.scene)
-
         self.signals.show_face_fullscreen.connect(self.scene.show_face_fullscreen)
         self.signals.show_teaching_layout.connect(self.scene.show_teaching_layout)
-
         self.setCentralWidget(self.view)
         self.setWindowTitle("CHIPPY AI Tutor")
         self.resize(1280, 720)
-
         self._connect_signals()
-        # draw_actions is handled by canvas directly (single connection)
+        # draw_actions handled by canvas directly (single connection)
         self.signals.draw_actions.connect(self.canvas.handle_draw_actions)
-
         self.show_idle_mode()
 
     def _connect_signals(self):
@@ -46,11 +38,18 @@ class MainWindow(QMainWindow):
         self.signals.stop_talking.connect(self.face_widget.stop_talking)
         self.signals.mouth_level.connect(self.face_widget.push_mouth_level)
 
+        # Expression signals
+        self.signals.encouraging.connect(self.face_widget.start_encouraging)
+        self.signals.surprised.connect(self.face_widget.start_surprised)
+        self.signals.explaining.connect(self.face_widget.start_explaining)
+
     def show_idle_mode(self):
         self.face_widget.stop_talking()
+        self.face_widget.emotion = "neutral"
 
     def show_listening_mode(self):
         self.face_widget.stop_talking()
+        self.face_widget.emotion = "neutral"
 
     def show_thinking_mode(self):
         self.face_widget.start_thinking()

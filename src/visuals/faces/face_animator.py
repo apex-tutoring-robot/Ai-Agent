@@ -22,8 +22,13 @@ class FaceAnimator:
 
         # Load images
         self.faces = {}
-        for name in ["neutral", "thinking", "happy", "blinking"]:
-            self.faces[name] = self._load(name + ".png")
+        for name in ["neutral", "thinking", "happy", "blinking",
+                     "encouraging", "surprised", "explaining"]:
+            path = os.path.join(self.face_dir, name + ".png")
+            if os.path.exists(path):
+                self.faces[name] = self._load(name + ".png")
+            else:
+                self.faces[name] = None
 
         self.talk_frames = [self._load(f"talk{i}.png") for i in range(1, 6)]
 
@@ -48,10 +53,6 @@ class FaceAnimator:
     # Public API
     # --------------------------------------------------
 
-    def stop_talking(self):
-        self.emotion = "neutral"
-        self.is_talking = False
-
     def start_thinking(self):
         self.emotion = "thinking"
         self.is_talking = False
@@ -61,7 +62,19 @@ class FaceAnimator:
 
     def stop_talking(self):
         self.is_talking = False
-        self.external_mouth_level = 0.0 # immediately decay toward closed
+        self.external_mouth_level = 0.0
+
+    def start_encouraging(self):
+        self.emotion = "encouraging"
+        self.is_talking = False
+
+    def start_surprised(self):
+        self.emotion = "surprised"
+        self.is_talking = False
+
+    def start_explaining(self):
+        self.emotion = "explaining"
+        self.is_talking = False
 
     def shutdown(self):
         self.running = False
@@ -114,12 +127,15 @@ class FaceAnimator:
             idx = np.clip(idx, 0, len(self.talk_frames) - 1)
             frame = self.talk_frames[idx].copy()
         else:
-            frame = self.faces[self.emotion].copy()
+            face_img = self.faces.get(self.emotion) or self.faces["neutral"]
+            frame = face_img.copy()
 
         self._blink_update()
 
         if self.blink > 0.7:
-            frame = self.faces["blinking"].copy()
+            blink_img = self.faces.get("blinking")
+            if blink_img is not None:
+                frame = blink_img.copy()
 
 
         return cv2.resize(frame, (1280, 720))
