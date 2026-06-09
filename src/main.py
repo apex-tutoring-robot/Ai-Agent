@@ -1043,88 +1043,50 @@ class JarvisBot:
         logger.info("Jarvis shutdown complete. Goodbye! 👋\n")
 
 def main():
-    import os
-
-    # ── Display configuration ──────────────────────────────────────────────────
-    # FACE_ENABLED=true          → show face animation
-    # FACE_ENABLED=false         → headless, no GUI (default when DISPLAY not set)
-    #
-    # DISPLAY_BACKEND=physical   → HDMI monitor          (DISPLAY=:0)
-    # DISPLAY_BACKEND=vnc        → TigerVNC session      (DISPLAY=:1)
-    # DISPLAY_BACKEND=auto       → pick first available X11 socket (:1 then :0)
-    #
-    # You can also skip DISPLAY_BACKEND and set DISPLAY directly, e.g. DISPLAY=:0
-    # ──────────────────────────────────────────────────────────────────────────
+    # FACE_ENABLED=true/false to force; otherwise auto-detect via Wayland socket.
+    # On Raspberry Pi OS with labwc the socket is at /run/user/<uid>/wayland-0.
+    # wayvnc mirrors this Wayland session to VNC viewers — no separate X11 needed.
     face_env = os.getenv("FACE_ENABLED", "").strip().lower()
     if face_env in ("true", "1", "yes"):
         face_enabled = True
     elif face_env in ("false", "0", "no"):
         face_enabled = False
     else:
-        face_enabled = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        uid = os.getuid()
+        face_enabled = any(
+            os.path.exists(f"/run/user/{uid}/{wl}")
+            for wl in ("wayland-0", "wayland-1")
+        )
 
     if face_enabled:
-        # DISPLAY_BACKEND always wins when explicitly set — it overrides whatever
-        # DISPLAY was loaded from .env so that a single knob controls the display.
-        # Priority: DISPLAY_BACKEND (explicit) > DISPLAY (env/shell) > default :0
-        backend = os.getenv("DISPLAY_BACKEND", "").strip().lower()
-
-        if backend == "vnc":
-            os.environ["DISPLAY"] = ":1"
-        elif backend == "physical":
-            os.environ["DISPLAY"] = ":0"
-        elif backend == "auto":
-            # Pick the first X11 socket that actually exists
-            for candidate in (":1", ":0"):
-                if os.path.exists(f"/tmp/.X11-unix/X{candidate[1:]}"):
-                    os.environ["DISPLAY"] = candidate
+        if not os.environ.get("WAYLAND_DISPLAY"):
+            uid = os.getuid()
+            for _wl in ("wayland-0", "wayland-1"):
+                if os.path.exists(f"/run/user/{uid}/{_wl}"):
+                    os.environ["WAYLAND_DISPLAY"] = _wl
                     break
-            else:
-                os.environ["DISPLAY"] = ":0"
-        elif not os.environ.get("DISPLAY"):
-            # No DISPLAY_BACKEND and no DISPLAY — last resort default
-            os.environ["DISPLAY"] = ":0"
 
-        # Ensure X authentication is available.
-        # TigerVNC stores its cookie in the same ~/.Xauthority file as the
-        # physical display, just under a different display entry (:1 vs :0).
-        if not os.environ.get("XAUTHORITY"):
-            xauth_path = os.path.expanduser("~/.Xauthority")
-            if os.path.exists(xauth_path):
-                os.environ["XAUTHORITY"] = xauth_path
-
-        display = os.environ.get("DISPLAY", "")
-        display_num = display.lstrip(":").split(".")[0]
-        socket_path = f"/tmp/.X11-unix/X{display_num}"
-
-        if not os.path.exists(socket_path):
-            logger.warning("Display not available, switching to headless")
-            face_enabled = False
+        if os.environ.get("WAYLAND_DISPLAY"):
+            if not os.environ.get("QT_QPA_PLATFORM"):
+                os.environ["QT_QPA_PLATFORM"] = "wayland"
+            logger.info(f"Running UI on Wayland ({os.environ['WAYLAND_DISPLAY']})")
         else:
-            logger.info(f"Running UI on display {display}")
+            logger.warning("Wayland compositor not found, switching to headless")
+            face_enabled = False
 
-    else:
+    if not face_enabled:
         logger.info("Running headless mode")
 
-    # -----------------------------
-    # QT APP (NEW)
-    # -----------------------------
     if face_enabled:
         app = QApplication(sys.argv)
-
         ui_signals = UISignals()
         window = MainWindow(ui_signals)
         window.show()
-
         jarvis = JarvisBot(ui_signals=ui_signals)
-
         worker = threading.Thread(target=jarvis.run, daemon=True)
         worker.start()
-
         sys.exit(app.exec_())
-
     else:
-        # Headless fallback
         jarvis = JarvisBot(ui_signals=None)
         jarvis.run()
 
