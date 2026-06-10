@@ -14,7 +14,6 @@ from typing import Generator, Optional
 from dotenv import load_dotenv
 import webrtcvad
 import pyaudio
-import traceback
 
 # Must be imported before PyAudio initialises to suppress ALSA noise
 from audio import suppress_alsa  # noqa: F401
@@ -26,30 +25,13 @@ logger = logging.getLogger(__name__)
 try:
     from utils import imp_shim
     imp_shim.install_shim()
-    import speexdsp
-    from speexdsp import EchoCanceller
-    try:
-        from speexdsp import Preprocessor
-        HAS_PREPROCESSOR = True
-    except ImportError:
-        logger.warning("⚠️  SpeexDSP 'Preprocessor' not found - Noise Suppression will be disabled")
-        HAS_PREPROCESSOR = False
-        Preprocessor = None
-    
-    HAS_SPEEX = True
+    from speexdsp import Preprocessor
+    HAS_PREPROCESSOR = True
+    logger.info("✅ SpeexDSP Preprocessor loaded (Denoise/AGC/Dereverb)")
 except Exception:
-    logger.warning("SpeexDSP import failed (AEC will be disabled):")
-    logger.warning(traceback.format_exc())
-    HAS_SPEEX = False
     HAS_PREPROCESSOR = False
-    EchoCanceller = None
     Preprocessor = None
-
-# Debug: Track if AEC is available
-if HAS_SPEEX:
-    logger.info(f"✅ SpeexDSP loaded (Preprocessor={'available' if HAS_PREPROCESSOR else 'unavailable'})")
-else:
-    logger.warning("⚠️  SpeexDSP NOT found - using Digital Ducking fallback for interruptions")
+    logger.warning("⚠️  SpeexDSP Preprocessor not found — noise suppression disabled")
 
 
 class ContinuousVADCapture:
@@ -121,8 +103,6 @@ class ContinuousVADCapture:
         self.speech_start_time = None  # When user starts speaking
         self.silence_detected_time = None  # When user stops speaking
         
-        self.echo_canceller = None
-
         # Real-time state from AudioPlayer
         self.player = player
         
@@ -140,24 +120,7 @@ class ContinuousVADCapture:
         # WebRTC AEC needs ~1-2s to converge on a new playback session.  Block
         # barge-in completely until then so the initial echo burst can't fire it.
         self._barge_in_grace_s = float(os.getenv('BARGE_IN_GRACE_S', '2.0'))
-        self.echo_canceller = None
         self.preprocessor = None
-
-        _speex_aec_enabled = os.getenv('ENABLE_SPEEX_AEC', 'true').lower() == 'true'
-        if HAS_SPEEX and _speex_aec_enabled:
-            try:
-                # 4096 taps = 256ms of echo tail — better for reflective Pi rooms.
-                # EchoCanceller_create is the SWIG factory (direct class constructor is abstract).
-                if hasattr(speexdsp, 'EchoCanceller_create'):
-                    self.echo_canceller = speexdsp.EchoCanceller_create(self.chunk_size, 4096, self.sample_rate)
-                else:
-                    self.echo_canceller = EchoCanceller(self.chunk_size, 4096, self.sample_rate)
-                logger.info(f"✅ Speex Echo Canceller initialized (frame={self.chunk_size}, tail=4096, rate={self.sample_rate})")
-            except Exception as e:
-                logger.warning(f"Failed to init Speex Echo Canceller: {e}")
-                self.echo_canceller = None
-        elif not _speex_aec_enabled:
-            logger.info("ℹ️  Speex AEC disabled (ENABLE_SPEEX_AEC=false) — relying on PipeWire AEC")
 
         enable_ns = os.getenv('ENABLE_SPEEX_NOISE_SUPPRESSION', 'true').lower() == 'true'
         if enable_ns and HAS_PREPROCESSOR:
@@ -696,18 +659,7 @@ class ContinuousVADCapture:
                     
                     current_threshold = playing_threshold if is_bot_playing else base_threshold
                     
-                    # ---------------------------------------------------------
-                    # FALLBACK: Digital Ducking
-                    # If we don't have hardware AEC, we digitally lower the 
-                    # microphone volume when the bot is speaking. This helps
-                    # the VAD ignore the echo of the bot's own voice.
-                    # ---------------------------------------------------------
                     vad_chunk = audio_chunk
-                    if not (HAS_SPEEX and self.echo_canceller) and is_bot_playing:
-                        audio_array = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32)
-                        audio_array *= 0.1  # Ducking fallback when no software AEC
-                        vad_chunk = audio_array.astype(np.int16).tobytes()
-                    
                     is_speech = self.vad.is_speech(vad_chunk, self.sample_rate)
                     
                     if is_speech:
@@ -717,27 +669,15 @@ class ContinuousVADCapture:
                         samples = np.frombuffer(vad_chunk, dtype=np.int16)
                         rms = np.sqrt(np.mean(samples.astype(np.float32)**2))
                         
-                        # Dynamic Energy Threshold: 
-                        # If bot is playing, we need slightly higher signal to cut through residual echo.
-                        # If AEC is active, we only need 1.2x. If ducking (no AEC), we need 1.5x.
-                        has_aec = (HAS_SPEEX and self.echo_canceller)
-                        multiplier = 1.2 if has_aec else 1.5
-                        current_energy_req = energy_threshold_base * (multiplier if is_bot_playing else 1.0)
+                        current_energy_req = energy_threshold_base * (1.2 if is_bot_playing else 1.0)
                         
                         if rms < current_energy_req:
                             consecutive_speech_chunks = 0
                         
                         if consecutive_speech_chunks >= current_threshold:
                             logger.info(f"🎤 Interruption detected! (After {consecutive_speech_chunks} chunks, threshold={current_threshold}, RMS={rms:.0f})")
-                            
-                            # FINAL SAFETY: If we are ducking echo (no AEC), ensure the handoff 
-                            # is actually loud enough to be human speech, not just echo leakage.
-                            if is_bot_playing and not (HAS_SPEEX and self.echo_canceller) and rms < 1200:
-                                logger.warning(f"🔇 Interruption rejected - RMS {rms:.0f} too low for non-AEC handoff")
-                                consecutive_speech_chunks = 0
-                                continue
 
-                            # Stop monitoring IMMEDIATELY 
+                            # Stop monitoring IMMEDIATELY
                             self._is_monitoring = False
                             
                             # CATCH THE SPEECH: Save the pre-buffer and current segment
