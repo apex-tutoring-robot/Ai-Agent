@@ -346,9 +346,9 @@ class JarvisBot:
           L3 – Echo cooldown after playback ends (500ms grace period)
         """
         logger.info("📡 Listener worker started")
-        ECHO_COOLDOWN_S = 0.5          # Ignore speech for 500ms after playback ends
-        SIMILARITY_THRESHOLD = 0.55    # Reject if >55% word overlap with bot's last response
-        SIMILARITY_WINDOW_S = 3.0      # Only apply similarity filter within 3s of playback ending
+        ECHO_COOLDOWN_S = float(os.getenv('ECHO_COOLDOWN_S', 0.5))
+        SIMILARITY_THRESHOLD = float(os.getenv('ECHO_SIMILARITY_THRESHOLD', 0.55))
+        SIMILARITY_WINDOW_S = float(os.getenv('ECHO_SIMILARITY_WINDOW_S', 3.0))
 
         try:
             # Create a never-ending generator for STT
