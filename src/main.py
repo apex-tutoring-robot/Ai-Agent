@@ -620,12 +620,11 @@ class JarvisBot:
         except Exception as e:
             logger.warning(f"Error searching for PipeWire/PulseAudio device: {e}")
 
-        fallback = int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 1))
         logger.warning(
-            f"⚠️  PipeWire/PulseAudio ALSA device not found — falling back to hw index {fallback}. "
+            "⚠️  PipeWire/PulseAudio ALSA device not found — falling back to hw index 1. "
             "Install libasound2-plugins and restart PipeWire to enable AEC."
         )
-        return fallback
+        return 1
 
     def _get_input_device_index(self, pa, pulse_index: int) -> int:
         """Return the PyAudio input device index to use for the VAD mic stream.
