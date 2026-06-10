@@ -133,9 +133,13 @@ class ContinuousVADCapture:
         
         # ── Playback-aware gating (mute-the-pipe) ──
         self._is_bot_playing = False           # Set by main.py via set_playback_state()
+        self._playback_start_time = 0.0        # Reset each time playback starts
         self._barge_in_event = None            # threading.Event from JarvisBot (set on barge-in)
         self._barge_in_energy_threshold = int(os.getenv('BARGE_IN_ENERGY_THRESHOLD', '1500'))
         self._barge_in_consecutive_needed = int(os.getenv('BARGE_IN_CHUNKS_NEEDED', '3'))
+        # WebRTC AEC needs ~1-2s to converge on a new playback session.  Block
+        # barge-in completely until then so the initial echo burst can't fire it.
+        self._barge_in_grace_s = float(os.getenv('BARGE_IN_GRACE_S', '2.0'))
         self.echo_canceller = None
         self.preprocessor = None
 
@@ -169,13 +173,14 @@ class ContinuousVADCapture:
             
     def set_playback_state(self, is_playing: bool) -> None:
         """Called by main.py to inform VAD whether the bot is currently playing audio.
-        
+
         When is_playing=True, always_streaming will feed silence to STT
         instead of mic audio, preventing the bot from hearing itself.
         Barge-in detection runs separately and can open the gate.
         """
         self._is_bot_playing = is_playing
         if is_playing:
+            self._playback_start_time = time.time()
             logger.info("🔇 VAD: Playback started — muting STT pipe (silence gate ON)")
         else:
             logger.info("🔊 VAD: Playback ended — STT pipe open")
@@ -548,10 +553,17 @@ class ContinuousVADCapture:
                     # Bot speaking counts as activity — keep conversation alive
                     self.last_speech_time = time.time()
 
+                    # Grace period: AEC needs time to converge on a new playback
+                    # session.  Suppress barge-in completely until it has.
+                    elapsed = time.time() - self._playback_start_time
+                    if elapsed < self._barge_in_grace_s:
+                        yield silence_chunk
+                        continue
+
                     # Measure mic energy AFTER AEC to detect user speech above residual echo
                     mic_samples = np.frombuffer(audio_chunk, dtype=np.int16)
                     rms = np.sqrt(np.mean(mic_samples.astype(np.float32)**2))
-                    
+
                     if rms > _barge_in_peak_rms:
                         _barge_in_peak_rms = rms
                     _now = time.time()
