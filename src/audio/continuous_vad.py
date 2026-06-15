@@ -282,12 +282,7 @@ class ContinuousVADCapture:
         """
         try:
             # Only create stream if not already provided
-            # Only create stream if not already provided
             if not self.audio_stream:
-                # Cleanup any existing resources first
-                if self.audio_stream:
-                    self.cleanup()
-                
                 self.ensure_stream_open()
             else:
                 logger.info("♻️  Reusing existing audio stream from wake word detector")

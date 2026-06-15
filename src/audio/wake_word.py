@@ -23,32 +23,26 @@ class WakeWordDetector:
     
     def __init__(
         self,
-        model_path: Optional[str] = None,
         model_name: Optional[str] = None,
         threshold: float = None,
         vad_threshold: float = None,
-        enable_speex_noise_suppression: bool = True,
         input_device_index: Optional[int] = None,
         pa: Optional[pyaudio.PyAudio] = None
     ):
         """
         Initialize wake word detector.
-        
+
         Args:
-            model_path: Path to custom .tflite or .onnx model file (optional)
             model_name: Name of pre-trained model to use (e.g., 'alexa', 'hey_jarvis')
-                       If not specified and model_path is None, loads all pre-trained models
+                       If not specified, loads all pre-trained models
             threshold: Detection threshold 0.0-1.0 (default: 0.5, lower = more sensitive)
             vad_threshold: VAD threshold 0.0-1.0 for noise reduction (default: 0, disabled)
-            enable_speex_noise_suppression: Enable Speex noise suppression (Raspberry Pi)
-            input_device_index: Index of audio input device
+            input_device_index: PyAudio input device index (None = system default)
         """
-        self.model_path = model_path or os.getenv('WAKE_WORD_MODEL_PATH', '')
         self.model_name = model_name or os.getenv('WAKE_WORD_MODEL', '')
         self.threshold = threshold if threshold is not None else float(os.getenv('WAKE_WORD_THRESHOLD', 0.5))
         self.vad_threshold = vad_threshold if vad_threshold is not None else float(os.getenv('WAKE_WORD_VAD_THRESHOLD', 0))
-        self.enable_speex = False
-        self.input_device_index = None
+        self.input_device_index = input_device_index
         
         self.model = None
         self.audio_stream = None
@@ -60,14 +54,7 @@ class WakeWordDetector:
         self.chunk_size = 1280  # 80ms frames (optimal for openWakeWord)
         
         logger.info(f"Wake word detector initialized: model='{self.model_name or 'all'}', "
-                   f"threshold={self.threshold}, vad={self.vad_threshold}, speex={self.enable_speex}")
-                   
-        """
-        Start listening for wake word.
-        
-        Args:
-            callback: Function to call when wake word is detected
-        """
+                   f"threshold={self.threshold}, vad={self.vad_threshold}")
     
     def start(self, callback: Callable[[], None]) -> None:
         """

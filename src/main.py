@@ -7,7 +7,6 @@ import queue
 from queue import Queue
 from typing import Optional
 from dotenv import load_dotenv
-import numpy as np
 from PyQt5.QtWidgets import QApplication
 import sys
 
