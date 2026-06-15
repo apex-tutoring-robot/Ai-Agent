@@ -199,8 +199,7 @@ class GuardrailsManager:
         is always allowed — we only gate what the image actually shows.
 
         Fast path: keyword scan for obvious jailbreak/harmful content (no LLM).
-        LLM path: single self_check_input call to enforce the math/science-only
-        allowlist.
+        LLM path: single self_check_input call to enforce the safety
 
         Returns:
             (allowed, refusal_message)

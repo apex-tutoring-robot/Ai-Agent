@@ -397,11 +397,12 @@ class JarvisBot:
                 # ── FINISHED UTTERANCE - Queue for processing ──
                 if is_final:
                     logger.info(f"📌 User finalized: '{text}'")
+                    was_barge_in = self._barge_in_detected.is_set()
                     self._interruption_event.clear()
                     self._barge_in_detected.clear()
                     if self.ui_signals:
                         self.ui_signals.listening.emit()
-                    request_queue.put(text)
+                    request_queue.put((text, was_barge_in))
 
             logger.info("📡 Listener worker stopped cleanly")
         except Exception as e:
@@ -415,12 +416,14 @@ class JarvisBot:
             while self._conversation_active.is_set():
                 # Wait for next user request
                 try:
-                    user_text = self._request_queue.get(timeout=1.0)
+                    item = self._request_queue.get(timeout=1.0)
                 except queue.Empty:
                     continue
 
-                if user_text is None: # Termination sentinel
+                if item is None:  # Termination sentinel
                     break
+
+                user_text, was_barge_in = item if isinstance(item, tuple) else (item, False)
 
                 # Reset idle timer immediately so long camera/LLM processing doesn't trigger timeout
                 continuous_vad.reset_idle_timer()
@@ -443,6 +446,11 @@ class JarvisBot:
                             self._awaiting_name = True
                             final_text = "Hi there! I am Jarvis, your personal tutor. What is your name?"
                     elif self._awaiting_name:
+                        if was_barge_in:
+                            # Echo triggered while bot was asking for the name — discard.
+                            logger.info(f"🔇 Ignoring barge-in during name prompt: '{user_text}'")
+                            continuous_vad.reset_idle_timer()
+                            continue
                         name = self._extract_name(user_text)
                         set_user_name(name)
                         self._apply_user_name_to_prompt(name)
@@ -642,19 +650,42 @@ class JarvisBot:
             logger.error(f"Speaker loop error: {e}")
 
     def _get_pulse_device_index(self, pa) -> int:
-        """Find the index of the 'pulse' audio device."""
+        """Find the PipeWire/PulseAudio ALSA device index (pulse) for audio I/O."""
         try:
             for i in range(pa.get_device_count()):
                 info = pa.get_device_info_by_index(i)
-                if info and 'pulse' in info.get('name', '').lower():
-                    logger.info(f"✅ Found PulseAudio device at index {i}: {info['name']}")
+                name = info.get('name', '').lower() if info else ''
+                if 'pulse' in name or 'pipewire' in name:
+                    logger.info(f"✅ Found PipeWire/PulseAudio device at index {i}: {info['name']}")
                     return i
         except Exception as e:
-            logger.warning(f"Error searching for PulseAudio device: {e}")
+            logger.warning(f"Error searching for PipeWire/PulseAudio device: {e}")
 
-        fallback = int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 1))
-        logger.warning(f"⚠️  PulseAudio not found - falling back to index {fallback}")
-        return fallback
+        logger.warning(
+            "⚠️  PipeWire/PulseAudio ALSA device not found — falling back to hw index 1. "
+            "Install libasound2-plugins and restart PipeWire to enable AEC."
+        )
+        return 1
+
+    def _get_input_device_index(self, pa, pulse_index: int) -> int:
+        """Return the PyAudio input device index to use for the VAD mic stream.
+
+        When PipeWire AEC is active (pulse device found), input goes through the
+        pulse device so PipeWire routes it to echo-cancel-source.  If the user has
+        set AUDIO_INPUT_DEVICE_INDEX explicitly AND pulse is unavailable, honour
+        that env var as a direct hw fallback.
+        """
+        env_idx = os.getenv('AUDIO_INPUT_DEVICE_INDEX')
+        if pulse_index is not None:
+            # Pulse device found — always use it for input so AEC is in the path.
+            logger.info(f"🎤 Input routed through PipeWire (device {pulse_index}) — AEC active")
+            return pulse_index
+        if env_idx not in (None, ""):
+            idx = int(env_idx)
+            logger.info(f"🎤 Using AUDIO_INPUT_DEVICE_INDEX={idx} (no PipeWire, direct hw)")
+            return idx
+        logger.warning("🎤 No input device configured — using system default")
+        return None
 
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
@@ -688,14 +719,16 @@ class JarvisBot:
             # Enter continuous conversation mode
             idle_timeout = int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
 
-            # DYNAMICALLY FIND PULSE DEVICE
+            # Output goes to pulse (PipeWire routes to echo-cancel-sink → USB speaker).
+            # Input goes to pulse too (PipeWire routes from echo-cancel-source → AEC-processed ReSpeaker).
             pulse_index = self._get_pulse_device_index(self.pa)
+            input_index = self._get_input_device_index(self.pa, pulse_index)
 
             # Initialize VAD with dedicated INPUT stream
             continuous_vad = ContinuousVADCapture(
                 idle_timeout_seconds=idle_timeout,
                 pa=self.pa,
-                input_device_index=pulse_index,
+                input_device_index=input_index,
                 player=self.audio_player
             )
 

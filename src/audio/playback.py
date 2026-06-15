@@ -46,7 +46,7 @@ class AudioPlayer:
         """
         self.sample_rate = sample_rate  # Use 16000 to match Azure TTS
         self.channels = channels or int(os.getenv('CHANNELS', 1))
-        self.output_device_index = output_device_index or int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 1))
+        self.output_device_index = output_device_index
         self.on_level = on_level
         
         logger.info(f"AudioPlayer initialized: {self.sample_rate}Hz, {self.channels} channel(s), device {self.output_device_index}")

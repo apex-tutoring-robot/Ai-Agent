@@ -9,13 +9,11 @@ import time
 import os
 import logging
 from collections import deque
-import queue
 import threading
 from typing import Generator, Optional
 from dotenv import load_dotenv
 import webrtcvad
 import pyaudio
-import traceback
 
 # Must be imported before PyAudio initialises to suppress ALSA noise
 from audio import suppress_alsa  # noqa: F401
@@ -27,33 +25,13 @@ logger = logging.getLogger(__name__)
 try:
     from utils import imp_shim
     imp_shim.install_shim()
-    import speexdsp
-    from speexdsp import EchoCanceller
-    try:
-        from speexdsp import Preprocessor
-        HAS_PREPROCESSOR = True
-    except ImportError:
-        logger.warning("⚠️  SpeexDSP 'Preprocessor' not found - Noise Suppression will be disabled")
-        HAS_PREPROCESSOR = False
-        Preprocessor = None
-    
-    HAS_SPEEX = True
+    from speexdsp import Preprocessor
+    HAS_PREPROCESSOR = True
+    logger.info("✅ SpeexDSP Preprocessor loaded (Denoise/AGC/Dereverb)")
 except Exception:
-    logger.warning("SpeexDSP import failed (AEC will be disabled):")
-    logger.warning(traceback.format_exc())
-    HAS_SPEEX = False
     HAS_PREPROCESSOR = False
-    EchoCanceller = None
     Preprocessor = None
-
-# Debug: Track if AEC is available
-if HAS_SPEEX:
-    if HAS_PREPROCESSOR:
-        logger.info("✅ SpeexDSP loaded - AEC and Preprocessor available")
-    else:
-        logger.info("✅ SpeexDSP loaded - AEC active (Preprocessor/NS missing)")
-else:
-    logger.warning("⚠️  SpeexDSP NOT found - using Digital Ducking fallback for interruptions")
+    logger.warning("⚠️  SpeexDSP Preprocessor not found — noise suppression disabled")
 
 
 class ContinuousVADCapture:
@@ -125,10 +103,6 @@ class ContinuousVADCapture:
         self.speech_start_time = None  # When user starts speaking
         self.silence_detected_time = None  # When user stops speaking
         
-        self.echo_canceller = None
-        self.reference_queue = queue.Queue(maxsize=100)
-        self.reference_buffer = b"" # Temporary buffer for incomplete chunks
-        
         # Real-time state from AudioPlayer
         self.player = player
         
@@ -139,76 +113,37 @@ class ContinuousVADCapture:
         
         # ── Playback-aware gating (mute-the-pipe) ──
         self._is_bot_playing = False           # Set by main.py via set_playback_state()
+        self._playback_start_time = 0.0        # Reset each time playback starts
         self._barge_in_event = None            # threading.Event from JarvisBot (set on barge-in)
         self._barge_in_energy_threshold = int(os.getenv('BARGE_IN_ENERGY_THRESHOLD', '1500'))
         self._barge_in_consecutive_needed = int(os.getenv('BARGE_IN_CHUNKS_NEEDED', '3'))
-        # AEC Ring Buffer (Hardware-Aligned Reference Audio)
-        # 1-second circular buffer for reference audio
-        self.ref_ring_buffer = np.zeros(self.sample_rate, dtype=np.int16)
-        self.ref_ring_pos = 0
-        self.ref_ring_timestamp = 0.0 # DAC Time of the last sample in ring
-        self.last_reference_time = 0.0 # Wall-clock time of last reference update
-        self.ref_lock = threading.Lock()
-        self.echo_canceller = None
+        # WebRTC AEC needs ~1-2s to converge on a new playback session.  Block
+        # barge-in completely until then so the initial echo burst can't fire it.
+        self._barge_in_grace_s = float(os.getenv('BARGE_IN_GRACE_S', '2.0'))
         self.preprocessor = None
-        
-        # AEC Delay Compensation & Stabilization
-        self.mic_delay_buffer = deque(maxlen=int(os.getenv('AEC_DELAY_CHUNKS', '12')))
-        self._last_telemetry_time = 0
-        self._detected_lags = deque(maxlen=50) # Stable median
-        self._last_correlation_time = 0
-        self._aec_locked_offset = None # Permanent lock per session
-        
-        self.preprocessor = None
-        #if HAS_SPEEX:
-            # Speex echo canceller needs (frame_size, filter_length)
-            # frame_size must match chunk_size (320 for 20ms at 16kHz)
-            # filter_length is typically 2000-4000
-         #   try:
-               # 4096 taps = 256ms of tail length. Better for Pi rooms.
-          #     self.echo_canceller = EchoCanceller(self.chunk_size, 4096, self.sample_rate)
-           # except Exception as e:
-            #    if "No constructor defined" in str(e) or "abstract" in str(e).lower():
-             #       logger.info("ℹ️  Using EchoCanceller_create factory (SWIG abstract class workaround)")
-              #      import speexdsp
-               #     self.echo_canceller = speexdsp.EchoCanceller_create(self.chunk_size, 2048, self.sample_rate)
-                #else:
-                 #   raise
-            
-            # Initialize Preprocessor (Denoise + AGC)
-            # Control via env variable (default: True)
-            #enable_ns = os.getenv('ENABLE_SPEEX_NOISE_SUPPRESSION', 'true').lower() == 'true'
-            
-            #if enable_ns and HAS_PREPROCESSOR:
-             #   try:
-              #      self.preprocessor = Preprocessor(self.chunk_size, self.sample_rate)
-               #     self.preprocessor.denoise = True
-                #    self.preprocessor.agc = True
-                 #   self.preprocessor.dereverb = True
-                  #  self.preprocessor.agc_level = 8000
-                   # logger.info("✅ Speex Preprocessor (Denoise/AGC) initialized")
-                #except Exception as e:
-                 #   logger.warning(f"Failed to init Speex Preprocessor: {e}")
-            #elif enable_ns and not HAS_PREPROCESSOR:
-             #   logger.warning("ℹ️  Speex Preprocessor requested but not available in this version")
-            #else:
-             #   logger.info("ℹ️  Speex Preprocessor disabled via env var")
-            
-            #logger.info("✅ Speex Echo Canceller initialized")
-            
-    def on_audio_played(self, audio_data: bytes) -> None:
-        """Alias for provide_reference_audio to match AudioPlayer callback signature."""
-        self.provide_reference_audio(audio_data)
 
+        enable_ns = os.getenv('ENABLE_SPEEX_NOISE_SUPPRESSION', 'true').lower() == 'true'
+        if enable_ns and HAS_PREPROCESSOR:
+            try:
+                self.preprocessor = Preprocessor(self.chunk_size, self.sample_rate)
+                self.preprocessor.denoise = True
+                self.preprocessor.agc = True
+                self.preprocessor.dereverb = True
+                self.preprocessor.agc_level = 8000
+                logger.info("✅ Speex Preprocessor (Denoise/AGC/Dereverb) initialized")
+            except Exception as e:
+                logger.warning(f"Failed to init Speex Preprocessor: {e}")
+            
     def set_playback_state(self, is_playing: bool) -> None:
         """Called by main.py to inform VAD whether the bot is currently playing audio.
-        
+
         When is_playing=True, always_streaming will feed silence to STT
         instead of mic audio, preventing the bot from hearing itself.
         Barge-in detection runs separately and can open the gate.
         """
         self._is_bot_playing = is_playing
         if is_playing:
+            self._playback_start_time = time.time()
             logger.info("🔇 VAD: Playback started — muting STT pipe (silence gate ON)")
         else:
             logger.info("🔊 VAD: Playback ended — STT pipe open")
@@ -295,16 +230,6 @@ class ContinuousVADCapture:
                     audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
                     audio_chunk = audio_array.reshape(-1, 2)[:, 0].tobytes()
                 
-                # Apply Acoustic Echo Cancellation (AEC)
-                if HAS_SPEEX and self.echo_canceller:
-                    try:
-                        ref_chunk = self.reference_queue.get_nowait()
-                        audio_chunk = self.echo_canceller.run(audio_chunk, ref_chunk)
-                    except queue.Empty:
-                        pass
-                    except Exception as e:
-                        logger.warning(f"AEC Error in capture: {e}")
-
                 # Apply Speex Preprocessor (Denoise + AGC + Dereverb)
                 if self.preprocessor:
                     try:
@@ -449,34 +374,6 @@ class ContinuousVADCapture:
                     audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
                     audio_chunk = audio_array.reshape(-1, 2)[:, 0].tobytes()
                 
-                # Apply Acoustic Echo Cancellation (AEC)
-                # Ensure we scrub the bot's voice from the microphone input
-                if HAS_SPEEX and self.echo_canceller:
-                    try:
-                        # Try to get matching reference chunk
-                        ref_chunk = self.reference_queue.get_nowait()
-                        
-                        try:
-                            # Standard process(mic, ref) - confirmed via SpeexInspect
-                            audio_chunk = self.echo_canceller.process(audio_chunk, ref_chunk)
-                        except (AttributeError, Exception):
-                            # Fallback just in case
-                            audio_chunk = self.echo_canceller.run(audio_chunk, ref_chunk)
-                    except queue.Empty:
-                        pass
-                    except Exception as e:
-                        if not self._aec_debug_done:
-                            logger.error(f"AEC Error (Stream): {e}")
-                            self._aec_debug_done = True
-                        
-                        # Emergency Fallback to Ducking
-                        is_bot_playing = (self.player and hasattr(self.player, 'last_heartbeat') and 
-                                          time.time() - self.player.last_heartbeat < 0.25)
-                        if is_bot_playing:
-                            audio_np = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32)
-                            audio_np *= 0.1 
-                            audio_chunk = audio_np.astype(np.int16).tobytes()
-
                 # Apply Speex Preprocessor (Denoise + AGC + Dereverb)
                 if self.preprocessor:
                     try:
@@ -615,92 +512,24 @@ class ContinuousVADCapture:
                     audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
                     audio_chunk = audio_array.reshape(-1, 2)[:, 0].tobytes()
                 
-                # Apply AEC if enabled (always run AEC regardless of gate state)
-                if HAS_SPEEX and self.echo_canceller:
-                    try:
-                        # 1. Get current wall-clock timestamp (ADC time)
-                        adc_time = time.time()
-                        
-                        # 2. Add MIC chunk to its own delay buffer (lookahead for AEC)
-                        self.mic_delay_buffer.append(audio_chunk)
-                        
-                        # 3. Only pull once buffer is full (compensates for hardware lag)
-                        if len(self.mic_delay_buffer) >= self.mic_delay_buffer.maxlen:
-                            delayed_mic = self.mic_delay_buffer[0]
-                            
-                            with self.ref_lock:
-                                if (time.time() - self.last_reference_time < 0.2):
-                                    mic_time = adc_time - (self.mic_delay_buffer.maxlen * self.frame_duration_ms / 1000.0)
-                                    time_diff = self.ref_ring_timestamp - mic_time
-                                    
-                                    # Periodic cross-correlation for offset locking
-                                    curr_time = time.time()
-                                    if curr_time - self._last_correlation_time > 2.0:
-                                        try:
-                                            search_size = int(0.5 * self.sample_rate) 
-                                            start_window = (self.ref_ring_pos - search_size) % len(self.ref_ring_buffer)
-                                            if start_window + search_size <= len(self.ref_ring_buffer):
-                                                ref_window = self.ref_ring_buffer[start_window : start_window + search_size]
-                                            else:
-                                                part1 = self.ref_ring_buffer[start_window:]
-                                                part2 = self.ref_ring_buffer[:search_size - len(part1)]
-                                                ref_window = np.concatenate([part1, part2])
-                                            
-                                            if len(ref_window) >= self.chunk_size:
-                                                mic_np = np.frombuffer(delayed_mic, dtype=np.int16).astype(np.float32)
-                                                ref_np = ref_window.astype(np.float32)
-                                                corr = np.correlate(ref_np, mic_np, mode='valid')
-                                                peak_idx = np.argmax(corr)
-                                                detected_lag = len(ref_np) - peak_idx
-                                                peak_val = corr[peak_idx]
-                                                energy = np.sum(mic_np**2)
-                                                if peak_val > 0.5 * energy:
-                                                    self._detected_lags.append(detected_lag)
-                                                    self._aec_locked_offset = int(np.median(self._detected_lags))
-                                                    self._last_correlation_time = curr_time
-                                        except Exception as ce:
-                                            logger.debug(f"Correlation failed: {ce}")
-
-                                    idx_offset = self._aec_locked_offset
-                                    if idx_offset is None:
-                                        hw_latency = float(os.getenv('AEC_HARDWARE_LATENCY_MS', '150')) / 1000.0
-                                        idx_offset = int((time_diff + hw_latency) * self.sample_rate)
-                                    
-                                    if 0 <= idx_offset <= len(self.ref_ring_buffer) - self.chunk_size:
-                                        start_idx = (self.ref_ring_pos - idx_offset) % len(self.ref_ring_buffer)
-                                        if start_idx + self.chunk_size <= len(self.ref_ring_buffer):
-                                            ref_chunk_np = self.ref_ring_buffer[start_idx:start_idx+self.chunk_size]
-                                        else:
-                                            part1 = self.ref_ring_buffer[start_idx:]
-                                            part2 = self.ref_ring_buffer[:self.chunk_size - len(part1)]
-                                            ref_chunk_np = np.concatenate([part1, part2])
-                                        
-                                        ref_chunk = ref_chunk_np.astype(np.int16).tobytes()
-                                        audio_chunk = self.echo_canceller.process(delayed_mic, ref_chunk)
-                                        
-                                        # Telemetry
-                                        if curr_time - self._last_telemetry_time > 5.0:
-                                            logger.info(f"🎯 AEC Locked: offset={idx_offset} smp (~{idx_offset/self.sample_rate*1000:.1f}ms)")
-                                            self._last_telemetry_time = curr_time
-                                    else:
-                                        audio_chunk = delayed_mic
-                                else:
-                                    audio_chunk = delayed_mic
-
-                    except Exception as e:
-                        logger.error(f"AEC Error: {e}")
-
                 # ════════════════════════════════════════════════════════
                 # MUTE-THE-PIPE: Decide whether to yield real audio or silence
                 # ════════════════════════════════════════════════════════
                 if self._is_bot_playing:
                     # Bot speaking counts as activity — keep conversation alive
                     self.last_speech_time = time.time()
-                    
+
+                    # Grace period: AEC needs time to converge on a new playback
+                    # session.  Suppress barge-in completely until it has.
+                    elapsed = time.time() - self._playback_start_time
+                    if elapsed < self._barge_in_grace_s:
+                        yield silence_chunk
+                        continue
+
                     # Measure mic energy AFTER AEC to detect user speech above residual echo
                     mic_samples = np.frombuffer(audio_chunk, dtype=np.int16)
                     rms = np.sqrt(np.mean(mic_samples.astype(np.float32)**2))
-                    
+
                     if rms > _barge_in_peak_rms:
                         _barge_in_peak_rms = rms
                     _now = time.time()
@@ -808,9 +637,9 @@ class ContinuousVADCapture:
             energy_threshold_base = int(os.getenv('INTERRUPTION_ENERGY_THRESHOLD', '500'))
             
             # Buffer 500ms (25 chunks) to ensure we don't clipped the start of interruptions
-            monitoring_pre_buffer = deque(maxlen=25) 
+            monitoring_pre_buffer = deque(maxlen=25)
+            consecutive_speech_chunks = 0
 
-            
             while self._is_monitoring:
                 try:
                     if not self.audio_stream or not self._is_monitoring:
@@ -838,39 +667,7 @@ class ContinuousVADCapture:
                     
                     current_threshold = playing_threshold if is_bot_playing else base_threshold
                     
-                    # ---------------------------------------------------------
-                    # FALLBACK: Digital Ducking
-                    # If we don't have hardware AEC, we digitally lower the 
-                    # microphone volume when the bot is speaking. This helps
-                    # the VAD ignore the echo of the bot's own voice.
-                    # ---------------------------------------------------------
                     vad_chunk = audio_chunk
-                    if not (HAS_SPEEX and self.echo_canceller) and is_bot_playing:
-                        audio_array = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32)
-                        audio_array *= 0.1 # Aggressive Ducking: Reduce sensitivity to 10%
-                        vad_chunk = audio_array.astype(np.int16).tobytes()
-                    
-                    # AEC (Hardware/Library)
-                    elif HAS_SPEEX and self.echo_canceller:
-                        try:
-                            ref_chunk = self.reference_queue.get_nowait()
-                            try:
-                                # Identified as .process() via SpeexInspect
-                                vad_chunk = self.echo_canceller.process(audio_chunk, ref_chunk)
-                            except (AttributeError, Exception):
-                                vad_chunk = self.echo_canceller.run(audio_chunk, ref_chunk)
-                        except queue.Empty:
-                            pass
-                        except Exception as e:
-                            if not self._aec_debug_done:
-                                logger.error(f"AEC Error (Monitoring): {e}")
-                                self._aec_debug_done = True
-                            
-                            if is_bot_playing:
-                                audio_np = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32)
-                                audio_np *= 0.1
-                                vad_chunk = audio_np.astype(np.int16).tobytes()
-                    
                     is_speech = self.vad.is_speech(vad_chunk, self.sample_rate)
                     
                     if is_speech:
@@ -880,27 +677,15 @@ class ContinuousVADCapture:
                         samples = np.frombuffer(vad_chunk, dtype=np.int16)
                         rms = np.sqrt(np.mean(samples.astype(np.float32)**2))
                         
-                        # Dynamic Energy Threshold: 
-                        # If bot is playing, we need slightly higher signal to cut through residual echo.
-                        # If AEC is active, we only need 1.2x. If ducking (no AEC), we need 1.5x.
-                        has_aec = (HAS_SPEEX and self.echo_canceller)
-                        multiplier = 1.2 if has_aec else 1.5
-                        current_energy_req = energy_threshold_base * (multiplier if is_bot_playing else 1.0)
+                        current_energy_req = energy_threshold_base * (1.2 if is_bot_playing else 1.0)
                         
                         if rms < current_energy_req:
                             consecutive_speech_chunks = 0
                         
                         if consecutive_speech_chunks >= current_threshold:
                             logger.info(f"🎤 Interruption detected! (After {consecutive_speech_chunks} chunks, threshold={current_threshold}, RMS={rms:.0f})")
-                            
-                            # FINAL SAFETY: If we are ducking echo (no AEC), ensure the handoff 
-                            # is actually loud enough to be human speech, not just echo leakage.
-                            if is_bot_playing and not (HAS_SPEEX and self.echo_canceller) and rms < 1200:
-                                logger.warning(f"🔇 Interruption rejected - RMS {rms:.0f} too low for non-AEC handoff")
-                                consecutive_speech_chunks = 0
-                                continue
 
-                            # Stop monitoring IMMEDIATELY 
+                            # Stop monitoring IMMEDIATELY
                             self._is_monitoring = False
                             
                             # CATCH THE SPEECH: Save the pre-buffer and current segment
@@ -930,38 +715,6 @@ class ContinuousVADCapture:
             logger.error(f"Error in monitoring loop: {e}")
         finally:
             self._is_monitoring = False
-
-    def provide_reference_audio(self, audio_data: bytes) -> None:
-        """
-        Provide reference audio (what's playing) for echo cancellation.
-        Accumulates data until it hits chunk_size for AEC.
-        """
-        # Trigger immediate correlation check if this is the start of a turn
-        if time.time() - self.last_reference_time > 1.0:
-            self._last_correlation_time = 0 # Force immediate scan in always_streaming
-            
-        self.last_reference_time = time.time()
-        
-        if not self.echo_canceller:
-            return
-            
-        # 1. Add to Ring Buffer with Wall-Clock Timestamp
-        with self.ref_lock:
-            # Shared time baseline with VAD
-            self.ref_ring_timestamp = time.time()
-            
-            # Efficiently write to circular buffer
-            audio_np = np.frombuffer(audio_data, dtype=np.int16)
-            n = len(audio_np)
-            if self.ref_ring_pos + n <= len(self.ref_ring_buffer):
-                self.ref_ring_buffer[self.ref_ring_pos:self.ref_ring_pos + n] = audio_np
-            else:
-                # Wrap around
-                space = len(self.ref_ring_buffer) - self.ref_ring_pos
-                self.ref_ring_buffer[self.ref_ring_pos:] = audio_np[:space]
-                self.ref_ring_buffer[:n - space] = audio_np[space:]
-            
-            self.ref_ring_pos = (self.ref_ring_pos + n) % len(self.ref_ring_buffer)
 
     def ensure_stream_open(self) -> None:
         """Helper to open or restart the audio stream."""
