@@ -212,6 +212,61 @@ class LLMClient:
         logger.info(f"📷 Image extracted ({len(extracted)} chars)")
         return extracted
 
+    def generate_structured_response(
+        self,
+        prompt: str,
+        schema: dict,
+        schema_name: str,
+        max_tokens: int = 1000,
+    ) -> str:
+        """
+        One-shot call that enforces a JSON schema via OpenAI structured outputs.
+
+        Uses response_format=json_schema with strict=True so the model is
+        constrained to the exact shape — no prompt engineering required for
+        structure. Falls back to json_object mode if the deployment does not
+        support structured outputs.
+
+        Args:
+            prompt:      Full task prompt.
+            schema:      JSON schema dict (must be strict-mode compatible:
+                         additionalProperties: false on all object nodes).
+            schema_name: Short identifier for the schema (letters/digits/dashes only).
+            max_tokens:  Maximum tokens to generate.
+
+        Returns:
+            Raw response string (valid JSON matching the schema).
+        """
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=max_tokens,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_name,
+                        "schema": schema,
+                        "strict": True,
+                    },
+                },
+                stream=False,
+            )
+            result = response.choices[0].message.content.strip()
+            logger.info("generate_structured_response(%s): received %d chars", schema_name, len(result))
+            return result
+        except Exception as e:
+            if any(kw in str(e).lower() for kw in ("json_schema", "structured", "unsupported", "response_format")):
+                logger.warning(
+                    "generate_structured_response: structured outputs not supported, "
+                    "falling back to json_object mode: %s", e
+                )
+                return self.generate_json_response(prompt, max_tokens=max_tokens)
+            logger.error("generate_structured_response(%s) error: %s", schema_name, e)
+            raise
+
     def generate_json_response(
         self,
         prompt: str,

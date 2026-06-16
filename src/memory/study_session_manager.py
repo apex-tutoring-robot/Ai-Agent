@@ -157,37 +157,34 @@ class StudySessionManager:
     def identify_topics(self, syllabus_text: str) -> List[str]:
         """
         Return a list of distinct topics found in the syllabus.
-
-        Falls back to a single generic entry on failure so the caller
-        can always present at least one option to the student.
+        Returns an empty list on failure so the caller can route to govt_syllabus.
         """
-        import json as _json
+        from memory.schemas import TopicList, topic_list_schema
 
         prompt = (
             "You are a tutor reviewing a K-8 syllabus. "
-            "List the distinct topics or subject areas covered. "
-            "Return a JSON array of short topic name strings (typically 2-8 items). "
-            "No explanation. Only valid JSON.\n\n"
+            "List the distinct topics or subject areas covered (typically 2-8 items).\n\n"
             f"Syllabus:\n{syllabus_text}"
         )
 
         try:
-            raw = self.llm_client.generate_json_response(prompt, max_tokens=200)
-            topics = _json.loads(raw)
-            if isinstance(topics, list) and len(topics) >= 1:
-                return [str(t) for t in topics]
+            raw = self.llm_client.generate_structured_response(
+                prompt, topic_list_schema(), "topic_list", max_tokens=200
+            )
+            result = TopicList.model_validate_json(raw)
+            if result.topics:
+                return result.topics
         except Exception as e:
             logger.error("identify_topics: failed: %s", e)
 
-        return ["the main topic"]
+        return []
 
     def generate_diagnostic_questions(self, syllabus_text: str, topic: str = "") -> List[str]:
         """
         Generate 2 conversational questions to gauge the student's prior knowledge.
-
         Returns a list of question strings. Falls back to generic questions on failure.
         """
-        import json as _json
+        from memory.schemas import DiagnosticQuestions, diagnostic_questions_schema
 
         topic_clause = f' specifically about "{topic}"' if topic else ""
         prompt = (
@@ -195,19 +192,17 @@ class StudySessionManager:
             f"Based on the syllabus below, write exactly 2 short, conversational questions "
             f"to gauge the student's current understanding{topic_clause}. "
             "Questions should be open-ended but answerable in a sentence or two. "
-            "Do NOT ask about how much time they have or scheduling. "
-            "Return a JSON array of exactly 2 question strings. No explanation.\n\n"
-            f"Syllabus:\n{syllabus_text}\n\n"
-            "Return only valid JSON. Example: "
-            "[\"What do you already know about fractions?\", "
-            "\"Can you name any fraction types you have learned before?\"]"
+            "Do NOT ask about how much time they have or scheduling.\n\n"
+            f"Syllabus:\n{syllabus_text}"
         )
 
         try:
-            raw = self.llm_client.generate_json_response(prompt, max_tokens=300)
-            questions = _json.loads(raw)
-            if isinstance(questions, list) and len(questions) >= 1:
-                return [str(q) for q in questions[:2]]
+            raw = self.llm_client.generate_structured_response(
+                prompt, diagnostic_questions_schema(), "diagnostic_questions", max_tokens=300
+            )
+            result = DiagnosticQuestions.model_validate_json(raw)
+            if result.questions:
+                return result.questions[:2]
         except Exception as e:
             logger.error("generate_diagnostic_questions: failed: %s", e)
 
@@ -240,10 +235,8 @@ class StudySessionManager:
 
         Returns True on success, False if the LLM call or schema validation fails.
         """
-        import json as _json
-        from memory.schemas import StudyPlan, SessionPlan, session_plan_llm_schema
+        from memory.schemas import StudyPlan, study_plan_llm_schema
 
-        session_schema = _json.dumps(session_plan_llm_schema(), indent=2)
         qa_text = "\n".join(
             f"Q: {qa['question']}\nA: {qa['answer']}"
             for qa in diagnostic_qa
@@ -253,21 +246,14 @@ class StudySessionManager:
             f"You are a study planner for a K-8 student focusing on \"{topic}\".\n\n"
             "Based on the syllabus and the student's diagnostic responses, "
             "generate ONE introductory session tailored to their current level.\n\n"
-            "Return a JSON object with this exact structure:\n"
-            "{\n"
-            f'  "topic": "{topic}",\n'
-            '  "source_summary": "<one sentence describing what the syllabus covers>",\n'
-            '  "assessment_summary": "<one sentence describing the student\'s prior knowledge level>",\n'
-            '  "sessions": [<exactly ONE session object matching the schema below>]\n'
-            "}\n\n"
-            f"Session schema (no extra fields):\n{session_schema}\n\n"
             f"Syllabus:\n{syllabus_text}\n\n"
-            f"Student diagnostic:\n{qa_text}\n\n"
-            "Return only valid JSON. No markdown fences. No explanation."
+            f"Student diagnostic:\n{qa_text}"
         )
 
         try:
-            raw = self.llm_client.generate_json_response(prompt, max_tokens=1000)
+            raw = self.llm_client.generate_structured_response(
+                prompt, study_plan_llm_schema(), "study_plan", max_tokens=1000
+            )
         except Exception as e:
             logger.error("generate_study_plan: LLM call failed: %s", e)
             return False
@@ -293,7 +279,6 @@ class StudySessionManager:
 
         Returns the new session dict on success, None on failure.
         """
-        import json as _json
         from memory.schemas import SessionPlan, session_plan_llm_schema
 
         data = self.backend.load()
@@ -313,20 +298,18 @@ class StudySessionManager:
             for i, s in enumerate(completed)
         ) or "No sessions completed yet."
 
-        session_schema = _json.dumps(session_plan_llm_schema(), indent=2)
-
         prompt = (
             f"You are a tutor for a K-8 student studying \"{topic}\".\n\n"
             f"Student assessment: {assessment_summary}\n\n"
             f"Sessions completed so far:\n{history}\n\n"
             "Generate ONE next session that goes deeper into the material, "
-            "building on what was already covered and addressing any struggles.\n\n"
-            f"Return a single JSON session object matching this schema:\n{session_schema}\n\n"
-            "Return only valid JSON. No markdown fences."
+            "building on what was already covered and addressing any struggles."
         )
 
         try:
-            raw = self.llm_client.generate_json_response(prompt, max_tokens=800)
+            raw = self.llm_client.generate_structured_response(
+                prompt, session_plan_llm_schema(), "session_plan", max_tokens=800
+            )
             session = SessionPlan.model_validate_json(raw)
         except Exception as e:
             logger.error("generate_next_session: failed: %s", e)
@@ -445,31 +428,23 @@ class StudySessionManager:
 
         prompt = (
             f'Summarize this tutoring session focused on "{focus}".\n\n'
-            f"Conversation:\n{transcript}\n\n"
-            f"Return JSON with this exact structure:\n"
-            "{\n"
-            '  "summary": "<2-3 sentence summary of what was covered>",\n'
-            '  "struggles": ["<concept or skill the student struggled with>"],\n'
-            '  "next_focus": "<what to prioritise at the start of the next session>",\n'
-            '  "topics_covered": ["<topic actually covered in this session>"],\n'
-            '  "performance_notes": "<brief assessment of student engagement and understanding>"\n'
-            "}\n\n"
-            "Return only valid JSON. No markdown fences."
+            f"Conversation:\n{transcript}"
         )
 
-        from memory.schemas import SessionPlan
+        from memory.schemas import SessionDebrief, session_debrief_schema
 
         try:
-            raw = self.llm_client.generate_json_response(prompt, max_tokens=400)
-            import json as _json
-            llm_data = _json.loads(raw)
-            # Validate debrief fields by merging into the existing session object
-            validated = SessionPlan.model_validate({**session, **llm_data})
+            raw = self.llm_client.generate_structured_response(
+                prompt, session_debrief_schema(), "session_debrief", max_tokens=400
+            )
+            debrief = SessionDebrief.model_validate_json(raw)
             summary_fields = {
                 "date": datetime.date.today().isoformat(),
-                "summary": validated.summary,
-                "struggles": validated.struggles,
-                "next_focus": validated.next_focus,
+                "summary": debrief.summary,
+                "struggles": debrief.struggles,
+                "next_focus": debrief.next_focus,
+                "topics_covered": debrief.topics_covered,
+                "performance_notes": debrief.performance_notes,
             }
         except Exception as e:
             logger.error("complete_session: summarization failed: %s", e)
@@ -509,23 +484,20 @@ class StudySessionManager:
         prompt = (
             f'The student is taking a break from a tutoring session on "{focus}".\n\n'
             f"Conversation so far:\n{transcript}\n\n"
-            "Summarise what was covered. Return JSON with this exact structure:\n"
-            "{\n"
-            '  "summary": "<what was covered so far in 1-2 sentences>",\n'
-            '  "topics_covered": ["<topic actually covered so far>"],\n'
-            '  "performance_notes": "<brief note on student understanding and engagement>"\n'
-            "}\n\n"
-            "Return only valid JSON. No markdown fences."
+            "Summarise what was covered so far."
         )
 
+        from memory.schemas import SessionProgress, session_progress_schema
+
         try:
-            raw = self.llm_client.generate_json_response(prompt, max_tokens=300)
-            import json as _json
-            data = _json.loads(raw)
+            raw = self.llm_client.generate_structured_response(
+                prompt, session_progress_schema(), "session_progress", max_tokens=300
+            )
+            progress = SessionProgress.model_validate_json(raw)
             partial_fields = {
-                "summary": str(data.get("summary", "")),
-                "topics_covered": list(data.get("topics_covered", [])),
-                "performance_notes": str(data.get("performance_notes", "")),
+                "summary": progress.summary,
+                "topics_covered": progress.topics_covered,
+                "performance_notes": progress.performance_notes,
             }
         except Exception as e:
             logger.error("save_session_progress: summarization failed: %s", e)

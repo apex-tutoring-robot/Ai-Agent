@@ -104,7 +104,7 @@ class JarvisBot:
         os.makedirs("syllabus", exist_ok=True)
         self.study_session_manager = StudySessionManager(llm_client=self.llm_client)
         # States: "normal" | "awaiting_syllabus" | "extracting_syllabus"
-        #         | "identifying_topics" | "awaiting_topic_choice"
+        #         | "identifying_topics" | "govt_syllabus" | "awaiting_topic_choice"
         #         | "generating_diagnostic" | "asking_diagnostic"
         #         | "generating_plan" | "in_session" | "awaiting_session_redirect"
         #         | "generating_next_session"
@@ -298,6 +298,11 @@ class JarvisBot:
         # ── identifying_topics: LLM finds topics, asks user to choose ──
         if state == "identifying_topics":
             topics = self.study_session_manager.identify_topics(self._pending_syllabus_text)
+            if not topics:
+                with self._study_state_lock:
+                    self._study_state = "govt_syllabus"
+                self._request_queue.put("__GOVT_SYLLABUS__")
+                return "I had some trouble reading the topics. Let me use a standard syllabus for you."
             with self._study_state_lock:
                 self._study_state = "awaiting_topic_choice"
             topic_list = ", ".join(topics)
@@ -305,6 +310,13 @@ class JarvisBot:
                 f"I can see a few topics in this syllabus: {topic_list}. "
                 f"Which one would you like to focus on?"
             )
+
+        # ── govt_syllabus: placeholder — will use a predefined government syllabus ──
+        if state == "govt_syllabus":
+            # TODO: load predefined govt syllabus and resume from identifying_topics
+            with self._study_state_lock:
+                self._study_state = "normal"
+            return "Sorry, I am not able to set up your session right now. Please try again later."
 
         # ── awaiting_topic_choice: store chosen topic, start diagnostic ──
         if state == "awaiting_topic_choice":
@@ -409,7 +421,7 @@ class JarvisBot:
             if not syllabus_path:
                 return (
                     "I still do not see a syllabus file. "
-                    "Please add it to the syllabus folder and let me know when it is ready."
+                    "Please upload it and let me know when it is ready."
                 )
             return self._process_syllabus_file(syllabus_path)
 
@@ -457,7 +469,7 @@ class JarvisBot:
                 self._study_state = "awaiting_syllabus"
             return (
                 "I would love to help you study! I do not have a syllabus yet. "
-                "Please put your syllabus file in the syllabus folder "
+                "Please upload a syllabus file "
                 "and let me know when it is ready. "
                 "I can read text files, images, and PDFs."
             )
@@ -922,6 +934,7 @@ class JarvisBot:
                     "awaiting_syllabus",
                     "extracting_syllabus",
                     "identifying_topics",
+                    "govt_syllabus",
                     "awaiting_topic_choice",
                     "generating_diagnostic",
                     "asking_diagnostic",
