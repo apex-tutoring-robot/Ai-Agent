@@ -137,6 +137,9 @@ class ContinuousVADCapture:
         self._barge_in_event = None            # threading.Event from JarvisBot (set on barge-in)
         self._barge_in_energy_threshold = int(os.getenv('BARGE_IN_ENERGY_THRESHOLD', '1500'))
         self._barge_in_consecutive_needed = int(os.getenv('BARGE_IN_CHUNKS_NEEDED', '3'))
+        self._playback_start_time = 0.0
+        # WebRTC AEC needs ~1-2s to converge on a new playback session — block barge-in until then.
+        self._barge_in_grace_s = float(os.getenv('BARGE_IN_GRACE_S', '2.0'))
         # AEC Ring Buffer (Hardware-Aligned Reference Audio)
         # 1-second circular buffer for reference audio
         self.ref_ring_buffer = np.zeros(self.sample_rate, dtype=np.int16)
@@ -202,6 +205,7 @@ class ContinuousVADCapture:
         """
         self._is_bot_playing = is_playing
         if is_playing:
+            self._playback_start_time = time.time()
             logger.info("🔇 VAD: Playback started — muting STT pipe (silence gate ON)")
         else:
             logger.info("🔊 VAD: Playback ended — STT pipe open")
@@ -697,6 +701,11 @@ class ContinuousVADCapture:
                     if _now - _barge_in_log_time >= 1.0:
                         logger.debug(f"🔉 Barge-in RMS: {rms:.0f} (peak={_barge_in_peak_rms:.0f}, threshold={self._barge_in_energy_threshold})")
                         _barge_in_log_time = _now
+
+                    elapsed = time.time() - self._playback_start_time
+                    if elapsed < self._barge_in_grace_s:
+                        yield silence_chunk
+                        continue
 
                     if rms > self._barge_in_energy_threshold:
                         barge_in_consecutive += 1

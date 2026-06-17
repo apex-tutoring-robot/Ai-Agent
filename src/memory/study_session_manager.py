@@ -463,6 +463,82 @@ class StudySessionManager:
         except Exception as e:
             logger.error("complete_session: backend.complete_session failed: %s", e)
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Intent classification
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def classify_redirect_intent(self, user_text: str) -> str:
+        """
+        Classify the student's response in awaiting_session_redirect.
+
+        Returns one of: "continue", "save_and_break", "new_session".
+        Falls back to keyword heuristics if the LLM call fails.
+        """
+        from memory.schemas import RedirectIntent, redirect_intent_schema
+
+        prompt = (
+            "A student is in a tutoring session. They were asked whether they want to "
+            "continue the session, save their progress and stop for now, or start something "
+            "completely new.\n\n"
+            f"Student said: \"{user_text}\"\n\n"
+            "Classify their intent:\n"
+            "- continue: student wants to keep going with the current session\n"
+            "- save_and_break: student wants to stop for now and resume the same topic later\n"
+            "- new_session: student wants to stop and start something completely different"
+        )
+
+        try:
+            raw = self.llm_client.generate_structured_response(
+                prompt, redirect_intent_schema(), "redirect_intent", max_tokens=30
+            )
+            result = RedirectIntent.model_validate_json(raw)
+            logger.info("classify_redirect_intent: '%s' → %s", user_text[:50], result.intent)
+            return result.intent
+        except Exception as e:
+            logger.error("classify_redirect_intent failed: %s — falling back to keywords", e)
+            text = user_text.lower()
+            if any(w in text for w in ("new", "different", "else", "something else", "another")):
+                return "new_session"
+            if any(w in text for w in ("stop", "break", "later", "pause", "done", "end", "finish", "save", "no", "tired")):
+                return "save_and_break"
+            return "continue"
+
+    def classify_resume_intent(self, user_text: str, topic: str) -> str:
+        """
+        Classify the student's response in awaiting_resume_choice.
+
+        Returns one of: "continue_topic", "different_topic", "new_syllabus".
+        Falls back to keyword heuristics if the LLM call fails.
+        """
+        from memory.schemas import ResumeIntent, resume_intent_schema
+
+        prompt = (
+            f"A student previously studied \"{topic}\" with a tutor. They were asked whether "
+            "they want to continue with that same topic, switch to a different topic from the "
+            "same syllabus, or upload a completely new syllabus for a different subject.\n\n"
+            f"Student said: \"{user_text}\"\n\n"
+            "Classify their intent:\n"
+            "- continue_topic: student wants to continue with the same topic\n"
+            "- different_topic: student wants a different topic from the same syllabus\n"
+            "- new_syllabus: student wants to upload a new syllabus for a completely different subject"
+        )
+
+        try:
+            raw = self.llm_client.generate_structured_response(
+                prompt, resume_intent_schema(), "resume_intent", max_tokens=30
+            )
+            result = ResumeIntent.model_validate_json(raw)
+            logger.info("classify_resume_intent: '%s' → %s", user_text[:50], result.intent)
+            return result.intent
+        except Exception as e:
+            logger.error("classify_resume_intent failed: %s — falling back to keywords", e)
+            text = user_text.lower()
+            if any(p in text for p in ("new syllabus", "upload", "different syllabus", "new file", "new document", "new book")):
+                return "new_syllabus"
+            if any(p in text for p in ("different topic", "other topic", "something else", "different subject", "another topic")):
+                return "different_topic"
+            return "continue_topic"
+
     def save_session_progress(self, session: Dict[str, Any], messages: List[Dict]) -> None:
         """
         Save partial progress for a session the student is stepping away from.

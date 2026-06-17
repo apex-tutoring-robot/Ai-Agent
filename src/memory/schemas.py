@@ -124,6 +124,30 @@ class SessionProgress(BaseModel):
     performance_notes: str = Field(description="Brief note on student understanding and engagement.")
 
 
+class RedirectIntent(BaseModel):
+    """Intent classification for awaiting_session_redirect."""
+    model_config = ConfigDict(extra="forbid")
+    intent: Literal["continue", "save_and_break", "new_session"] = Field(
+        description=(
+            "continue: student wants to keep going with the current session. "
+            "save_and_break: student wants to stop for now and resume the same topic later. "
+            "new_session: student wants to stop and start something completely different."
+        )
+    )
+
+
+class ResumeIntent(BaseModel):
+    """Intent classification for awaiting_resume_choice."""
+    model_config = ConfigDict(extra="forbid")
+    intent: Literal["continue_topic", "different_topic", "new_syllabus"] = Field(
+        description=(
+            "continue_topic: student wants to go deeper into the same topic. "
+            "different_topic: student wants to switch to a different topic from the same syllabus. "
+            "new_syllabus: student wants to upload a completely new syllabus for a different subject."
+        )
+    )
+
+
 # ── JSON schema accessors ─────────────────────────────────────────────────────
 
 def session_plan_llm_schema() -> dict:
@@ -172,3 +196,11 @@ def session_debrief_schema() -> dict:
 
 def session_progress_schema() -> dict:
     return SessionProgress.model_json_schema()
+
+
+def redirect_intent_schema() -> dict:
+    return RedirectIntent.model_json_schema()
+
+
+def resume_intent_schema() -> dict:
+    return ResumeIntent.model_json_schema()

@@ -107,7 +107,7 @@ class JarvisBot:
         #         | "identifying_topics" | "govt_syllabus" | "awaiting_topic_choice"
         #         | "generating_diagnostic" | "asking_diagnostic"
         #         | "generating_plan" | "in_session" | "awaiting_session_redirect"
-        #         | "generating_next_session"
+        #         | "awaiting_resume_choice" | "generating_next_session"
         self._study_state: str = "normal"
         self._pending_syllabus_path: Optional[str] = None
         self._pending_syllabus_text: Optional[str] = None
@@ -208,10 +208,24 @@ class JarvisBot:
         },
     }
 
-    _NEW_SESSION_PHRASES = (
+    # Phrases that signal the student wants to exit or pause the current session.
+    # Intentionally broad — awaiting_session_redirect uses LLM classification
+    # to distinguish "break", "new topic", and "continue" after catching one of these.
+    _SESSION_EXIT_PHRASES = (
+        # New session / topic change
         "new session", "something new", "new topic", "different topic",
         "start over", "start fresh", "start new", "new subject",
         "something else", "different subject", "new syllabus",
+        # Break / pause / stop
+        "take a break", "need a break", "want a break",
+        "stop the session", "end the session", "finish the session",
+        "stop for now", "stop for today", "done for today",
+        "done for now", "done for the day",
+        "pause the session", "pause for now",
+        "come back later", "resume later",
+        "i'm done", "i am done",
+        "let's stop", "let us stop", "want to stop", "need to stop",
+        "that's enough", "that is enough", "enough for today",
     )
 
     _BEGIN_ONBOARDING_TOOL = {
@@ -248,33 +262,33 @@ class JarvisBot:
         with self._study_state_lock:
             state = self._study_state
 
-        # ── in_session: intercept new-session intent before LLM sees it ──────────
+        # ── in_session: intercept session-exit intent before LLM sees it ─────────
         if state == "in_session":
             text = user_text.lower()
-            if any(phrase in text for phrase in self._NEW_SESSION_PHRASES):
+            if any(phrase in text for phrase in self._SESSION_EXIT_PHRASES):
                 focus = (self._active_session or {}).get("focus", "our current topic")
                 with self._study_state_lock:
                     self._study_state = "awaiting_session_redirect"
-                logger.info("📚 New-session intent detected in in_session — redirecting")
+                logger.info("📚 Session-exit intent detected in in_session — redirecting")
                 return (
-                    f"It sounds like you want to move on from our session on {focus}. "
-                    f"Would you like to save your progress and come back later, "
-                    f"or start something completely new?"
+                    f"It sounds like you want to step away from our session on {focus}. "
+                    f"You have three choices: keep going and stay in this session, "
+                    f"take a break and save your spot so we can pick up {focus} later, "
+                    f"or stop this session and start something on a completely different topic."
                 )
             return None
 
-        # ── awaiting_session_redirect: user chose to continue, break, or start new ──
+        # ── awaiting_session_redirect: LLM classifies continue / break / new ──────
         if state == "awaiting_session_redirect":
-            text = user_text.lower()
-            if any(phrase in text for phrase in self._NEW_SESSION_PHRASES):
+            intent = self.study_session_manager.classify_redirect_intent(user_text)
+            if intent == "new_session":
                 self._pending_partial_save = True
                 self._pending_new_session = True
                 return "Of course! I will save your progress here. Let us get you set up with something new."
-            if any(w in text for w in ("end", "stop", "later", "done", "finish", "pause", "save", "break", "no")):
-                # Partial save — session stays in_progress so it can be resumed
+            if intent == "save_and_break":
                 self._pending_partial_save = True
                 return "Sure! I will save your progress. Pick up where we left off whenever you are ready."
-            # Anything else (yes, continue, ok, sure, …) resumes the session
+            # intent == "continue"
             with self._study_state_lock:
                 self._study_state = "in_session"
             return "Okay! Let us get back to it."
@@ -293,7 +307,7 @@ class JarvisBot:
                 self._pending_syllabus_text = syllabus_text
                 self._study_state = "identifying_topics"
             self._request_queue.put("__IDENTIFY_TOPICS__")
-            return "I have read your syllabus! Let me take a look at what is in here."
+            return "I have read your syllabus!"
 
         # ── identifying_topics: LLM finds topics, asks user to choose ──
         if state == "identifying_topics":
@@ -415,6 +429,42 @@ class JarvisBot:
                 f"Ready to begin?"
             )
 
+        # ── awaiting_resume_choice: LLM classifies continue_topic / different_topic / new_syllabus ──
+        if state == "awaiting_resume_choice":
+            data = self.study_session_manager.backend.load()
+            topic = (data.get("study_plan") or {}).get("topic", "your previous topic")
+            intent = self.study_session_manager.classify_resume_intent(user_text, topic)
+
+            if intent == "continue_topic":
+                with self._study_state_lock:
+                    self._study_state = "generating_next_session"
+                self._request_queue.put("__GENERATE_NEXT_SESSION__")
+                return "Great! Let me put together the next session for you. One moment."
+
+            if intent == "different_topic":
+                source_text = self.study_session_manager.get_active_source_text()
+                if source_text:
+                    with self._study_state_lock:
+                        self._pending_syllabus_text = source_text
+                        self._study_state = "identifying_topics"
+                    self._request_queue.put("__IDENTIFY_TOPICS__")
+                    return "Sure! Let me find the topics from your syllabus so you can pick one."
+                # Source text not saved — need a new file
+                with self._study_state_lock:
+                    self._study_state = "awaiting_syllabus"
+                return (
+                    "I do not have your previous syllabus saved. "
+                    "Please upload it again and let me know when it is ready."
+                )
+
+            # intent == "new_syllabus"
+            with self._study_state_lock:
+                self._study_state = "awaiting_syllabus"
+            return (
+                "Sure! Please upload a new syllabus file and let me know when it is ready. "
+                "I can read text files, images, and PDFs."
+            )
+
         # ── awaiting_syllabus: re-check for file on every utterance ──
         if state == "awaiting_syllabus":
             syllabus_path = self.study_session_manager.get_new_syllabus_file()
@@ -458,10 +508,15 @@ class JarvisBot:
             )
 
         if self.study_session_manager.backend.has_any_plan():
+            data = self.study_session_manager.backend.load()
+            topic = (data.get("study_plan") or {}).get("topic", "your previous topic")
             with self._study_state_lock:
-                self._study_state = "generating_next_session"
-            self._request_queue.put("__GENERATE_NEXT_SESSION__")
-            return "Great work so far! Let me put together the next deeper session for you. One moment."
+                self._study_state = "awaiting_resume_choice"
+            return (
+                f"Welcome back! Last time we were working on {topic}. "
+                f"Would you like to continue with that, switch to a different topic, "
+                f"or upload a new syllabus for something completely different?"
+            )
 
         syllabus_path = self.study_session_manager.get_new_syllabus_file()
         if not syllabus_path:
@@ -536,9 +591,10 @@ class JarvisBot:
                 # ── FINISHED UTTERANCE - Queue for processing ──
                 if is_final:
                     logger.info(f"📌 User finalized: '{text}'")
+                    was_barge_in = self._barge_in_detected.is_set()
                     self._interruption_event.clear()
                     self._barge_in_detected.clear()
-                    request_queue.put(text)
+                    request_queue.put((text, was_barge_in))
                     
             logger.info("📡 Listener worker stopped cleanly")
         except Exception as e:
@@ -552,12 +608,14 @@ class JarvisBot:
             while self._conversation_active.is_set():
                 # Wait for next user request
                 try:
-                    user_text = self._request_queue.get(timeout=1.0)
+                    item = self._request_queue.get(timeout=1.0)
                 except queue.Empty:
                     continue
-                    
-                if user_text is None: # Termination sentinel
+
+                if item is None:  # Termination sentinel
                     break
+
+                user_text, was_barge_in = item if isinstance(item, tuple) else (item, False)
 
                 # Reset idle timer immediately so long camera/LLM processing doesn't trigger timeout
                 continuous_vad.reset_idle_timer()
@@ -678,9 +736,9 @@ class JarvisBot:
                                     self._study_state = "awaiting_session_redirect"
                                 full_response = (
                                     f"That seems to be outside our session on {focus}. "
-                                    f"Would you like to continue the session, "
-                                    f"save your progress and come back later, "
-                                    f"or start something new?"
+                                    f"You have three choices: keep going and stay in this session, "
+                                    f"take a break and save your spot so we can pick up {focus} later, "
+                                    f"or stop this session and start something on a completely different topic."
                                 )
                                 logger.info("📚 Off-topic tag detected — asking redirect question")
 
@@ -807,20 +865,40 @@ class JarvisBot:
             logger.error(f"Speaker loop error: {e}")
 
     def _get_pulse_device_index(self, pa) -> int:
-        """Find the index of the 'pulse' audio device."""
+        """Find the PipeWire/PulseAudio ALSA device index (pulse) for audio I/O."""
         try:
             for i in range(pa.get_device_count()):
                 info = pa.get_device_info_by_index(i)
-                if info and 'pulse' in info.get('name', '').lower():
-                    logger.info(f"✅ Found PulseAudio device at index {i}: {info['name']}")
+                name = info.get('name', '').lower() if info else ''
+                if 'pulse' in name or 'pipewire' in name:
+                    logger.info(f"✅ Found PipeWire/PulseAudio device at index {i}: {info['name']}")
                     return i
         except Exception as e:
-            logger.warning(f"Error searching for PulseAudio device: {e}")
-        
-        # Fallback to env var or default 1 (but log warning)
-        fallback = int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 1))
-        logger.warning(f"⚠️  PulseAudio not found - falling back to index {fallback}")
-        return fallback
+            logger.warning(f"Error searching for PipeWire/PulseAudio device: {e}")
+
+        logger.warning(
+            "⚠️  PipeWire/PulseAudio ALSA device not found — falling back to hw index 1. "
+            "Install libasound2-plugins and restart PipeWire to enable AEC."
+        )
+        return 1
+
+    def _get_input_device_index(self, pa, pulse_index: int) -> int:
+        """Return the PyAudio input device index for the VAD mic stream.
+
+        When PipeWire AEC is active (pulse device found), input goes through
+        pulse so PipeWire routes it to echo-cancel-source. Falls back to
+        AUDIO_INPUT_DEVICE_INDEX env var if pulse is unavailable.
+        """
+        if pulse_index is not None:
+            logger.info(f"🎤 Input routed through PipeWire (device {pulse_index}) — AEC active")
+            return pulse_index
+        env_idx = os.getenv('AUDIO_INPUT_DEVICE_INDEX')
+        if env_idx not in (None, ""):
+            idx = int(env_idx)
+            logger.info(f"🎤 Using AUDIO_INPUT_DEVICE_INDEX={idx} (no PipeWire, direct hw)")
+            return idx
+        logger.warning("🎤 No input device configured — using system default")
+        return None
 
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
@@ -854,14 +932,16 @@ class JarvisBot:
             # Enter continuous conversation mode
             idle_timeout = int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
             
-            # DYNAMICALLY FIND PULSE DEVICE
+            # Output goes to pulse (PipeWire routes to echo-cancel-sink → USB speaker).
+            # Input goes to pulse too (PipeWire routes from echo-cancel-source → AEC-processed ReSpeaker).
             pulse_index = self._get_pulse_device_index(self.pa)
-            
+            input_index = self._get_input_device_index(self.pa, pulse_index)
+
             # Initialize VAD with dedicated INPUT stream
             continuous_vad = ContinuousVADCapture(
                 idle_timeout_seconds=idle_timeout,
                 pa=self.pa,
-                input_device_index=pulse_index,
+                input_device_index=input_index,
                 player=self.audio_player
             )
             
@@ -939,6 +1019,7 @@ class JarvisBot:
                     "generating_diagnostic",
                     "asking_diagnostic",
                     "generating_plan",
+                    "awaiting_resume_choice",
                     "generating_next_session",
                 ):
                     logger.info("Conversation ended mid-study-flow — resetting study state to normal")
