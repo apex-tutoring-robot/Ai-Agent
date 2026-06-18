@@ -542,18 +542,17 @@ class StudySessionManager:
         """
         Classify the student's response in awaiting_session_redirect.
 
-        Returns one of: "continue", "save_and_break", "new_session".
+        Returns one of: "save_and_break", "new_session".
         Falls back to keyword heuristics if the LLM call fails.
         """
         from memory.schemas import RedirectIntent, redirect_intent_schema
 
         prompt = (
-            "A student is in a tutoring session. They were asked whether they want to "
-            "continue the session, save their progress and stop for now, or start something "
-            "completely new.\n\n"
+            "A student is in a tutoring session and has indicated they want to step away. "
+            "They were asked whether they want to save their progress and stop for now, "
+            "or start something completely new.\n\n"
             f"Student said: \"{user_text}\"\n\n"
             "Classify their intent:\n"
-            "- continue: student wants to keep going with the current session\n"
             "- save_and_break: student wants to stop for now and resume the same topic later\n"
             "- new_session: student wants to stop and start something completely different"
         )
@@ -570,9 +569,7 @@ class StudySessionManager:
             text = user_text.lower()
             if any(w in text for w in ("new", "different", "else", "something else", "another")):
                 return "new_session"
-            if any(w in text for w in ("stop", "break", "later", "pause", "done", "end", "finish", "save", "no", "tired")):
-                return "save_and_break"
-            return "continue"
+            return "save_and_break"
 
     def classify_resume_intent(self, user_text: str, topic: str) -> str:
         """

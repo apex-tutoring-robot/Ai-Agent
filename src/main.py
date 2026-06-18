@@ -282,26 +282,21 @@ class JarvisBot:
                 logger.info("📚 Session-exit intent detected in in_session — redirecting")
                 return (
                     f"It sounds like you want to step away from our session on {focus}. "
-                    f"You have three choices: keep going and stay in this session, "
-                    f"take a break and save your spot so we can pick up {focus} later, "
-                    f"or stop this session and start something on a completely different topic."
+                    f"Would you like to take a break and save your spot so we can pick up {focus} later, "
+                    f"or stop this session and start something on a completely different topic?"
                 )
             return None
 
-        # ── awaiting_session_redirect: LLM classifies continue / break / new ──────
+        # ── awaiting_session_redirect: LLM classifies break / new ──────────────
         if state == "awaiting_session_redirect":
             intent = self.study_session_manager.classify_redirect_intent(user_text)
             if intent == "new_session":
                 self._pending_partial_save = True
                 self._pending_new_session = True
                 return "Of course! I will save your progress here. Let us get you set up with something new."
-            if intent == "save_and_break":
-                self._pending_partial_save = True
-                return "Sure! I will save your progress. Pick up where we left off whenever you are ready."
-            # intent == "continue"
-            with self._study_state_lock:
-                self._study_state = "in_session"
-            return "Okay! Let us get back to it."
+            # intent == "save_and_break" (default)
+            self._pending_partial_save = True
+            return "Sure! I will save your progress. Pick up where we left off whenever you are ready."
 
         # ── extracting_syllabus: blocking text/image/PDF extraction ──
         if state == "extracting_syllabus":

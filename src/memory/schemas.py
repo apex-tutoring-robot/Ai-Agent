@@ -127,9 +127,8 @@ class SessionProgress(BaseModel):
 class RedirectIntent(BaseModel):
     """Intent classification for awaiting_session_redirect."""
     model_config = ConfigDict(extra="forbid")
-    intent: Literal["continue", "save_and_break", "new_session"] = Field(
+    intent: Literal["save_and_break", "new_session"] = Field(
         description=(
-            "continue: student wants to keep going with the current session. "
             "save_and_break: student wants to stop for now and resume the same topic later. "
             "new_session: student wants to stop and start something completely different."
         )
