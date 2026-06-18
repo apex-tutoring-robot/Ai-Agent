@@ -102,10 +102,11 @@ class JarvisBot:
 
         # ── Study Session State Machine ──
         os.makedirs("syllabus", exist_ok=True)
+        os.makedirs("curriculum", exist_ok=True)
         self.study_session_manager = StudySessionManager(llm_client=self.llm_client)
         # States: "normal" | "awaiting_syllabus" | "extracting_syllabus"
-        #         | "identifying_topics" | "govt_syllabus" | "awaiting_topic_choice"
-        #         | "generating_diagnostic" | "asking_diagnostic"
+        #         | "identifying_topics" | "govt_syllabus" | "awaiting_govt_topic"
+        #         | "awaiting_topic_choice" | "generating_diagnostic" | "asking_diagnostic"
         #         | "generating_plan" | "in_session" | "awaiting_session_redirect"
         #         | "awaiting_resume_choice" | "generating_next_session"
         self._study_state: str = "normal"
@@ -228,6 +229,15 @@ class JarvisBot:
         "that's enough", "that is enough", "enough for today",
     )
 
+    _NO_SYLLABUS_PHRASES = (
+        "don't have", "do not have", "don't have a syllabus", "no syllabus",
+        "i don't have one", "i do not have one", "no file", "nothing to upload",
+        "use a standard", "use a default", "use a preset", "use a predefined",
+        "standard syllabus", "default syllabus", "preset syllabus",
+        "pick one for me", "choose one for me", "you decide",
+        "skip the upload", "skip upload",
+    )
+
     _BEGIN_ONBOARDING_TOOL = {
         "type": "function",
         "function": {
@@ -314,9 +324,11 @@ class JarvisBot:
             topics = self.study_session_manager.identify_topics(self._pending_syllabus_text)
             if not topics:
                 with self._study_state_lock:
-                    self._study_state = "govt_syllabus"
-                self._request_queue.put("__GOVT_SYLLABUS__")
-                return "I had some trouble reading the topics. Let me use a standard syllabus for you."
+                    self._study_state = "normal"
+                return (
+                    "I had trouble reading the topics from your syllabus. "
+                    "Please try uploading it again."
+                )
             with self._study_state_lock:
                 self._study_state = "awaiting_topic_choice"
             topic_list = ", ".join(topics)
@@ -325,12 +337,26 @@ class JarvisBot:
                 f"Which one would you like to focus on?"
             )
 
-        # ── govt_syllabus: placeholder — will use a predefined government syllabus ──
+        # ── govt_syllabus: user has no syllabus — ask what topic they want ──
         if state == "govt_syllabus":
-            # TODO: load predefined govt syllabus and resume from identifying_topics
             with self._study_state_lock:
-                self._study_state = "normal"
-            return "Sorry, I am not able to set up your session right now. Please try again later."
+                self._study_state = "awaiting_govt_topic"
+            return "What subject or topic would you like to study today?"
+
+        # ── awaiting_govt_topic: load static curriculum doc, then identify topics ──
+        if state == "awaiting_govt_topic":
+            topic = user_text.strip()
+            curriculum_text = self.study_session_manager.load_curriculum_doc(topic)
+            if not curriculum_text:
+                return (
+                    f"I do not have a curriculum document for {topic} yet. "
+                    "Could you try a different subject, or ask a parent to upload a syllabus file?"
+                )
+            with self._study_state_lock:
+                self._pending_syllabus_text = curriculum_text
+                self._study_state = "identifying_topics"
+            self._request_queue.put("__IDENTIFY_TOPICS__")
+            return f"Great, let me look up what we cover in {topic}!"
 
         # ── awaiting_topic_choice: store chosen topic, start diagnostic ──
         if state == "awaiting_topic_choice":
@@ -467,11 +493,18 @@ class JarvisBot:
 
         # ── awaiting_syllabus: re-check for file on every utterance ──
         if state == "awaiting_syllabus":
+            lowered = user_text.lower()
+            if any(phrase in lowered for phrase in self._NO_SYLLABUS_PHRASES):
+                with self._study_state_lock:
+                    self._study_state = "govt_syllabus"
+                self._request_queue.put("__GOVT_SYLLABUS__")
+                return "No problem! What subject or topic would you like to study today?"
             syllabus_path = self.study_session_manager.get_new_syllabus_file()
             if not syllabus_path:
                 return (
                     "I still do not see a syllabus file. "
-                    "Please upload it and let me know when it is ready."
+                    "Please upload it and let me know when it is ready. "
+                    "Or if you do not have one, just say so and I can use a standard curriculum."
                 )
             return self._process_syllabus_file(syllabus_path)
 
@@ -1015,6 +1048,7 @@ class JarvisBot:
                     "extracting_syllabus",
                     "identifying_topics",
                     "govt_syllabus",
+                    "awaiting_govt_topic",
                     "awaiting_topic_choice",
                     "generating_diagnostic",
                     "asking_diagnostic",

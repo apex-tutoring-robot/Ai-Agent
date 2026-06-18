@@ -53,6 +53,7 @@ class StudySessionManager:
     ):
         self.llm_client = llm_client
         self.syllabus_dir = syllabus_dir
+        self.curriculum_dir = "curriculum"
 
         if backend is None:
             from memory.backend import JsonFileBackend
@@ -151,13 +152,83 @@ class StudySessionManager:
             logger.warning("mark_syllabus_processed: could not delete %s: %s", file_path, e)
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Government / standard curriculum loading
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def load_curriculum_doc(self, topic: str) -> Optional[str]:
+        """
+        Find and return the text of a static curriculum document matching *topic*.
+
+        Files live in self.curriculum_dir (default: "curriculum/").  The match is
+        fuzzy: both the topic and each filename stem are normalised to lowercase
+        with punctuation stripped, then the file whose stem has the highest
+        word-overlap with the topic is chosen (must share at least one word).
+
+        Supports .txt and .md files (plain read) and .pdf files (PyPDF2).
+        Returns None when no match is found or the directory does not exist.
+        """
+        if not os.path.isdir(self.curriculum_dir):
+            logger.warning("load_curriculum_doc: curriculum dir %r not found", self.curriculum_dir)
+            return None
+
+        def _normalise(s: str) -> set:
+            import string
+            s = s.lower().translate(str.maketrans("", "", string.punctuation))
+            return set(s.split())
+
+        topic_words = _normalise(topic)
+        if not topic_words:
+            return None
+
+        best_path: Optional[str] = None
+        best_score: int = 0
+
+        for filename in sorted(os.listdir(self.curriculum_dir)):
+            if filename.startswith("."):
+                continue
+            stem, ext = os.path.splitext(filename)
+            if ext.lower() not in {".txt", ".md", ".pdf"}:
+                continue
+            overlap = len(_normalise(stem) & topic_words)
+            if overlap > best_score:
+                best_score = overlap
+                best_path = os.path.join(self.curriculum_dir, filename)
+
+        if not best_path:
+            logger.info("load_curriculum_doc: no match for topic %r", topic)
+            return None
+
+        logger.info("load_curriculum_doc: matched %r for topic %r", best_path, topic)
+        ext = os.path.splitext(best_path)[1].lower()
+
+        try:
+            if ext in {".txt", ".md"}:
+                with open(best_path, "r", encoding="utf-8") as f:
+                    return f.read().strip() or None
+
+            if ext == ".pdf":
+                import PyPDF2
+                text_parts = []
+                with open(best_path, "rb") as f:
+                    reader = PyPDF2.PdfReader(f)
+                    for page in reader.pages:
+                        text_parts.append(page.extract_text() or "")
+                text = "\n".join(text_parts).strip()
+                return text or None
+
+        except Exception as e:
+            logger.error("load_curriculum_doc: failed to read %s: %s", best_path, e)
+
+        return None
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Diagnostic questions
     # ──────────────────────────────────────────────────────────────────────────
 
     def identify_topics(self, syllabus_text: str) -> List[str]:
         """
         Return a list of distinct topics found in the syllabus.
-        Returns an empty list on failure so the caller can route to govt_syllabus.
+        Returns an empty list on failure.
         """
         from memory.schemas import TopicList, topic_list_schema
 
