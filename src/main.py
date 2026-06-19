@@ -243,9 +243,10 @@ class JarvisBot:
         "function": {
             "name": "begin_onboarding",
             "description": (
-                "Start or resume a tutoring session. Call this when the student wants to "
-                "study, start a lesson, begin or resume a tutoring session, or continue "
-                "learning a subject."
+                "Start or resume a structured tutoring session. Call this ONLY when the "
+                "student explicitly asks to begin a lesson, start a study session, or resume "
+                "tutoring — not for general knowledge questions like 'tell me about X' or "
+                "'what is Y'."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -522,6 +523,10 @@ class JarvisBot:
         fresh onboarding — same routing logic as the old _is_study_trigger path.
         Returns the spoken response directly; no second LLM call needed.
         """
+        with self._study_state_lock:
+            if self._study_state == "in_session":
+                return ""
+
         session = self.study_session_manager.get_next_session()
         if session:
             self.study_session_manager.mark_session_in_progress(session["session_id"])
@@ -680,7 +685,13 @@ class JarvisBot:
                             tool_fired: Optional[ToolCall] = None
 
                             # ── Tool-aware stream — LLM decides which tool to call ──
-                            _tools = [self._CAMERA_TOOL, self._BEGIN_ONBOARDING_TOOL]
+                            # Don't offer begin_onboarding during an active session —
+                            # affirmations like "Let's go" should be handled as conversation.
+                            _tools = [self._CAMERA_TOOL]
+                            with self._study_state_lock:
+                                _active = self._study_state
+                            if _active != "in_session":
+                                _tools.append(self._BEGIN_ONBOARDING_TOOL)
                             for item in self.llm_client.generate_response_stream_with_tools(
                                 messages, _tools
                             ):
