@@ -775,9 +775,8 @@ class JarvisBot:
                                     self._study_state = "awaiting_session_redirect"
                                 full_response = (
                                     f"That seems to be outside our session on {focus}. "
-                                    f"You have three choices: keep going and stay in this session, "
-                                    f"take a break and save your spot so we can pick up {focus} later, "
-                                    f"or stop this session and start something on a completely different topic."
+                                    f"Would you like to take a break and save your spot so we can pick up {focus} later, "
+                                    f"or stop this session and start something on a completely different topic?"
                                 )
                                 logger.info("📚 Off-topic tag detected — asking redirect question")
 
