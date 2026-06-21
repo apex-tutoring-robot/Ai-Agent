@@ -121,4 +121,8 @@ for attempt in $(seq 1 10); do
     sleep 1
 done
 
+echo "=== Installing Claude Code (comment out for production) ==="
+curl -fsSL https://claude.ai/install.sh | bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+
 echo "=== Setup complete. Activate with: source .venv/bin/activate ==="
