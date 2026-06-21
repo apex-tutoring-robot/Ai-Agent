@@ -41,3 +41,7 @@ config/*.ppn
 # test images captured for testing
 captures/
 .agents/
+
+# Runtime-generated study plans and uploaded syllabi (user data)
+studyplans/
+syllabus/

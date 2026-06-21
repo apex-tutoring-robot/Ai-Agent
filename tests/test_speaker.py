@@ -43,32 +43,35 @@ def generate_tone(frequency, duration, sample_rate=44100, amplitude=0.3):
     return b''.join(samples)
 
 
-def test_speaker(device_index=None, sample_rate=44100):
+def test_speaker(device_index=None, sample_rate=None):
     """
     Test speaker with multiple tones.
-    
+
     Args:
         device_index: Output device index (None for default)
-        sample_rate: Sample rate in Hz
+        sample_rate: Sample rate in Hz (None to use device default)
     """
     print("\n" + "="*70)
     print("USB SPEAKER TEST")
     print("="*70)
-    
+
     # Get device index from environment if not provided
     if device_index is None:
         device_index = int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 1))
-    
+
     pa = pyaudio.PyAudio()
-    
+
     # Show device info
     try:
         device_info = pa.get_device_info_by_index(device_index)
+        if sample_rate is None:
+            sample_rate = int(device_info['defaultSampleRate'])
         print(f"\nTesting output device:")
         print(f"  Index: {device_index}")
         print(f"  Name: {device_info['name']}")
         print(f"  Max Channels: {device_info['maxOutputChannels']}")
         print(f"  Default Sample Rate: {int(device_info['defaultSampleRate'])} Hz")
+        print(f"  Using Sample Rate: {sample_rate} Hz")
         print()
     except Exception as e:
         print(f"\n❌ Error accessing device {device_index}: {e}")
@@ -140,7 +143,7 @@ def main():
     
     parser = argparse.ArgumentParser(description='Test USB speaker output')
     parser.add_argument('--device', type=int, help='Output device index')
-    parser.add_argument('--rate', type=int, default=44100, help='Sample rate (default: 44100)')
+    parser.add_argument('--rate', type=int, default=None, help='Sample rate in Hz (default: device native rate)')
     
     args = parser.parse_args()
     

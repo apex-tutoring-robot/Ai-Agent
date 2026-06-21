@@ -5,11 +5,20 @@ Generates tutoring responses using Azure OpenAI with streaming output.
 
 import os
 import logging
-from typing import Iterator, List, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Iterator, List, Dict, Optional, Union
 from openai import AzureOpenAI
 from dotenv import load_dotenv
 import json
 import re
+
+
+@dataclass
+class ToolCall:
+    """Returned by generate_response_stream_with_tools when the model requests a function call."""
+    name: str
+    args: dict
+    call_id: str
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -78,7 +87,7 @@ class LLMClient:
         self,
         messages: List[Dict],
         temperature: float = 0.7,
-        max_tokens: int = 500
+        # max_completion_tokens: int = 500
     ) -> Iterator[str]:
         """
         Generate streaming response from Azure OpenAI.
@@ -86,7 +95,7 @@ class LLMClient:
         Args:
             messages: Conversation history (list of message dicts)
             temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
+            max_completion_tokens: Maximum tokens to generate
         
         Yields:
             Text chunks as they arrive
@@ -98,13 +107,12 @@ class LLMClient:
             logger.info(f"Generating response for {len(messages)} messages")
             
             # Create streaming completion
-            response = self.client.chat.completions.create(
+            response = self .chat.completions.create(
                 model=self.deployment,
                 messages=full_messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_completion_tokens,
                 stream=True,
-                user=self.user_id,
             )
             
             # Stream chunks
@@ -118,7 +126,69 @@ class LLMClient:
             logger.error(f"Error generating response: {e}")
             raise
     
-    def extract_image_content(self, image_url: str, max_tokens: int = 1000) -> str:
+    def generate_response_stream_with_tools(
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        temperature: float = 0.7,
+        max_completion_tokens: int = 500,
+    ) -> Iterator[Union[str, ToolCall]]:
+        """
+        Streaming completion with tool support.
+
+        Yields text chunks as usual. If the model decides to call a tool instead
+        of producing text, yields a single ToolCall object and stops — the caller
+        must execute the tool and make a follow-up call for the final response.
+        """
+        import json as _json
+
+        full_messages = [{"role": "system", "content": self.system_prompt}] + messages
+        response = self.client.chat.completions.create(
+            model=self.deployment,
+            messages=full_messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=temperature,
+            max_completion_tokens=max_completion_tokens,
+            stream=True,
+        )
+
+        tool_calls_acc: Dict[int, Dict] = {}
+
+        for chunk in response:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {"id": "", "name": "", "args": ""}
+                    if tc.id:
+                        tool_calls_acc[idx]["id"] += tc.id
+                    if tc.function and tc.function.name:
+                        tool_calls_acc[idx]["name"] += tc.function.name
+                    if tc.function and tc.function.arguments:
+                        tool_calls_acc[idx]["args"] += tc.function.arguments
+
+            if delta.content:
+                yield delta.content
+
+            if choice.finish_reason == "tool_calls":
+                for tc_data in tool_calls_acc.values():
+                    try:
+                        args = _json.loads(tc_data["args"]) if tc_data["args"] else {}
+                    except _json.JSONDecodeError:
+                        args = {}
+                    yield ToolCall(
+                        name=tc_data["name"],
+                        args=args,
+                        call_id=tc_data["id"],
+                    )
+
+    def extract_image_content(self, image_url: str, max_completion_tokens: int = 1000) -> str:
         """
         One-shot GPT-4V call to extract all image content as plain text.
         Called once on the vision turn; result stored in history so the image
@@ -139,7 +209,7 @@ class LLMClient:
         response = self.client.chat.completions.create(
             model=self.deployment,
             messages=messages,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_completion_tokens,
             stream=False,
             user=self.user_id,
         )
@@ -262,12 +332,118 @@ class LLMClient:
         except Exception as e:
             logger.error(f"Error generating teaching plan: {e}")
             raise
-        
+
+    def generate_structured_response(
+        self,
+        prompt: str,
+        schema: dict,
+        schema_name: str,
+        max_completion_tokens: int = 1000,
+    ) -> str:
+        """
+        One-shot call that enforces a JSON schema via OpenAI structured outputs.
+
+        Uses response_format=json_schema with strict=True so the model is
+        constrained to the exact shape — no prompt engineering required for
+        structure. Falls back to json_object mode if the deployment does not
+        support structured outputs.
+
+        Args:
+            prompt:      Full task prompt.
+            schema:      JSON schema dict (must be strict-mode compatible:
+                         additionalProperties: false on all object nodes).
+            schema_name: Short identifier for the schema (letters/digits/dashes only).
+            max_completion_tokens:  Maximum tokens to generate.
+
+        Returns:
+            Raw response string (valid JSON matching the schema).
+        """
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=messages,
+                temperature=0.2,
+                max_completion_tokens=max_completion_tokens,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_name,
+                        "schema": schema,
+                        "strict": True,
+                    },
+                },
+                stream=False,
+            )
+            result = response.choices[0].message.content.strip()
+            logger.info("generate_structured_response(%s): received %d chars", schema_name, len(result))
+            return result
+        except Exception as e:
+            if any(kw in str(e).lower() for kw in ("json_schema", "structured", "unsupported", "response_format")):
+                logger.warning(
+                    "generate_structured_response: structured outputs not supported, "
+                    "falling back to json_object mode: %s", e
+                )
+                return self.generate_json_response(prompt, max_completion_tokens=max_completion_tokens)
+            logger.error("generate_structured_response(%s) error: %s", schema_name, e)
+            raise
+
+    def generate_json_response(
+        self,
+        prompt: str,
+        max_completion_tokens: int = 1000
+    ) -> str:
+        """
+        One-shot non-streaming call that requests a JSON object response.
+
+        Used for study plan generation and session summarization. Low temperature
+        (0.2) for deterministic structured output. Attempts response_format JSON
+        mode and falls back to a plain call if the deployment does not support it.
+
+        Args:
+            prompt: Full task prompt (system + instruction combined).
+            max_completion_tokens: Maximum tokens to generate.
+
+        Returns:
+            Raw response string (should be valid JSON).
+
+        Raises:
+            Exception: Re-raises any non-format-related API error after logging.
+        """
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=messages,
+                temperature=0.2,
+                max_completion_tokens=max_completion_tokens,
+                response_format={"type": "json_object"},
+                stream=False,
+            )
+            result = response.choices[0].message.content.strip()
+            logger.info("generate_json_response: received %d chars", len(result))
+            return result
+        except Exception as e:
+            if "response_format" in str(e).lower() or "unsupported" in str(e).lower():
+                logger.warning(
+                    "generate_json_response: response_format unsupported, retrying without it: %s", e
+                )
+                response = self.client.chat.completions.create(
+                    model=self.deployment,
+                    messages=messages,
+                    temperature=0.2,
+                    max_completion_tokens=max_completion_tokens,
+                    stream=False,
+                )
+                return response.choices[0].message.content.strip()
+            logger.error("generate_json_response error: %s", e)
+            raise
+
     def generate_response(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int = 15
+        max_completion_tokens: int = 15
     ) -> str:
         """
         Generate complete response (non-streaming).
@@ -275,14 +451,14 @@ class LLMClient:
         Args:
             messages: Conversation history
             temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
+            max_completion_tokens: Maximum tokens to generate
         
         Returns:
             Complete response text
         """
         try:
             # Collect all chunks
-            chunks = list(self.generate_response_stream(messages, temperature, max_tokens))
+            chunks = list(self.generate_response_stream(messages, temperature, max_completion_tokens))
             response = ''.join(chunks)
             logger.info(f"Generated response: {response[:100]}...")
             return response
