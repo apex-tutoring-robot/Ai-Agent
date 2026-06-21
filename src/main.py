@@ -238,6 +238,19 @@ class JarvisBot:
         "skip the upload", "skip upload",
     )
 
+    # Unambiguous session-start phrases matched deterministically so LLM tool routing
+    # is bypassed. Kept conservative: "I want to study X" or "let's study X" can
+    # appear in general conversation and must still go through the LLM.
+    _BEGIN_SESSION_PHRASES = (
+        "tutoring session", "study session", "learning session",
+        "start a session", "begin a session", "have a session",
+        "begin tutoring", "start tutoring",
+        "resume tutoring", "resume our session", "resume the session",
+        "resume where we left off", "pick up where we left off",
+        "continue our session", "continue the session",
+        "begin a lesson", "start a lesson",
+    )
+
     _BEGIN_ONBOARDING_TOOL = {
         "type": "function",
         "function": {
@@ -276,7 +289,11 @@ class JarvisBot:
         # ── in_session: intercept session-exit intent before LLM sees it ─────────
         if state == "in_session":
             text = user_text.lower()
-            if any(phrase in text for phrase in self._SESSION_EXIT_PHRASES):
+            is_exit = any(phrase in text for phrase in self._SESSION_EXIT_PHRASES)
+            # "new tutoring session" / "new study session" etc. while in-session means
+            # the user wants to exit the current session and start fresh.
+            is_new_session_request = any(phrase in text for phrase in self._BEGIN_SESSION_PHRASES)
+            if is_exit or is_new_session_request:
                 focus = (self._active_session or {}).get("focus", "our current topic")
                 with self._study_state_lock:
                     self._study_state = "awaiting_session_redirect"
@@ -504,7 +521,11 @@ class JarvisBot:
                 )
             return self._process_syllabus_file(syllabus_path)
 
-        # ── normal: study session start handled via begin_onboarding tool call ──
+        # ── normal: explicit session-start phrases bypass LLM tool routing ──
+        if any(phrase in user_text.lower() for phrase in self._BEGIN_SESSION_PHRASES):
+            logger.info("📚 Session-start phrase matched — executing begin_onboarding directly")
+            return self._execute_begin_onboarding()
+
         return None
 
     def _process_syllabus_file(self, file_path: str) -> str:

@@ -275,7 +275,7 @@ class GuardrailsManager:
         filled = _IMAGE_EVAL_PROMPT.format(image_content=image_content)
         result = await self._rails.llm.ainvoke(
             [HumanMessage(content=filled)],
-            max_tokens=3,
+            max_completion_tokens=3,
         )
         answer = (result.content if hasattr(result, 'content') else str(result)).strip().lower()
         return not answer.startswith('yes')
@@ -296,7 +296,7 @@ class GuardrailsManager:
         from langchain_core.messages import HumanMessage
         result = await self._rails.llm.ainvoke(
             [HumanMessage(content=filled)],
-            max_tokens=3,
+            max_completion_tokens=3,
         )
         answer = (result.content if hasattr(result, 'content') else str(result)).strip().lower()
         return not answer.startswith('yes')
@@ -318,7 +318,7 @@ class GuardrailsManager:
         from langchain_core.messages import HumanMessage
         result = await self._rails.llm.ainvoke(
             [HumanMessage(content=filled)],
-            max_tokens=3,
+            max_completion_tokens=3,
         )
         answer = (result.content if hasattr(result, 'content') else str(result)).strip().lower()
         return not answer.startswith('yes')

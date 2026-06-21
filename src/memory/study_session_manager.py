@@ -240,7 +240,7 @@ class StudySessionManager:
 
         try:
             raw = self.llm_client.generate_structured_response(
-                prompt, topic_list_schema(), "topic_list", max_tokens=200
+                prompt, topic_list_schema(), "topic_list", max_completion_tokens=200
             )
             result = TopicList.model_validate_json(raw)
             if result.topics:
@@ -269,7 +269,7 @@ class StudySessionManager:
 
         try:
             raw = self.llm_client.generate_structured_response(
-                prompt, diagnostic_questions_schema(), "diagnostic_questions", max_tokens=300
+                prompt, diagnostic_questions_schema(), "diagnostic_questions", max_completion_tokens=300
             )
             result = DiagnosticQuestions.model_validate_json(raw)
             if result.questions:
@@ -323,7 +323,7 @@ class StudySessionManager:
 
         try:
             raw = self.llm_client.generate_structured_response(
-                prompt, study_plan_llm_schema(), "study_plan", max_tokens=1000
+                prompt, study_plan_llm_schema(), "study_plan", max_completion_tokens=1000
             )
         except Exception as e:
             logger.error("generate_study_plan: LLM call failed: %s", e)
@@ -379,7 +379,7 @@ class StudySessionManager:
 
         try:
             raw = self.llm_client.generate_structured_response(
-                prompt, session_plan_llm_schema(), "session_plan", max_tokens=800
+                prompt, session_plan_llm_schema(), "session_plan", max_completion_tokens=800
             )
             session = SessionPlan.model_validate_json(raw)
         except Exception as e:
@@ -506,7 +506,7 @@ class StudySessionManager:
 
         try:
             raw = self.llm_client.generate_structured_response(
-                prompt, session_debrief_schema(), "session_debrief", max_tokens=400
+                prompt, session_debrief_schema(), "session_debrief", max_completion_tokens=400
             )
             debrief = SessionDebrief.model_validate_json(raw)
             summary_fields = {
@@ -559,7 +559,7 @@ class StudySessionManager:
 
         try:
             raw = self.llm_client.generate_structured_response(
-                prompt, redirect_intent_schema(), "redirect_intent", max_tokens=30
+                prompt, redirect_intent_schema(), "redirect_intent", max_completion_tokens=30
             )
             result = RedirectIntent.model_validate_json(raw)
             logger.info("classify_redirect_intent: '%s' → %s", user_text[:50], result.intent)
@@ -593,7 +593,7 @@ class StudySessionManager:
 
         try:
             raw = self.llm_client.generate_structured_response(
-                prompt, resume_intent_schema(), "resume_intent", max_tokens=30
+                prompt, resume_intent_schema(), "resume_intent", max_completion_tokens=30
             )
             result = ResumeIntent.model_validate_json(raw)
             logger.info("classify_resume_intent: '%s' → %s", user_text[:50], result.intent)
@@ -635,7 +635,7 @@ class StudySessionManager:
 
         try:
             raw = self.llm_client.generate_structured_response(
-                prompt, session_progress_schema(), "session_progress", max_tokens=300
+                prompt, session_progress_schema(), "session_progress", max_completion_tokens=300
             )
             progress = SessionProgress.model_validate_json(raw)
             partial_fields = {

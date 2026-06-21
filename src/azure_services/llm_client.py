@@ -83,7 +83,7 @@ class LLMClient:
         self,
         messages: List[Dict],
         temperature: float = 0.7,
-        max_tokens: int = 500
+        # max_completion_tokens: int = 500
     ) -> Iterator[str]:
         """
         Generate streaming response from Azure OpenAI.
@@ -91,7 +91,7 @@ class LLMClient:
         Args:
             messages: Conversation history (list of message dicts)
             temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
+            max_completion_tokens: Maximum tokens to generate
         
         Yields:
             Text chunks as they arrive
@@ -107,7 +107,7 @@ class LLMClient:
                 model=self.deployment,
                 messages=full_messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_completion_tokens,
                 stream=True
             )
             
@@ -127,7 +127,7 @@ class LLMClient:
         messages: List[Dict],
         tools: List[Dict],
         temperature: float = 0.7,
-        max_tokens: int = 500,
+        max_completion_tokens: int = 500,
     ) -> Iterator[Union[str, ToolCall]]:
         """
         Streaming completion with tool support.
@@ -145,7 +145,7 @@ class LLMClient:
             tools=tools,
             tool_choice="auto",
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_completion_tokens,
             stream=True,
         )
 
@@ -184,7 +184,7 @@ class LLMClient:
                         call_id=tc_data["id"],
                     )
 
-    def extract_image_content(self, image_url: str, max_tokens: int = 1000) -> str:
+    def extract_image_content(self, image_url: str, max_completion_tokens: int = 1000) -> str:
         """
         One-shot GPT-4V call to extract all image content as plain text.
         Called once on the vision turn; result stored in history so the image
@@ -205,7 +205,7 @@ class LLMClient:
         response = self.client.chat.completions.create(
             model=self.deployment,
             messages=messages,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_completion_tokens,
             stream=False,
         )
         extracted = response.choices[0].message.content.strip()
@@ -217,7 +217,7 @@ class LLMClient:
         prompt: str,
         schema: dict,
         schema_name: str,
-        max_tokens: int = 1000,
+        max_completion_tokens: int = 1000,
     ) -> str:
         """
         One-shot call that enforces a JSON schema via OpenAI structured outputs.
@@ -232,7 +232,7 @@ class LLMClient:
             schema:      JSON schema dict (must be strict-mode compatible:
                          additionalProperties: false on all object nodes).
             schema_name: Short identifier for the schema (letters/digits/dashes only).
-            max_tokens:  Maximum tokens to generate.
+            max_completion_tokens:  Maximum tokens to generate.
 
         Returns:
             Raw response string (valid JSON matching the schema).
@@ -243,7 +243,7 @@ class LLMClient:
                 model=self.deployment,
                 messages=messages,
                 temperature=0.2,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_completion_tokens,
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
@@ -263,14 +263,14 @@ class LLMClient:
                     "generate_structured_response: structured outputs not supported, "
                     "falling back to json_object mode: %s", e
                 )
-                return self.generate_json_response(prompt, max_tokens=max_tokens)
+                return self.generate_json_response(prompt, max_completion_tokens=max_completion_tokens)
             logger.error("generate_structured_response(%s) error: %s", schema_name, e)
             raise
 
     def generate_json_response(
         self,
         prompt: str,
-        max_tokens: int = 1000
+        max_completion_tokens: int = 1000
     ) -> str:
         """
         One-shot non-streaming call that requests a JSON object response.
@@ -281,7 +281,7 @@ class LLMClient:
 
         Args:
             prompt: Full task prompt (system + instruction combined).
-            max_tokens: Maximum tokens to generate.
+            max_completion_tokens: Maximum tokens to generate.
 
         Returns:
             Raw response string (should be valid JSON).
@@ -295,7 +295,7 @@ class LLMClient:
                 model=self.deployment,
                 messages=messages,
                 temperature=0.2,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_completion_tokens,
                 response_format={"type": "json_object"},
                 stream=False,
             )
@@ -311,7 +311,7 @@ class LLMClient:
                     model=self.deployment,
                     messages=messages,
                     temperature=0.2,
-                    max_tokens=max_tokens,
+                    max_completion_tokens=max_completion_tokens,
                     stream=False,
                 )
                 return response.choices[0].message.content.strip()
@@ -322,7 +322,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int = 15
+        max_completion_tokens: int = 15
     ) -> str:
         """
         Generate complete response (non-streaming).
@@ -330,14 +330,14 @@ class LLMClient:
         Args:
             messages: Conversation history
             temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
+            max_completion_tokens: Maximum tokens to generate
         
         Returns:
             Complete response text
         """
         try:
             # Collect all chunks
-            chunks = list(self.generate_response_stream(messages, temperature, max_tokens))
+            chunks = list(self.generate_response_stream(messages, temperature, max_completion_tokens))
             response = ''.join(chunks)
             logger.info(f"Generated response: {response[:100]}...")
             return response
