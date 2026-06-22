@@ -119,20 +119,6 @@ class ContinuousVADCapture:
         self._barge_in_consecutive_needed = int(os.getenv('BARGE_IN_CHUNKS_NEEDED', '3'))
         # WebRTC AEC needs ~1-2s to converge on a new playback session — block barge-in until then.
         self._barge_in_grace_s = float(os.getenv('BARGE_IN_GRACE_S', '2.0'))
-        # AEC Ring Buffer (Hardware-Aligned Reference Audio)
-        # 1-second circular buffer for reference audio
-        self.ref_ring_buffer = np.zeros(self.sample_rate, dtype=np.int16)
-        self.ref_ring_pos = 0
-        self.ref_ring_timestamp = 0.0 # DAC Time of the last sample in ring
-        self.last_reference_time = 0.0 # Wall-clock time of last reference update
-        self.ref_lock = threading.Lock()
-
-        # AEC Delay Compensation & Stabilization
-        self.mic_delay_buffer = deque(maxlen=int(os.getenv('AEC_DELAY_CHUNKS', '12')))
-        self._last_telemetry_time = 0
-        self._detected_lags = deque(maxlen=50) # Stable median
-        self._last_correlation_time = 0
-        self._aec_locked_offset = None # Permanent lock per session
 
         self.preprocessor = None
 

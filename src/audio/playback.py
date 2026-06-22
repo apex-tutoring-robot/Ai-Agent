@@ -118,14 +118,23 @@ class AudioPlayer:
 
             target_device_index = output_device_index if output_device_index is not None else self.output_device_index
 
-            # Close any stale stream (safe here — no worker thread is running yet)
+            # Close any stale stream (safe here — no worker thread is running yet).
+            # stop_stream() and close() are in separate try blocks so that a throw
+            # from stop_stream() (stream already stopped) never skips close().
             if self.audio_stream:
                 try:
                     self.audio_stream.stop_stream()
+                except Exception:
+                    pass
+                try:
                     self.audio_stream.close()
                 except Exception:
                     pass
                 self.audio_stream = None
+                # ALSA needs time to fully release the device before it can be
+                # reopened on the same index. Without this, the new stream opens
+                # successfully but produces no audio output.
+                time.sleep(0.15)
 
             # Open in CALLBACK mode — PortAudio drives timing, no Python write() blocks
             self.audio_stream = self.pa.open(

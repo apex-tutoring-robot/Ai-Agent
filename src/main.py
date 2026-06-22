@@ -578,7 +578,7 @@ class JarvisBot:
                 with self._study_state_lock:
                     self._study_state = "govt_syllabus"
                 self._request_queue.put("__GOVT_SYLLABUS__")
-                return "No problem! What subject or topic would you like to study today?"
+                return "No problem!"
             syllabus_path = self.study_session_manager.get_new_syllabus_file()
             if not syllabus_path:
                 return (
@@ -966,7 +966,6 @@ class JarvisBot:
                         continuous_vad.reset_idle_timer()
                         continue
 
-                    self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
                     if self.ui_signals:
                         self.ui_signals.start_talking.emit()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
@@ -1144,6 +1143,13 @@ class JarvisBot:
             pulse_index = self._get_pulse_device_index(self.pa)
             input_index = self._get_input_device_index(self.pa, pulse_index)
 
+            # Allow explicit output device override (e.g. AUDIO_OUTPUT_DEVICE_INDEX=1 to bypass
+            # PipeWire and talk directly to the USB speaker, same as test_speaker.py does).
+            _out_env = os.getenv('AUDIO_OUTPUT_DEVICE_INDEX')
+            output_device_index = int(_out_env) if _out_env not in (None, "") else pulse_index
+            if _out_env not in (None, ""):
+                logger.info(f"🔊 Output overridden by AUDIO_OUTPUT_DEVICE_INDEX={output_device_index}")
+
             # Initialize VAD with dedicated INPUT stream
             continuous_vad = ContinuousVADCapture(
                 idle_timeout_seconds=idle_timeout,
@@ -1170,7 +1176,7 @@ class JarvisBot:
             )
             speaker_thread = threading.Thread(
                 target=self._speaker_loop,
-                args=(continuous_vad, pulse_index),
+                args=(continuous_vad, output_device_index),
                 name="SpeakerThread"
             )
 

@@ -5,7 +5,7 @@ Generates tutoring responses using Azure OpenAI with streaming output.
 
 import os
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterator, List, Dict, Optional, Union
 from openai import AzureOpenAI
 from dotenv import load_dotenv
@@ -87,7 +87,7 @@ class LLMClient:
         self,
         messages: List[Dict],
         temperature: float = 0.7,
-        # max_completion_tokens: int = 500
+        max_completion_tokens: int = 500,
     ) -> Iterator[str]:
         """
         Generate streaming response from Azure OpenAI.
@@ -107,7 +107,7 @@ class LLMClient:
             logger.info(f"Generating response for {len(messages)} messages")
             
             # Create streaming completion
-            response = self .chat.completions.create(
+            response = self.client.chat.completions.create(
                 model=self.deployment,
                 messages=full_messages,
                 temperature=temperature,
@@ -211,7 +211,6 @@ class LLMClient:
             messages=messages,
             max_completion_tokens=max_completion_tokens,
             stream=False,
-            user=self.user_id,
         )
         extracted = response.choices[0].message.content.strip()
         logger.info(f"📷 Image extracted ({len(extracted)} chars)")
@@ -221,7 +220,7 @@ class LLMClient:
         self,
         messages,
         temperature: float = 0.2,
-        max_tokens: int = 800
+        max_completion_tokens: int = 800,
     ):
         try:
             full_messages = [
@@ -300,7 +299,7 @@ class LLMClient:
                 model=self.deployment,
                 messages=full_messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_completion_tokens,
             )
 
             content = response.choices[0].message.content.strip()
