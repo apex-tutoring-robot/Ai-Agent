@@ -159,29 +159,36 @@ class StudySessionManager:
         """
         Find and return the text of a static curriculum document matching *topic*.
 
-        Files live in self.curriculum_dir (default: "curriculum/").  The match is
-        fuzzy: both the topic and each filename stem are normalised to lowercase
-        with punctuation stripped, then the file whose stem has the highest
-        word-overlap with the topic is chosen (must share at least one word).
+        Files live in self.curriculum_dir (default: "curriculum/").  Both the
+        topic and each filename stem are normalised to lowercase alphanumeric
+        tokens (non-alphanumeric characters become spaces), then ranked by
+        difflib character-sequence similarity.  This handles slug conventions
+        (grade2-math), spelling variants (maths/math), and any filename format
+        added in the future without code changes.
 
         Supports .txt and .md files (plain read) and .pdf files (PyPDF2).
-        Returns None when no match is found or the directory does not exist.
+        Returns None when no match exceeds MIN_SCORE or the directory is absent.
         """
+        import difflib
+
+        _MIN_SCORE = 0.4
+
         if not os.path.isdir(self.curriculum_dir):
             logger.warning("load_curriculum_doc: curriculum dir %r not found", self.curriculum_dir)
             return None
 
-        def _normalise(s: str) -> set:
-            import string
-            s = s.lower().translate(str.maketrans("", "", string.punctuation))
-            return set(s.split())
+        def _normalise(s: str) -> str:
+            tokens = []
+            for ch in s.lower():
+                tokens.append(ch if ch.isalnum() else " ")
+            return " ".join("".join(tokens).split())
 
-        topic_words = _normalise(topic)
-        if not topic_words:
+        topic_norm = _normalise(topic)
+        if not topic_norm:
             return None
 
         best_path: Optional[str] = None
-        best_score: int = 0
+        best_score: float = 0.0
 
         for filename in sorted(os.listdir(self.curriculum_dir)):
             if filename.startswith("."):
@@ -189,16 +196,16 @@ class StudySessionManager:
             stem, ext = os.path.splitext(filename)
             if ext.lower() not in {".txt", ".md", ".pdf"}:
                 continue
-            overlap = len(_normalise(stem) & topic_words)
-            if overlap > best_score:
-                best_score = overlap
+            score = difflib.SequenceMatcher(None, topic_norm, _normalise(stem)).ratio()
+            if score > best_score:
+                best_score = score
                 best_path = os.path.join(self.curriculum_dir, filename)
 
-        if not best_path:
-            logger.info("load_curriculum_doc: no match for topic %r", topic)
+        if best_score < _MIN_SCORE or not best_path:
+            logger.info("load_curriculum_doc: no match for topic %r (best_score=%.2f)", topic, best_score)
             return None
 
-        logger.info("load_curriculum_doc: matched %r for topic %r", best_path, topic)
+        logger.info("load_curriculum_doc: matched %r for topic %r (score=%.2f)", best_path, topic, best_score)
         ext = os.path.splitext(best_path)[1].lower()
 
         try:

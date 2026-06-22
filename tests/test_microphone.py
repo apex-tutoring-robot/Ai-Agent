@@ -45,10 +45,9 @@ def test_microphone(device_index=None, duration=5, sample_rate=16000):
         print(f"  Max Input Channels: {device_info['maxInputChannels']}")
         print(f"  Default Sample Rate: {int(device_info['defaultSampleRate'])} Hz")
         
-        if 'seeed' in device_info['name'].lower() or 'respeaker' in device_info['name'].lower():
-            print(f"  ⭐ ReSpeaker HAT detected!")
-        else:
-            print(f"  ⚠️  This doesn't appear to be a ReSpeaker device")
+        name_lower = device_info['name'].lower()
+        if 'seeed' in name_lower or 'respeaker' in name_lower:
+            print(f"  ⭐ ReSpeaker device detected!")
         
         print()
     except Exception as e:
@@ -120,8 +119,9 @@ def test_microphone(device_index=None, duration=5, sample_rate=16000):
         print("\n🔊 Playing back recording...")
         print("   (You should hear what you just said)\n")
         
-        # Get output device
-        output_device_index = int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 1))
+        # Get output device — use PulseAudio (3) so PipeWire routes to speaker;
+        # direct ALSA access to hw:3,0 is blocked when echo-cancel-playback holds it.
+        output_device_index = int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 3))
         
         output_stream = pa.open(
             format=format,
