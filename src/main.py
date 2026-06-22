@@ -30,24 +30,26 @@ load_dotenv(".env")
 
 
 def _setup_logging():
-    """Write INFO+ logs to both the console and a timestamped file in logs/."""
-    os.makedirs("logs", exist_ok=True)
-    log_path = os.path.join("logs", f"run_{time.strftime('%Y%m%d_%H%M%S')}.log")
-
+    """Write logs to console, and optionally to a timestamped file in logs/."""
     fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s")
-
-    file_handler = logging.FileHandler(log_path)
-    file_handler.setFormatter(fmt)
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(fmt)
 
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    root.addHandler(file_handler)
     root.addHandler(console_handler)
 
-    return log_path
+    log_dir = os.getenv("LOG_DIR") or None
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"run_{time.strftime('%Y%m%d_%H%M%S')}.log")
+        file_handler = logging.FileHandler(log_path)
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
+        return log_path
+
+    return None
 
 
 _setup_logging()
@@ -726,6 +728,7 @@ class JarvisBot:
         ECHO_COOLDOWN_S = float(os.getenv('ECHO_COOLDOWN_S', 0.5))
         SIMILARITY_THRESHOLD = float(os.getenv('ECHO_SIMILARITY_THRESHOLD', 0.55))
         SIMILARITY_WINDOW_S = float(os.getenv('ECHO_SIMILARITY_WINDOW_S', 3.0))
+        BARGE_IN_ECHO_THRESHOLD = float(os.getenv('BARGE_IN_ECHO_THRESHOLD', 0.75))
 
         try:
             # Create a never-ending generator for STT
@@ -752,6 +755,22 @@ class JarvisBot:
                             logger.info(f"🎤 BARGE-IN: '{text}' (Stopping playback)")
                             self._interruption_event.set()
                             self.audio_player.stop_streaming(immediate=True)
+                        # Barge-in echo guard: if the finalized text is mostly
+                        # contained within the bot's last response, it's acoustic
+                        # echo picked up by the mic — not real user speech.
+                        # Uses containment (overlap/echo_len) rather than Jaccard
+                        # because echo is a fragment of a longer response.
+                        # Requires >=4 words to avoid blocking short genuine replies.
+                        if is_final and self._last_bot_response:
+                            echo_words = set(text.lower().split())
+                            bot_words = set(self._last_bot_response.lower().split())
+                            if len(echo_words) >= 4 and bot_words:
+                                containment = len(echo_words & bot_words) / len(echo_words)
+                                if containment > BARGE_IN_ECHO_THRESHOLD:
+                                    logger.info(f"🔇 Barge-in echo rejected (containment={containment:.0%}): '{text[:60]}'")
+                                    self._barge_in_detected.clear()
+                                    self._interruption_event.clear()
+                                    continue
 
                 # ── LAYER 3: Echo cooldown ──
                 # Short grace period after playback ends to catch echo tail

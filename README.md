@@ -1,293 +1,144 @@
-# Jarvis - AI-Powered Raspberry Pi Tutoring Robot
+# Jarvis — Voice AI Tutoring Robot
 
-Jarvis is a voice-activated AI tutoring assistant that runs on Raspberry Pi. It uses wake word detection, Azure AI services, and streaming audio for natural, low-latency conversations.
+A voice-activated educational assistant that runs on Raspberry Pi. Jarvis listens for a wake word, transcribes speech via Azure STT, queries an Azure OpenAI deployment, and streams the response back as synthesized speech — behaving like a patient, conversational tutor.
 
-## 🌟 Features
+## Hardware
 
-- **Wake Word Detection**: Always listening for "Hey [wakeword]" (low CPU usage ~3%)
-- **Voice Activity Detection**: Smart audio capture using WebRTC VAD
-- **Azure AI Integration**: 
-  - Speech-to-Text for accurate transcription
-  - GPT-4 via Azure OpenAI for intelligent tutoring
-- **Streaming Architecture**: Minimal latency with LLM → TTS streaming pipeline
-- **Privacy Protection**: Built-in PII anonymization framework
-- **Continuous Conversations**: Maintains conversation history for multi-turn interactions
-- **USB Audio Support**: Configurable USB microphone and speaker devices
-
-## 📋 Prerequisites
-
-### Hardware
-- Raspberry Pi (3B+ or newer recommended)
-- USB microphone (or compatible audio input device)
+- Raspberry Pi (tested on RPi 4/5 with 64-bit OS)
+- USB microphone (tested with ReSpeaker Lite)
 - USB speaker or audio output device
-- Internet connection
+- (Optional) Raspberry Pi Camera Module for homework scanning
 
-### Software
-- Python 3.8 or newer
-- Raspberry Pi OS (or compatible Linux distribution)
+## Prerequisites
 
-### Required Accounts & Keys
-1. **Azure Cognitive Services** account (for Speech-to-Text and Text-to-Speech)
-2. **Azure OpenAI** service access and deployment
-3. **Picovoice Console** account (for wake word model)
+- Python 3.8+
+- PipeWire audio server
+- Azure account with:
+  - Azure Cognitive Services (Speech-to-Text and Text-to-Speech)
+  - Azure OpenAI deployment
 
-## 🚀 Installation
+## Installation
 
-### 1. Clone the Repository
 ```bash
-cd ~/Documents/apex-code/Ai-Agent 2.0
-cd Jarvis
+git clone <repo-url>
+cd Ai-Agent
+./setup.sh
 ```
 
-### 2. Install System Dependencies
+`setup.sh` installs system packages, creates a Python virtual environment at `.venv/`, installs Python dependencies, and configures PipeWire WebRTC echo cancellation for full-duplex audio.
 
-On Raspberry Pi:
+## Configuration
+
 ```bash
-sudo apt-get update
-sudo apt-get install -y portaudio19-dev python3-pyaudio
+cp config/.env.template .env
 ```
 
-### 3. Install Python Dependencies
+Edit `.env` and fill in your credentials.
+
+### Required variables
+
+| Variable | Description |
+|---|---|
+| `AZURE_SPEECH_KEY` | Azure Speech Services API key |
+| `AZURE_SPEECH_REGION` | Azure region (e.g. `eastus`) |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL |
+| `AZURE_OPENAI_DEPLOYMENT` | Model deployment name |
+| `AZURE_OPENAI_API_VERSION` | API version (e.g. `2024-12-01-preview`) |
+| `AUDIO_INPUT_DEVICE_INDEX` | PyAudio input device index |
+
+### Finding your audio device index
+
 ```bash
-pip install -r requirements.txt
+source .venv/bin/activate
+python tests/test_list_devices.py
 ```
 
-### 4. Configure Environment Variables
+Set `AUDIO_INPUT_DEVICE_INDEX` to the index of the `pulse` or `pipewire` device. Do **not** set `AUDIO_OUTPUT_DEVICE_INDEX` — the code auto-discovers the PipeWire output so TTS audio flows through echo cancellation correctly.
 
-Copy the template and edit with your credentials:
+### Wake word
+
+The default wake word is `hey_jarvis` (built into openwakeword). To use a different built-in model, set `WAKE_WORD_MODEL` to the model name string. No external API key is required.
+
+### Key optional variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `WAKE_WORD_THRESHOLD` | `0.5` | Wake word confidence threshold |
+| `SILENCE_TIMEOUT_MS` | `1500` | Silence (ms) before ending speech capture |
+| `BARGE_IN_ENERGY_THRESHOLD` | `1500` | RMS threshold to trigger barge-in |
+| `BARGE_IN_ECHO_THRESHOLD` | `0.75` | Containment score to reject bot-echo barge-ins |
+| `TTS_VOICE` | `en-US-JennyNeural` | Azure TTS voice name |
+| `TTS_SPEECH_RATE` | `1.0` | Speech rate multiplier |
+| `MAX_CONVERSATION_HISTORY` | `20` | Number of turns kept in LLM context |
+| `FACE_ENABLED` | `true` | Show PyQt5 face animation window |
+| `GUARDRAILS_ENABLED` | `false` | Enable NeMo Guardrails content filtering |
+| `LOG_LEVEL` | `INFO` | Logging verbosity |
+
+## LLM Tools
+
+Jarvis exposes two tools to the language model. The LLM decides when to call them based on what the student says.
+
+**`begin_onboarding`** — Starts or resumes a structured tutoring session. The LLM calls this when the student explicitly asks to begin a lesson, start a study session, or resume tutoring. It triggers a multi-step onboarding flow: syllabus ingestion, diagnostic questions to gauge prior knowledge, and personalised study plan generation. Not called for general knowledge questions.
+
+**`capture_photo`** — Takes a photo using the robot's camera and feeds the image into the next LLM turn. The LLM calls this when the student wants Jarvis to look at something physical — a homework sheet, a problem on paper, a diagram. Requires a camera module; the image is extracted to text before being sent to the model to minimise token usage.
+
+## Running
+
 ```bash
-cp config/.env.template config/.env
-nano config/.env
-```
-
-Fill in your Azure credentials:
-- `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION`
-- `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_DEPLOYMENT`
-- `PICOVOICE_ACCESS_KEY`
-
-### 5. Configure USB Audio Devices
-
-List available audio devices:
-```bash
-python -c "import pyaudio; p = pyaudio.PyAudio(); [print(f'{i}: {p.get_device_info_by_index(i)[\"name\"]}') for i in range(p.get_device_count())]"
-```
-
-Update `AUDIO_INPUT_DEVICE_INDEX` and `AUDIO_OUTPUT_DEVICE_INDEX` in `.env` with your USB device indices.
-
-### 6. Create Wake Word Model
-
-1. Go to [Picovoice Console](https://console.picovoice.ai/)
-2. Create a new wake word: "Hey Jarvis"
-3. Select platform: Raspberry Pi
-4. Download the `.ppn` file
-5. Save it to `config/Hey-Jarvis_en_raspberry-pi_v3_0_0.ppn`
-
-### 7. Configure System Prompt
-
-Edit `config/system_prompt.txt` to define Jarvis's tutoring behavior and personality.
-
-Example:
-```
-You are Jarvis, a patient and encouraging AI tutor. Your goal is to help students 
-learn through guided questions rather than giving direct answers. Be friendly, 
-supportive, and adapt your explanations to the student's level.
-```
-
-## 🎯 Usage
-
-### Run Jarvis
-```bash
+source .venv/bin/activate
 cd src
 python main.py
 ```
 
-### Interaction Flow
-1. Wait for "Listening for wake word..." message
-2. Say "Hey Jarvis"
-3. Speak your question or request
-4. Pause when finished speaking (VAD will detect silence)
-5. Jarvis will respond with audio
-6. Continue the conversation by saying "Hey Jarvis" again
+**Interaction flow:**
+1. Jarvis prints `Listening for wake word...`
+2. Say **"Hey Jarvis"**
+3. Ask your question; pause when done (VAD detects silence automatically)
+4. Jarvis responds aloud
+5. Trigger the wake word again to continue
+6. `Ctrl+C` to shut down
 
-### Stop Jarvis
-Press `Ctrl+C` to gracefully shutdown.
-
-## 🏗️ Architecture
+## Project Structure
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Jarvis DATA FLOW                      │
-└─────────────────────────────────────────────────────────────┘
-
-🔊 Wake Word Detection
-           ↓
-🎤 Audio Capture (VAD)
-           ↓
-☁️ Speech-to-Text (Azure)
-           ↓
-🛡️ Privacy Protection (PII Anonymization)
-           ↓
-🧠 LLM Processing (Azure OpenAI) ───→ Streaming text chunks
-           ↓                                      ↓
-📝 Conversation History              🎯 TTS Synthesis (Azure)
-                                                  ↓
-                                     🔈 Audio Playback (Streaming)
-                                                  ↓
-                                     🔄 Return to Wake Word Listening
-```
-
-### Project Structure
-```
-Jarvis/
+Ai-Agent/
 ├── src/
-│   ├── audio/
-│   │   ├── wake_word.py          # Wake word detection
-│   │   ├── single_turn_vad.py    # VAD-based audio capture
-│   │   └── playback.py           # Streaming audio playback
-│   ├── azure_services/
-│   │   ├── stt_client.py         # Speech-to-Text
-│   │   ├── llm_client.py         # Azure OpenAI streaming
-│   │   └── tts_client.py         # Text-to-Speech streaming
-│   ├── privacy/
-│   │   └── privacy_manager.py    # PII anonymization (placeholder)
-│   ├── conversation/
-│   │   └── state_manager.py      # Conversation history
-│   └── main.py                   # Main orchestrator
+│   ├── main.py                  # Main orchestrator
+│   ├── audio/                   # Wake word detection, VAD, audio playback
+│   ├── azure_services/          # STT, LLM, and TTS clients
+│   ├── conversation/            # Conversation history management
+│   ├── vision/                  # Camera and homework scanning
+│   ├── memory/                  # Study session persistence
+│   ├── guardrails/              # NeMo Guardrails integration
+│   └── visuals/                 # PyQt5 UI and face animation
 ├── config/
-│   ├── .env.template             # Environment variables template
-│   └── system_prompt.txt         # LLM system prompt
-├── requirements.txt
-└── README.md
+│   ├── .env.template            # Environment variable template
+│   ├── system_prompt.txt        # Tutor persona and instructions
+│   ├── requirements.txt         # Python dependencies
+│   └── guardrails/              # Guardrails rules (config.yml, main.co)
+├── tests/                       # Audio and component tests
+├── logs/                        # Timestamped run logs (auto-created)
+├── setup.sh                     # One-shot installer
+└── .env                         # Runtime configuration (not committed)
 ```
 
-## 🔧 Configuration
-
-### Environment Variables
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `AZURE_SPEECH_KEY` | Azure Speech Services API key | ✅ |
-| `AZURE_SPEECH_REGION` | Azure region (e.g., eastus) | ✅ |
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key | ✅ |
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL | ✅ |
-| `AZURE_OPENAI_DEPLOYMENT` | Deployment name | ✅ |
-| `PICOVOICE_ACCESS_KEY` | Picovoice access key | ✅ |
-| `AUDIO_INPUT_DEVICE_INDEX` | USB mic device index | ✅ |
-| `AUDIO_OUTPUT_DEVICE_INDEX` | USB speaker device index | ✅ |
-| `SAMPLE_RATE` | Audio sample rate (16000) | No |
-| `VAD_AGGRESSIVENESS` | VAD sensitivity 0-3 (3) | No |
-| `SILENCE_TIMEOUT_MS` | Silence timeout (1500ms) | No |
-| `MAX_CONVERSATION_HISTORY` | Max messages (20) | No |
-| `TTS_VOICE` | Azure TTS voice name | No |
-| `LOG_LEVEL` | Logging level (INFO) | No |
-
-## 🛡️ Privacy Implementation
-
-The `PrivacyManager` is provided as a placeholder. To implement PII anonymization:
-
-1. Edit `src/privacy/privacy_manager.py`
-2. Implement `anonymize()` method to detect and mask:
-   - Names
-   - Email addresses
-   - Phone numbers
-   - Addresses
-   - Other personally identifiable information
-3. Optionally implement `deanonymize()` for response mapping
-
-## 🧪 Testing Components
-
-Each component can be tested individually:
+## Testing Audio
 
 ```bash
-# Test wake word detection
-python src/audio/wake_word.py
+source .venv/bin/activate
 
-# Test VAD audio capture
-python src/audio/single_turn_vad.py
+# Test microphone input
+python tests/test_microphone.py
 
-# Test audio playback
-python src/audio/playback.py
-
-# Test Speech-to-Text
-python src/azure_services/stt_client.py
-
-# Test LLM streaming
-python src/azure_services/llm_client.py
-
-# Test Text-to-Speech
-python src/azure_services/tts_client.py
-
-# Test conversation manager
-python src/conversation/state_manager.py
+# Test speaker output
+python tests/test_speaker.py
 ```
 
-## 🐛 Troubleshooting
+## Tuning
 
-### Wake Word Not Detected
-- Check `PICOVOICE_ACCESS_KEY` is correct
-- Verify wake word `.ppn` file exists and path is correct
-- Test microphone with: `python src/audio/wake_word.py`
-- Try adjusting sensitivity in wake word detector
+**Bot responds to its own voice (ghost turns):** Lower `BARGE_IN_ECHO_THRESHOLD` toward `0.60` to make the echo guard more aggressive.
 
-### No Audio Output
-- Run device enumeration: `python src/audio/playback.py`
-- Verify `AUDIO_OUTPUT_DEVICE_INDEX` matches your USB speaker
-- Check speaker volume and connections
+**Barge-in fires too easily:** Raise `BARGE_IN_ENERGY_THRESHOLD` or increase `BARGE_IN_CHUNKS_NEEDED`.
 
-### Speech Recognition Errors
-- Verify Azure credentials in `.env`
-- Check internet connection
-- Ensure `SAMPLE_RATE` is valid for WebRTC VAD (8000, 16000, 32000, or 48000)
-
-### High Latency
-- Check internet connection speed
-- Reduce `SILENCE_TIMEOUT_MS` for faster cutoff
-- Use faster Azure region closer to your location
-- Verify USB audio devices support the configured sample rate
-
-### PyAudio Installation Issues
-```bash
-sudo apt-get install -y portaudio19-dev
-pip install --upgrade pip
-pip install pyaudio
-```
-
-## 📊 Performance
-
-- **Wake Word Detection**: ~3% CPU usage (continuous listening)
-- **End-to-End Latency**: ~2-4 seconds (network dependent)
-  - STT: ~0.5-1s
-  - LLM: ~1-2s (streaming starts immediately)
-  - TTS: ~0.5-1s (per sentence, streamed)
-
-## 🔄 Future Enhancements
-
-- [ ] Offline wake word alternatives
-- [ ] Local LLM support for privacy
-- [ ] Multi-language support
-- [ ] Custom voice training
-- [ ] Conversation analytics
-- [ ] Session persistence and replay
-- [ ] Advanced PII detection
-
-## 📄 License
-
-This project is provided as-is for educational purposes.
-
-## 🤝 Contributing
-
-Contributions are welcome! Please ensure:
-- Code follows existing structure and style
-- Components remain modular and testable
-- Documentation is updated accordingly
-
-## 📞 Support
-
-For issues related to:
-- **Azure Services**: [Azure Support](https://azure.microsoft.com/support/)
-- **Picovoice**: [Picovoice Docs](https://picovoice.ai/docs/)
-- **Raspberry Pi**: [Raspberry Pi Forums](https://forums.raspberrypi.com/)
-
----
-
-**Built with ❤️ for education**
+**Speech capture cuts off too soon:** Increase `SILENCE_TIMEOUT_MS`.

@@ -29,7 +29,7 @@ build/
 Thumbs.db
 
 # Logs
-*.log
+/*logs
 
 # Audio files (test recordings)
 *.raw
