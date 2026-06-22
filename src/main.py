@@ -1,14 +1,15 @@
+import base64
 import os
-# Allow the OS to use its default display and QT backend, rather than hardcoding.
-
+import re
+import sys
 import threading
 import time
-import queue
-from queue import Queue
+from queue import Queue, Empty
 from typing import Optional
+
+import pyaudio
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import QApplication
-import sys
 
 from visuals.ui.main_window import MainWindow
 from visuals.ui.ui_signals import UISignals
@@ -65,7 +66,6 @@ class JarvisBot:
         self.ui_signals = ui_signals
 
         # Initialize shared PyAudio instance
-        import pyaudio
         self.pa = pyaudio.PyAudio()
 
         # Initialize components with shared PyAudio
@@ -150,7 +150,6 @@ class JarvisBot:
             time.sleep(1.0)
 
             # 3. Re-initialize everything to Ensure consistency
-            import pyaudio
             self.pa = pyaudio.PyAudio()
 
             # Re-init components with shared callbacks
@@ -210,13 +209,8 @@ class JarvisBot:
         return len(overlap) / max(len(words_a), len(words_b))
 
     def run_teaching_plan(self, plan, output_device_index, continuous_vad):
-        import time
-
         speech_steps = plan.get("speech", [])
         visual_steps = plan.get("visuals", [])
-
-        def visuals_for(step_id):
-            return [v for v in visual_steps if v.get("speech_id") == step_id]
 
         self.audio_player.start_streaming(output_device_index=output_device_index)
         logger.info("DEBUG: run_teaching_plan started")
@@ -235,7 +229,7 @@ class JarvisBot:
                 if not step_text:
                     continue
 
-                actions = visuals_for(step["id"])
+                actions = [v for v in visual_steps if v.get("speech_id") == step["id"]]
 
                 if self.ui_signals and actions:
                     logger.info(f"DEBUG: emitting draw actions for step {step_id}: {actions}")
@@ -252,8 +246,6 @@ class JarvisBot:
                 self.ui_signals.stop_talking.emit()
 
     def is_math_query(self, text: str) -> bool:
-        import re
-
         t = text.lower().strip()
 
         math_keywords = [
@@ -368,9 +360,9 @@ class JarvisBot:
                     self._study_state = "awaiting_session_redirect"
                 logger.info("📚 Session-exit intent detected in in_session — redirecting")
                 return (
-                    f"It sounds like you want to step away from our session on {focus}. "
-                    f"Would you like to take a break and save your spot so we can pick up {focus} later, "
-                    f"or stop this session and start something on a completely different topic?"
+                    f"It sounds like you want to step away from the session on {focus}. "
+                    f"Would you like to take a break and resume it later, "
+                    f"or start a new session on a completely different topic?"
                 )
             return None
 
@@ -383,7 +375,7 @@ class JarvisBot:
                 return "Of course! I will save your progress here. Let us get you set up with something new."
             # intent == "save_and_break" (default)
             self._pending_partial_save = True
-            return "Sure! I will save your progress. Pick up where we left off whenever you are ready."
+            return "Sure! I will save your progress. We'll pick up where you left off whenever you are ready."
 
         # ── extracting_syllabus: blocking text/image/PDF extraction ──
         if state == "extracting_syllabus":
@@ -488,12 +480,7 @@ class JarvisBot:
             )
             if not success:
                 with self._study_state_lock:
-                    self._pending_syllabus_path = None
-                    self._pending_syllabus_text = None
-                    self._pending_topic = None
-                    self._diagnostic_questions = []
-                    self._diagnostic_answers = []
-                    self._diagnostic_index = 0
+                    self._reset_onboarding_state()
                     self._study_state = "normal"
                 return "Sorry, I had trouble creating your study plan. Please try again."
 
@@ -502,12 +489,7 @@ class JarvisBot:
             session = self.study_session_manager.get_next_session()
             self.study_session_manager.mark_session_in_progress(session["session_id"])
             with self._study_state_lock:
-                self._pending_syllabus_path = None
-                self._pending_syllabus_text = None
-                self._pending_topic = None
-                self._diagnostic_questions = []
-                self._diagnostic_answers = []
-                self._diagnostic_index = 0
+                self._reset_onboarding_state()
                 self._active_session = session
                 self._study_state = "in_session"
                 context = self.study_session_manager.build_session_context(session)
@@ -597,6 +579,15 @@ class JarvisBot:
 
         return None
 
+    def _reset_onboarding_state(self):
+        """Clear pending onboarding fields. Must be called with _study_state_lock held."""
+        self._pending_syllabus_path = None
+        self._pending_syllabus_text = None
+        self._pending_topic = None
+        self._diagnostic_questions = []
+        self._diagnostic_answers = []
+        self._diagnostic_index = 0
+
     def _process_syllabus_file(self, file_path: str) -> str:
         """Queue syllabus extraction as a synthetic turn and return an interim response."""
         with self._study_state_lock:
@@ -655,7 +646,6 @@ class JarvisBot:
         return self._process_syllabus_file(syllabus_path)
 
     def force_shape_if_missing(self, plan, user_text):
-        import re
         text = user_text.lower()
         visuals = plan.get("visuals", [])
 
@@ -680,7 +670,6 @@ class JarvisBot:
             sides = int(match.group(1) or match.group(2))
 
         if not sides:
-            plan["visuals"] = visuals
             return plan
 
         visuals = [
@@ -813,7 +802,7 @@ class JarvisBot:
                 # Wait for next user request
                 try:
                     item = self._request_queue.get(timeout=1.0)
-                except queue.Empty:
+                except Empty:
                     continue
 
                 if item is None:  # Termination sentinel
@@ -902,11 +891,9 @@ class JarvisBot:
                                     if self.ui_signals:
                                         self.ui_signals.scanning.emit()
                                     try:
-                                        saved_path = self.camera.capture_and_save()
-                                        logger.info("📷 Image saved to %s", saved_path)
-                                        import base64 as _b64
-                                        with open(saved_path, "rb") as _f:
-                                            data_url = f"data:image/jpeg;base64,{_b64.b64encode(_f.read()).decode()}"
+                                        b64_data = self.camera.capture_base64()
+                                        logger.info("📷 Image captured")
+                                        data_url = f"data:image/jpeg;base64,{b64_data}"
                                         extracted = self.llm_client.extract_image_content(data_url)
                                         continuous_vad.reset_idle_timer()
                                         logger.info("📷 Image extracted (%d chars) — sending to LLM", len(extracted))
@@ -958,9 +945,9 @@ class JarvisBot:
                                     with self._study_state_lock:
                                         self._study_state = "awaiting_session_redirect"
                                     full_response = (
-                                        f"That seems to be outside our session on {focus}. "
-                                        f"Would you like to take a break and save your spot so we can pick up {focus} later, "
-                                        f"or stop this session and start something on a completely different topic?"
+                                        f"It sounds like you want to step away from the session on {focus}. "
+                                        f"Would you like to take a break and resume it later, "
+                                        f"or start a new session on a completely different topic?"
                                     )
                                     logger.info("📚 Off-topic tag detected — asking redirect question")
 
@@ -1151,7 +1138,7 @@ class JarvisBot:
             while not self._request_queue.empty():
                 try:
                     self._request_queue.get_nowait()
-                except queue.Empty:
+                except Empty:
                     break
 
             # Enter continuous conversation mode
@@ -1267,19 +1254,18 @@ class JarvisBot:
 
             # 2. Stop VAD first — this closes the audio stream and unblocks the listener thread
             try:
-                if 'continuous_vad' in locals():
-                    continuous_vad.stop_background_monitoring()
-                    continuous_vad.cleanup()
-            except:
+                continuous_vad.stop_background_monitoring()
+                continuous_vad.cleanup()
+            except Exception:
                 pass
 
             # 3. Now join workers — listener can exit cleanly within the timeout
             try:
-                if 'listener_thread' in locals() and listener_thread.is_alive():
+                if listener_thread.is_alive():
                     listener_thread.join(timeout=5.0)
-                if 'speaker_thread' in locals() and speaker_thread.is_alive():
+                if speaker_thread.is_alive():
                     speaker_thread.join(timeout=1.0)
-            except:
+            except Exception:
                 pass
 
             if self.ui_signals:
@@ -1289,173 +1275,6 @@ class JarvisBot:
             logger.info("▶️  Resuming wake word detection...")
             self._restart_wake_word()
             self._interaction_lock.release()
-
-    def _process_turn_streaming(self, continuous_vad: ContinuousVADCapture, output_device_index: int = None) -> bool:
-        """ Process one turn of the conversation using streaming STT.
-        Args:
-            continuous_vad: Continuous VAD instance
-            output_device_index: PulseAudio output index for playback
-
-        Returns:
-            True if speech was processed, False otherwise
-        """
-        try:
-            # Step 1: Stream audio chunks to STT
-            if self.ui_signals:
-                self.ui_signals.thinking.emit()
-            logger.info("☁️  Starting streaming speech recognition...")
-            stt_start = time.perf_counter()
-
-            # Get streaming audio chunks from VAD
-            audio_stream = continuous_vad.stream_audio_chunks()
-
-            # Stream to Azure STT
-            user_text = ""
-            first_text_time = None
-            for result_tuple in self.stt_client.recognize_streaming(audio_stream):
-                # Unpack tuple: (text, first_recognition_time)
-                text_result, first_text_time = result_tuple
-                user_text = text_result  # Get the complete text
-
-            # Check if we got any speech after all recognition events
-            if not user_text.strip():
-                    logger.warning("No speech recognized")
-                    return False
-
-            # LATENCY METRICS
-            # STT Latency: Time from when user stopped speaking to when the FINAL
-            # text was recognized by Azure.
-            if continuous_vad.silence_detected_time:
-                # Use current time as 'final' text arrival time
-                final_text_time = time.perf_counter()
-                stt_latency = final_text_time - continuous_vad.silence_detected_time
-                logger.info(f"⏱️  STT Latency (Full Turn): {stt_latency:.3f}s")
-
-                # Also log how fast the FIRST words were detected
-                if first_text_time:
-                    # Note: this might be negative if first words arriving before
-                    # VAD's 800ms silence period ends!
-                    raw_stt_speed = first_text_time - continuous_vad.silence_detected_time
-                    logger.info(f"⏱️  First-Text Offset: {raw_stt_speed:.3f}s")
-
-            # 2. End-to-TTFT: Will be calculated when first LLM token arrives
-
-            logger.info(f"📝 Student: {user_text}")
-
-            # Step 2: Anonymize PII
-            anonymized_text = self.privacy_manager.anonymize(user_text)
-            # Step 3: Add to conversation history
-            self.conversation_manager.add_user_message(anonymized_text)
-            # Step 4: Generate LLM response with streaming
-            logger.info("🧠 Generating response...")
-            llm_start = time.perf_counter()
-            messages = self.conversation_manager.get_messages()
-
-            # Collect response text chunks as they stream
-            response_chunks = []
-            first_token = True
-            try:
-                # Start audio player BEFORE first audio arrives for lower latency
-                # CRITICAL: Use dedicated PulseAudio output stream
-                if self.ui_signals:
-                    self.ui_signals.start_talking.emit()
-                self.audio_player.start_streaming(output_device_index=output_device_index)
-
-                # Full Duplex: Start monitoring for interruptions while bot speaks
-                self._interruption_event.clear()
-                def on_interruption():
-                    # Stop monitoring IMMEDIATELY
-                    continuous_vad.stop_background_monitoring()
-                    self._interruption_event.set()
-                    self.audio_player.stop_streaming(immediate=True)
-
-                # Grace period: Wait 500ms before starting monitoring to avoid
-                # catching the user's trailing breath or room echo.
-                time.sleep(0.5)
-                continuous_vad.start_background_monitoring(on_interruption)
-
-                # Create a wrapper that collects chunks while streaming
-                def text_chunk_collector(llm_stream):
-                    """Collect text chunks while passing them through."""
-                    nonlocal first_token
-                    first_token_time = None
-                    for chunk in llm_stream:
-                        response_chunks.append(chunk)
-                        if first_token:
-                            first_token_time = time.perf_counter()
-                            llm_latency = first_token_time - llm_start
-
-                            # LATENCY: End-to-TTFT (Silence detected → First LLM token)
-                            if continuous_vad.silence_detected_time:
-                                end_to_ttft = first_token_time - continuous_vad.silence_detected_time
-                                logger.info(f"⏱️  End-to-TTFT: {end_to_ttft:.3f}s")
-
-                            logger.info(f"⏱️  LLM TTFT: {llm_latency:.3f}s")
-
-                            # Track for TTFAS calculation
-                            self.audio_player.first_token_time = first_token_time
-                            first_token = False
-                        yield chunk
-
-                # Stream LLM output through collector to TTS
-                llm_stream = self.llm_client.generate_response_stream(messages)
-                collected_stream = text_chunk_collector(llm_stream)
-                tts_stream = self.tts_client.synthesize_stream(collected_stream)
-
-                # Stream audio to player (player already started, audio plays immediately)
-                for audio_chunk in tts_stream:
-                    # Check for interruption or if player died
-                    if self._interruption_event.is_set():
-                        logger.warning("🛑 INTERRUPTION DETECTED during TTS stream - stopping...")
-                        self.audio_player.stop_streaming(immediate=True)
-                        break
-
-                    if not self.audio_player._is_playing:
-                        logger.warning("⚠️  Playback stopped unexpectedly - ending turn")
-                        break
-
-                    try:
-                        self.audio_player.queue_audio(audio_chunk)
-                    except Exception as queue_err:
-                        logger.error(f"Failed to queue audio: {queue_err}")
-                        break
-
-                # Stop monitoring immediately when we exit the stream loop
-                continuous_vad.stop_background_monitoring()
-
-                # Wait for playback to complete (unless interrupted)
-                if not self._interruption_event.is_set() and self.audio_player._is_playing:
-                    self.audio_player.stop_streaming()
-
-                # If we were interrupted, we return True so Turn Count advances
-                # and next turn starts immediately with the handoff audio.
-                if self._interruption_event.is_set():
-                    logger.info("🛑 Response interrupted - advancing to next turn")
-                    # Add partial response to history? (Optional, skipping for brevity)
-                    return True
-
-                # Combine collected chunks into full response
-                response_text = ''.join(response_chunks)
-                logger.info(f"Chippy: {response_text}")
-                # Add assistant response to conversation
-                self.conversation_manager.add_assistant_message(response_text)
-
-                # Reset idle timer AFTER bot finishes speaking
-                # This ensures we don't timeout while bot is generating/speaking
-                continuous_vad.reset_idle_timer()
-
-                if self.ui_signals:
-                    self.ui_signals.stop_talking.emit()
-                return True
-
-            except Exception as e:
-                logger.error(f"Error in streaming pipeline: {e}")
-                self.audio_player.stop_streaming()
-                raise
-
-        except Exception as e:
-            logger.error(f"Error processing turn: {e}")
-            return False
 
     def _restart_wake_word(self):
         """Restart wake word detection in a non-blocking way."""
