@@ -19,7 +19,6 @@ import pyaudio
 from audio import suppress_alsa  # noqa: F401
 
 load_dotenv()
-logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
 
 try:
@@ -119,6 +118,9 @@ class ContinuousVADCapture:
         self._barge_in_consecutive_needed = int(os.getenv('BARGE_IN_CHUNKS_NEEDED', '3'))
         # WebRTC AEC needs ~1-2s to converge on a new playback session — block barge-in until then.
         self._barge_in_grace_s = float(os.getenv('BARGE_IN_GRACE_S', '2.0'))
+        self._post_playback_drain_s = float(os.getenv('POST_PLAYBACK_DRAIN_MS', '400')) / 1000.0
+        self._min_consecutive_to_start = int(os.getenv('MIN_SPEECH_CHUNKS_TO_START', '8'))
+        self._barge_in_echo_drain_frames = int(os.getenv('BARGE_IN_ECHO_DRAIN_FRAMES', '2'))
 
         self.preprocessor = None
 
@@ -134,6 +136,12 @@ class ContinuousVADCapture:
             except Exception as e:
                 logger.warning(f"Failed to init Speex Preprocessor: {e}")
             
+    def _mix_to_mono(self, chunk: bytes) -> bytes:
+        if getattr(self, '_actual_channels', 1) == 2:
+            audio_array = np.frombuffer(chunk, dtype=np.int16)
+            return audio_array.reshape(-1, 2)[:, 0].tobytes()
+        return chunk
+
     def set_playback_state(self, is_playing: bool) -> None:
         """Called by main.py to inform VAD whether the bot is currently playing audio.
 
@@ -161,7 +169,6 @@ class ContinuousVADCapture:
             Raw audio bytes of captured speech
         """
         try:
-            # Only create stream if not already provided
             # Only create stream if not already provided
             if not self.audio_stream:
                 self.ensure_stream_open()
@@ -224,22 +231,18 @@ class ContinuousVADCapture:
                 
                 # Read audio chunk
                 audio_chunk = self.audio_stream.read(self.chunk_size, exception_on_overflow=False)
-                
-                # Mix down to mono if device is stereo
-                if getattr(self, '_actual_channels', 1) == 2:
-                    audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
-                    audio_chunk = audio_array.reshape(-1, 2)[:, 0].tobytes()
-                
+                audio_chunk = self._mix_to_mono(audio_chunk)
+
                 # Apply Speex Preprocessor (Denoise + AGC + Dereverb)
                 if self.preprocessor:
                     try:
                         audio_chunk = self.preprocessor.process(audio_chunk)
-                    except:
+                    except Exception:
                         pass
-                
+
                 # Check if speech is present
                 is_speech = self.vad.is_speech(audio_chunk, self.sample_rate)
-                
+
                 if is_speech:
                     if not speech_started:
                         logger.info("💬 Speech detected...")
@@ -309,24 +312,22 @@ class ContinuousVADCapture:
                 logger.info(f"⚡ Handoff: Yielding {len(self.interruption_buffer)} interruption chunks...")
                 for chunk in self.interruption_buffer:
                     yield chunk
-                
+
                 # Reset state but keep speech_started=True so we don't time out
                 self._interrupted_this_turn = False
                 self.interruption_buffer = []
-                speech_started = True 
-                listen_start = time.time() # Reset timeout
+                speech_started = True
             else:
-                drain_duration = float(os.getenv('POST_PLAYBACK_DRAIN_MS', '400')) / 1000.0
-                drain_end = time.time() + drain_duration
+                drain_end = time.time() + self._post_playback_drain_s
                 drained_chunks = 0
-                if drain_duration > 0:
+                if self._post_playback_drain_s > 0:
                     while time.time() < drain_end:
                         try:
                             self.audio_stream.read(self.chunk_size, exception_on_overflow=False)
                             drained_chunks += 1
                         except Exception:
                             break
-                    logger.debug(f"Drained {drained_chunks} mic buffer chunks ({drain_duration*1000:.0f}ms) to clear echo tail")
+                    logger.debug(f"Drained {drained_chunks} mic buffer chunks ({self._post_playback_drain_s*1000:.0f}ms) to clear echo tail")
             # -----------------------------------------------------------------
             
             listen_start = time.time()
@@ -340,9 +341,9 @@ class ContinuousVADCapture:
             # Debouncing: count consecutive speech chunks to avoid noise triggering
             consecutive_speech_chunks = 0
             min_speech_chunks_to_cancel_silence = 25  # 25 chunks (500ms) to cancel mid-speech silence
-            # Require 8 consecutive VAD-positive chunks (~160ms) before we declare speech START.
-            # This prevents echo blips that survived the drain from triggering the pipeline.
-            min_consecutive_to_start = int(os.getenv('MIN_SPEECH_CHUNKS_TO_START', '8'))
+            # Require consecutive VAD-positive chunks before declaring speech START.
+            # Prevents echo blips that survived the drain from triggering the pipeline.
+            min_consecutive_to_start = self._min_consecutive_to_start
             pending_speech_chunks = []  # Buffer chunks while waiting to confirm speech start
             
             # Reset latency tracking for this turn
@@ -363,12 +364,8 @@ class ContinuousVADCapture:
                 # Read audio chunk
                 audio_chunk = self.audio_stream.read(self.chunk_size, exception_on_overflow=False)
                 chunk_count += 1
-                
-                # Mix down to mono if device is stereo
-                if getattr(self, '_actual_channels', 1) == 2:
-                    audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
-                    audio_chunk = audio_array.reshape(-1, 2)[:, 0].tobytes()
-                
+                audio_chunk = self._mix_to_mono(audio_chunk)
+
                 # Apply Speex Preprocessor (Denoise + AGC + Dereverb)
                 if self.preprocessor:
                     try:
@@ -426,12 +423,11 @@ class ContinuousVADCapture:
                     
                     if not speech_started:
                         # Discard any partially accumulated pending chunks on silence break
-                        # (ensures the 8-chunk threshold is truly CONTIGUOUS)
-                        if pending_speech_chunks:
-                            pending_speech_chunks = []
+                        # (ensures the consecutive-chunk threshold is truly CONTIGUOUS)
+                        pending_speech_chunks = []
                         # Store in pre-buffer (circular, auto-discards old chunks)
                         pre_buffer.append(audio_chunk)
-                    elif speech_started:
+                    else:
                         # We were recording, now silence
                         silence_chunk_count += 1
                         if silence_start is None:
@@ -484,7 +480,7 @@ class ContinuousVADCapture:
         _barge_in_log_time = 0.0        # Throttle RMS telemetry to once/sec
         # After barge-in activates, drain this many frames as silence before opening STT.
         # Gives PipeWire AEC time to suppress the ongoing bot speech (default 40ms = 2 frames).
-        _barge_in_echo_drain = int(os.getenv('BARGE_IN_ECHO_DRAIN_FRAMES', '2'))
+        _barge_in_echo_drain = self._barge_in_echo_drain_frames
         _barge_in_drain_remaining = 0
         
         logger.info("📡 Continuous audio streaming started")
@@ -501,12 +497,8 @@ class ContinuousVADCapture:
                     break
                     
                 audio_chunk = self.audio_stream.read(self.chunk_size, exception_on_overflow=False)
-                
-                # Mix down to mono if device is stereo
-                if getattr(self, '_actual_channels', 1) == 2:
-                    audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
-                    audio_chunk = audio_array.reshape(-1, 2)[:, 0].tobytes()
-                
+                audio_chunk = self._mix_to_mono(audio_chunk)
+
                 # ════════════════════════════════════════════════════════
                 # MUTE-THE-PIPE: Decide whether to yield real audio or silence
                 # ════════════════════════════════════════════════════════
@@ -531,11 +523,6 @@ class ContinuousVADCapture:
                     if _now - _barge_in_log_time >= 1.0:
                         logger.debug(f"🔉 Barge-in RMS: {rms:.0f} (peak={_barge_in_peak_rms:.0f}, threshold={self._barge_in_energy_threshold})")
                         _barge_in_log_time = _now
-
-                    elapsed = time.time() - self._playback_start_time
-                    if elapsed < self._barge_in_grace_s:
-                        yield silence_chunk
-                        continue
 
                     if rms > self._barge_in_energy_threshold:
                         barge_in_consecutive += 1
@@ -564,12 +551,11 @@ class ContinuousVADCapture:
                 else:
                     # Bot is NOT playing — normal operation
                     # Reset barge-in state for next playback session
-                    if barge_in_active or barge_in_consecutive > 0 or _barge_in_peak_rms > 0:
-                        if _barge_in_peak_rms > 0:
-                            logger.debug(f"🔉 Barge-in session ended: peak RMS={_barge_in_peak_rms:.0f}, threshold={self._barge_in_energy_threshold}")
-                        barge_in_active = False
-                        barge_in_consecutive = 0
-                        _barge_in_peak_rms = 0.0
+                    if _barge_in_peak_rms > 0:
+                        logger.debug(f"🔉 Barge-in session ended: peak RMS={_barge_in_peak_rms:.0f}, threshold={self._barge_in_energy_threshold}")
+                    barge_in_active = False
+                    barge_in_consecutive = 0
+                    _barge_in_peak_rms = 0.0
                     
                     # VAD check to update idle timer
                     try:
@@ -642,7 +628,7 @@ class ContinuousVADCapture:
 
             while self._is_monitoring:
                 try:
-                    if not self.audio_stream or not self._is_monitoring:
+                    if not self.audio_stream:
                         break
 
                     # Capture audio
@@ -653,11 +639,8 @@ class ContinuousVADCapture:
                             logger.warning(f"Audio read error in monitoring: {e}")
                         break
                     
-                    # Mix down to mono if device is stereo
-                    if getattr(self, '_actual_channels', 1) == 2:
-                        audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
-                        audio_chunk = audio_array.reshape(-1, 2)[:, 0].tobytes()
-                    
+                    audio_chunk = self._mix_to_mono(audio_chunk)
+
                     # Determine current threshold based on whether bot is playing.
                     # Use real-time heartbeat from the hardware-backed callback.
                     is_bot_playing = False
@@ -667,33 +650,32 @@ class ContinuousVADCapture:
                     
                     current_threshold = playing_threshold if is_bot_playing else base_threshold
                     
-                    vad_chunk = audio_chunk
-                    is_speech = self.vad.is_speech(vad_chunk, self.sample_rate)
-                    
+                    is_speech = self.vad.is_speech(audio_chunk, self.sample_rate)
+
                     if is_speech:
                         consecutive_speech_chunks += 1
-                        
+
                         # Energy check: ensure the speech isn't just low-level noise
-                        samples = np.frombuffer(vad_chunk, dtype=np.int16)
+                        samples = np.frombuffer(audio_chunk, dtype=np.int16)
                         rms = np.sqrt(np.mean(samples.astype(np.float32)**2))
-                        
+
                         current_energy_req = energy_threshold_base * (1.2 if is_bot_playing else 1.0)
-                        
+
                         if rms < current_energy_req:
                             consecutive_speech_chunks = 0
-                        
+
                         if consecutive_speech_chunks >= current_threshold:
                             logger.info(f"🎤 Interruption detected! (After {consecutive_speech_chunks} chunks, threshold={current_threshold}, RMS={rms:.0f})")
 
                             # Stop monitoring IMMEDIATELY
                             self._is_monitoring = False
-                            
+
                             # CATCH THE SPEECH: Save the pre-buffer and current segment
                             # If bot was playing, we skip the first few chunks of the pre-buffer
                             # as they likely contain bot echo that AEC is still clearing.
                             skip_chunks = 5 if is_bot_playing else 0
                             handoff_list = list(monitoring_pre_buffer)[skip_chunks:]
-                            self.interruption_buffer = handoff_list + [vad_chunk]
+                            self.interruption_buffer = handoff_list + [audio_chunk]
                             
                             self._interrupted_this_turn = True
                             
@@ -702,7 +684,7 @@ class ContinuousVADCapture:
                             consecutive_speech_chunks = 0 # Reset
                     else:
                         consecutive_speech_chunks = 0
-                        monitoring_pre_buffer.append(vad_chunk)
+                        monitoring_pre_buffer.append(audio_chunk)
                         
                 except Exception as e:
                     # Don't spam errors for small glitches, but exit if fatal

@@ -17,7 +17,6 @@ from dotenv import load_dotenv
 from audio import suppress_alsa  # noqa: F401
 
 load_dotenv()
-logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
 
 
@@ -274,7 +273,7 @@ class AudioPlayer:
             self._is_playing = False
             # 1. Discard all queued audio
             logger.info("Clearing playback queue for immediate stop")
-            while not self.audio_queue.empty():
+            while True:
                 try:
                     self.audio_queue.get_nowait()
                 except queue.Empty:
@@ -302,19 +301,15 @@ class AudioPlayer:
                 while stream.is_active():
                     time.sleep(0.02)
 
-        # Close the stream safely
+        # Close the stream safely.
+        # On Pi 5 / ALSA, close() inside a callback-triggered path can cause
+        # assertion failures — stop here and let start_streaming / cleanup close.
         if self.audio_stream:
             try:
                 if stream.is_active():
                     stream.stop_stream()
-                # On Pi 5 / ALSA, closing the stream inside a callback-triggered
-                # path can cause assertion failures. We'll stop it here and 
-                # let start_streaming or cleanup handle the full close.
-                # self.audio_stream.close() 
             except Exception:
                 pass
-            # Set to None so we know it needs reopening, but don't close() yet
-            # self.audio_stream = None
 
         self.playback_thread = None
         if self.on_level is not None:
@@ -324,24 +319,19 @@ class AudioPlayer:
 
     def cleanup(self) -> None:
         """Clean up audio stream (but keep PyAudio instance for reuse)."""
-        # Clean up stream
-        try:
-            if self.audio_stream:
-                try:
-                    if self.audio_stream.is_active():
-                        self.audio_stream.stop_stream()
-                except:
-                    pass
-                try:
-                    self.audio_stream.close()
-                except:
-                    pass
-                self.audio_stream = None
-                
-                # CRITICAL: Give ALSA time to fully release the device
-                time.sleep(0.5)
-        except Exception as e:
-            logger.error(f"Error cleaning up audio stream: {e}")
+        if self.audio_stream:
+            try:
+                if self.audio_stream.is_active():
+                    self.audio_stream.stop_stream()
+            except Exception:
+                pass
+            try:
+                self.audio_stream.close()
+            except Exception:
+                pass
+            self.audio_stream = None
+            # CRITICAL: Give ALSA time to fully release the device
+            time.sleep(0.5)
         
         # DON'T terminate PyAudio - reuse it for next conversation
         # Only terminate in __exit__ or explicit shutdown

@@ -14,7 +14,6 @@ from openwakeword.model import Model
 from dotenv import load_dotenv
 
 load_dotenv()
-logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
 
 
@@ -85,26 +84,19 @@ class WakeWordDetector:
             self._owns_pa = True
             logger.info("PyAudio initialized (owned by WakeWordDetector)")
 
-            # Open input stream (SAFE VERSION)
+            # Open input stream, fall back to default device on failure
+            stream_kwargs = dict(
+                rate=self.sample_rate,
+                channels=1,
+                format=pyaudio.paInt16,
+                input=True,
+                frames_per_buffer=self.chunk_size,
+            )
             try:
-                self.audio_stream = self.pa.open(
-                    rate=self.sample_rate,
-                    channels=1,
-                    format=pyaudio.paInt16,
-                    input=True,
-                    frames_per_buffer=self.chunk_size,
-                    input_device_index=self.input_device_index
-                )
+                self.audio_stream = self.pa.open(**stream_kwargs, input_device_index=self.input_device_index)
             except Exception as e:
                 logger.warning(f"Failed to open with device index {self.input_device_index}, using default mic")
-
-                self.audio_stream = self.pa.open(
-                    rate=self.sample_rate,
-                    channels=1,
-                    format=pyaudio.paInt16,
-                    input=True,
-                    frames_per_buffer=self.chunk_size
-                )
+                self.audio_stream = self.pa.open(**stream_kwargs)
             logger.info(f"✓ Audio stream opened on input device index {self.input_device_index}")
 
             self._is_running = True
@@ -137,8 +129,6 @@ class WakeWordDetector:
                             self.last_detection_time = current_time
                             callback()
                             break
-
-                time.sleep(0.01)
 
         except Exception as e:
             logger.error(f"Error in wake word detection: {e}")
