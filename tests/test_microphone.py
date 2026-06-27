@@ -119,9 +119,18 @@ def test_microphone(device_index=None, duration=5, sample_rate=16000):
         print("\n🔊 Playing back recording...")
         print("   (You should hear what you just said)\n")
         
-        # Get output device — use PulseAudio (3) so PipeWire routes to speaker;
-        # direct ALSA access to hw:3,0 is blocked when echo-cancel-playback holds it.
-        output_device_index = int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 3))
+        # Prefer the env override; otherwise find the pulse output device so
+        # PipeWire routes to the speaker without fighting echo-cancel-playback.
+        env_out = os.getenv('AUDIO_OUTPUT_DEVICE_INDEX')
+        if env_out is not None:
+            output_device_index = int(env_out)
+        else:
+            output_device_index = None
+            for i in range(pa.get_device_count()):
+                info = pa.get_device_info_by_index(i)
+                if info['maxOutputChannels'] > 0 and 'pulse' in info['name'].lower():
+                    output_device_index = i
+                    break
         
         output_stream = pa.open(
             format=format,

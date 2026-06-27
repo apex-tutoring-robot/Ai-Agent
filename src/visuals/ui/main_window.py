@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self.signals.stop_talking.connect(self.face_widget.stop_talking)
         self.signals.mouth_level.connect(self.face_widget.push_mouth_level)
         self.signals.draw_actions.connect(self.handle_draw_actions)
+        self.signals.scanning.connect(self.face_widget.start_scanning)
 
     # =========================================================
     # UI MODES

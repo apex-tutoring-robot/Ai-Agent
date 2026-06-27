@@ -43,6 +43,9 @@ class WakeWordDetector:
         self.vad_threshold = vad_threshold if vad_threshold is not None else float(os.getenv('WAKE_WORD_VAD_THRESHOLD', 0))
         self.input_device_index = input_device_index
         
+        self._shared_pa = pa  # shared instance passed in; None means we own one
+        self.pa = None
+        self._owns_pa = False
         self.model = None
         self.audio_stream = None
         self._is_running = False
@@ -79,10 +82,14 @@ class WakeWordDetector:
                 )
                 self.model_name = None
 
-            # Always use a dedicated PyAudio instance here
-            self.pa = pyaudio.PyAudio()
-            self._owns_pa = True
-            logger.info("PyAudio initialized (owned by WakeWordDetector)")
+            if self._shared_pa is not None:
+                self.pa = self._shared_pa
+                self._owns_pa = False
+                logger.info("PyAudio shared with WakeWordDetector")
+            else:
+                self.pa = pyaudio.PyAudio()
+                self._owns_pa = True
+                logger.info("PyAudio initialized (owned by WakeWordDetector)")
 
             # Open input stream, fall back to default device on failure
             stream_kwargs = dict(

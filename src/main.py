@@ -68,13 +68,14 @@ class JarvisBot:
         # Initialize shared PyAudio instance
         self.pa = pyaudio.PyAudio()
 
-        # Initialize components with shared PyAudio
-        input_idx = os.getenv("AUDIO_INPUT_DEVICE_INDEX")
-        input_idx = int(input_idx) if input_idx not in (None, "") else None
+        # Route wake word mic through PipeWire/pulse to avoid direct ALSA access
+        # (opening a raw hw device while PipeWire owns it causes a segfault in PortAudio).
+        # Falls back to AUDIO_INPUT_DEVICE_INDEX if no pulse device is found.
+        wake_input_idx = self._get_pulse_device_index(self.pa)
 
         self.wake_word_detector = WakeWordDetector(
             pa=self.pa,
-            input_device_index=input_idx
+            input_device_index=wake_input_idx
         )
         self.audio_player = AudioPlayer(
             pa=self.pa,

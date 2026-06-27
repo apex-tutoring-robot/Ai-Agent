@@ -12,3 +12,4 @@ class UISignals(QObject):
     draw_actions = pyqtSignal(object)
     show_face_fullscreen = pyqtSignal()
     show_teaching_layout = pyqtSignal()
+    scanning = pyqtSignal()

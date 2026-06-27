@@ -54,6 +54,10 @@ class FaceWidget(QWidget):
         self.emotion = "thinking"
         self.is_talking = False
 
+    def start_scanning(self):
+        self.emotion = "thinking"
+        self.is_talking = False
+
     def start_talking(self):
         self.is_talking = True
 

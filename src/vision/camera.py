@@ -22,6 +22,10 @@ class Camera:
         self.height = 1944
 
     def _capture_to_file(self, path: str):
+        cameras = Picamera2.global_camera_info()
+        if not cameras:
+            raise RuntimeError("No cameras detected by libcamera. Check CSI cable and run 'libcamera-hello --list-cameras'.")
+        logger.debug(f"📷 Detected cameras: {cameras}")
         cam = Picamera2()
         config = cam.create_still_configuration(
             main={"size": (self.width, self.height)}
