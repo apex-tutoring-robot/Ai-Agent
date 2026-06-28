@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
         # Window settings
         # -----------------------------
         self.setWindowTitle("CHIPPY AI Tutor")
-        self.resize(1280, 720)
+        self.resize(1024, 600)
 
         # -----------------------------
         # Connect signals → UI methods

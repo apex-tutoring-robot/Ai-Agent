@@ -121,6 +121,53 @@ for attempt in $(seq 1 10); do
     sleep 1
 done
 
+echo "=== Configuring HDMI display (JRP7002 7-inch, micro-HDMI port closest to USB-C) ==="
+
+# The JRP7002 display doesn't assert the HDMI HPD pin, so the Pi firmware
+# reports both HDMI connectors as disconnected and the Wayland compositor
+# falls back to a virtual headless output. Two fixes are required:
+#
+# 1. hdmi_force_hotplug=1 in config.txt — tells the firmware to assume a
+#    display is present (must appear before dtoverlay=vc4-kms-v3d).
+# 2. video=HDMI-A-1:1280x720@60e in cmdline.txt — forces the KMS driver to
+#    enable the connector at boot without waiting for a HPD signal ('e' flag).
+#    1280x720 is the closest standard VESA mode to the panel's 1024x600 native.
+#
+# Display also requires a separate micro-USB power cable in addition to HDMI.
+
+CONFIG_TXT=/boot/firmware/config.txt
+if ! grep -q "hdmi_force_hotplug" "$CONFIG_TXT"; then
+    sudo sed -i 's/# Enable DRM VC4 V3D driver/# Force HDMI hotplug (JRP7002 display does not assert HPD pin)\nhdmi_force_hotplug=1\n\n# Enable DRM VC4 V3D driver/' "$CONFIG_TXT"
+    echo "  Added hdmi_force_hotplug=1 to $CONFIG_TXT"
+else
+    echo "  hdmi_force_hotplug already set in $CONFIG_TXT"
+fi
+
+CMDLINE_TXT=/boot/firmware/cmdline.txt
+if ! grep -q "video=HDMI-A-1" "$CMDLINE_TXT"; then
+    sudo sed -i 's/rootwait/rootwait video=HDMI-A-1:1280x720@60e/' "$CMDLINE_TXT"
+    echo "  Added video=HDMI-A-1:1280x720@60e to $CMDLINE_TXT"
+else
+    echo "  video=HDMI-A-1 already set in $CMDLINE_TXT"
+fi
+
+# labwc output config: use only HDMI-A-1 (port closest to USB-C power).
+# Without this, labwc enables both forced connectors and splits the desktop.
+mkdir -p ~/.config/labwc
+if [ ! -f ~/.config/labwc/outputs.xml ]; then
+    cat > ~/.config/labwc/outputs.xml << 'OUTPUTS_EOF'
+<outputs>
+  <output name="HDMI-A-1" enabled="true" />
+  <output name="HDMI-A-2" enabled="false" />
+</outputs>
+OUTPUTS_EOF
+    echo "  Wrote ~/.config/labwc/outputs.xml"
+else
+    echo "  ~/.config/labwc/outputs.xml already exists, skipping"
+fi
+
+echo "  NOTE: reboot required for config.txt and cmdline.txt changes to take effect"
+
 echo "=== Installing Claude Code (comment out for production) ==="
 curl -fsSL https://claude.ai/install.sh | bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
