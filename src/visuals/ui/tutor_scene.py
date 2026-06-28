@@ -6,7 +6,7 @@ class TutorScene(QGraphicsScene):
     def __init__(self, face_widget, teaching_canvas, parent=None):
         super().__init__(parent)
 
-        self.setSceneRect(QRectF(0, 0, 1280, 720))
+        self.setSceneRect(QRectF(0, 0, 1024, 600))
 
         self.canvas_item = teaching_canvas
         self.addItem(self.canvas_item)
@@ -19,7 +19,7 @@ class TutorScene(QGraphicsScene):
         
     def show_face_fullscreen(self):
             self.canvas_item.setVisible(False)
-            self.face_proxy.widget().setFixedSize(1280, 720)
+            self.face_proxy.widget().setFixedSize(1024, 600)
             self.face_proxy.setPos(0, 0)
             
     def show_teaching_layout(self):

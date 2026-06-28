@@ -91,15 +91,6 @@ class MainWindow(QMainWindow):
         """LLM is processing"""
         self.face_widget.start_thinking()
 
-    def show_teaching_mode(self, text):
-        """Bot is explaining something"""
-        self.canvas.clear_canvas()
-
-        # Optional: demo drawing (remove later if needed)
-        self.canvas.clear_canvas()
-        self.canvas.add_text("Example:", 80, 150)
-        self.canvas.add_text(text[:60], 80, 200)
-
     def clear_teaching(self):
         """Clear drawings"""
         self.canvas.clear_canvas()
@@ -158,16 +149,6 @@ class MainWindow(QMainWindow):
                             sides = max(3, min(12, sides))                            
                             points = self.regular_polygon_points(cx, cy, radius, sides)
                             self.canvas.add_polygon(points)
-
-    # =========================================================
-    # OPTIONAL HELPERS (FOR FUTURE)
-    # =========================================================
-
-    def draw_line(self, x1, y1, x2, y2):
-        self.canvas.add_line(x1, y1, x2, y2)
-
-    def draw_text(self, text, x, y):
-        self.canvas.add_text(text, x, y)
 
     def regular_polygon_points(self, cx, cy, radius, sides):
             points = []

@@ -1406,7 +1406,7 @@ def main():
         app = QApplication(sys.argv)
         ui_signals = UISignals()
         window = MainWindow(ui_signals)
-        window.show()
+        window.showFullScreen()
         jarvis = JarvisBot(ui_signals=ui_signals)
         worker = threading.Thread(target=jarvis.run, daemon=True)
         worker.start()
