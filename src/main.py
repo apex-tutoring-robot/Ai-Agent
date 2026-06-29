@@ -169,7 +169,8 @@ class JarvisBot:
     def _set_display_power(self, on: bool) -> None:
         if self.ui_signals is None:
             return
-        os.system(f"vcgencmd display_power {'1' if on else '0'}")
+        state = "on" if on else "off"
+        os.system(f"WAYLAND_DISPLAY=wayland-0 wlopm --{state} HDMI-A-1")
         self._display_on = on
         logger.info(f"🖥️  Display power {'on' if on else 'off'}")
 
