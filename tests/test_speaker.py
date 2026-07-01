@@ -16,6 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from dotenv import load_dotenv
 load_dotenv()
 
+from audio.device_finder import resolve_output_device, DeviceNotFoundError
+
 
 def generate_tone(frequency, duration, sample_rate=44100, amplitude=0.3):
     """
@@ -55,11 +57,17 @@ def test_speaker(device_index=None, sample_rate=None):
     print("USB SPEAKER TEST")
     print("="*70)
 
-    # Get device index from environment if not provided
-    if device_index is None:
-        device_index = int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 1))
-
     pa = pyaudio.PyAudio()
+
+    # Resolve by device name, not a stored index — USB enumeration order
+    # (and therefore the index) can change on every boot.
+    if device_index is None:
+        try:
+            device_index = resolve_output_device(pa)
+        except DeviceNotFoundError as e:
+            print(f"\n❌ {e}")
+            pa.terminate()
+            return
 
     # Show device info
     try:

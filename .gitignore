@@ -45,3 +45,6 @@ captures/
 # Runtime-generated study plans and uploaded syllabi (user data)
 studyplans/
 syllabus/
+
+# Runtime PID files
+*.pid

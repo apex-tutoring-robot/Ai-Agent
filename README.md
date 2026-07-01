@@ -45,16 +45,19 @@ Edit `.env` and fill in your credentials.
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL |
 | `AZURE_OPENAI_DEPLOYMENT` | Model deployment name |
 | `AZURE_OPENAI_API_VERSION` | API version (e.g. `2024-12-01-preview`) |
-| `AUDIO_INPUT_DEVICE_INDEX` | PyAudio input device index |
 
-### Finding your audio device index
+### Audio device configuration
+
+Audio devices are resolved by **name**, not index (see `src/audio/device_finder.py`) — PyAudio indices are assigned by USB enumeration order and shift across reboots, so a stored index silently breaks on the next boot. `main.py` itself always auto-discovers the PipeWire (`pulse`) device by name for both input and output, so TTS audio flows through echo cancellation correctly without any configuration.
+
+`AUDIO_INPUT_DEVICE_NAME` / `AUDIO_OUTPUT_DEVICE_NAME` (optional, default `usb pnp`) are only used by the hardware test scripts in `tests/` to pick your USB mic/speaker directly. Run:
 
 ```bash
 source .venv/bin/activate
 python tests/test_list_devices.py
 ```
 
-Set `AUDIO_INPUT_DEVICE_INDEX` to the index of the `pulse` or `pipewire` device. Do **not** set `AUDIO_OUTPUT_DEVICE_INDEX` — the code auto-discovers the PipeWire output so TTS audio flows through echo cancellation correctly.
+to see what's plugged in and confirm what gets auto-resolved; only change the `*_NAME` hint in `.env` if it doesn't match your hardware.
 
 ### Wake word
 

@@ -85,10 +85,14 @@ python test_audio_pipeline.py
 python test_list_devices.py
 ```
 
-Copy the recommended device indices and update your `.env` file:
+Devices are resolved by **name**, not index — indices shift across reboots as
+USB re-enumerates, so nothing here should be copied into `.env` as a number.
+This step just confirms what the built-in name hints (`usb pnp`, `respeaker`,
+`seeed`, ...) auto-resolve to. Only if the auto-resolved device is wrong for
+your hardware, set a substring of the correct device name in `.env`:
 ```
-AUDIO_INPUT_DEVICE_INDEX=X   # ReSpeaker index
-AUDIO_OUTPUT_DEVICE_INDEX=Y  # USB speaker index
+AUDIO_INPUT_DEVICE_NAME=your device name substring
+AUDIO_OUTPUT_DEVICE_NAME=your device name substring
 ```
 
 ### Step 2: Test Speaker

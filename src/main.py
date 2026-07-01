@@ -70,7 +70,6 @@ class JarvisBot:
 
         # Route wake word mic through PipeWire/pulse to avoid direct ALSA access
         # (opening a raw hw device while PipeWire owns it causes a segfault in PortAudio).
-        # Falls back to AUDIO_INPUT_DEVICE_INDEX if no pulse device is found.
         wake_input_idx = self._get_pulse_device_index(self.pa)
 
         self.wake_word_detector = WakeWordDetector(
@@ -1096,24 +1095,6 @@ class JarvisBot:
         )
         return 1
 
-    def _get_input_device_index(self, pa, pulse_index: int) -> int:
-        """Return the PyAudio input device index for the VAD mic stream.
-
-        When PipeWire AEC is active (pulse device found), input goes through
-        pulse so PipeWire routes it to echo-cancel-source. Falls back to
-        AUDIO_INPUT_DEVICE_INDEX env var if pulse is unavailable.
-        """
-        if pulse_index is not None:
-            logger.info(f"🎤 Input routed through PipeWire (device {pulse_index}) — AEC active")
-            return pulse_index
-        env_idx = os.getenv('AUDIO_INPUT_DEVICE_INDEX')
-        if env_idx not in (None, ""):
-            idx = int(env_idx)
-            logger.info(f"🎤 Using AUDIO_INPUT_DEVICE_INDEX={idx} (no PipeWire, direct hw)")
-            return idx
-        logger.warning("🎤 No input device configured — using system default")
-        return None
-
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
         # Cancel display sleep timer and restore display before anything else
@@ -1146,17 +1127,11 @@ class JarvisBot:
             # Enter continuous conversation mode
             idle_timeout = int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
 
-            # Output goes to pulse (PipeWire routes to echo-cancel-sink → USB speaker).
-            # Input goes to pulse too (PipeWire routes from echo-cancel-source → AEC-processed ReSpeaker).
+            # Both input and output route through pulse (PipeWire routes input
+            # from echo-cancel-source and output to echo-cancel-sink → USB speaker).
             pulse_index = self._get_pulse_device_index(self.pa)
-            input_index = self._get_input_device_index(self.pa, pulse_index)
-
-            # Allow explicit output device override (e.g. AUDIO_OUTPUT_DEVICE_INDEX=1 to bypass
-            # PipeWire and talk directly to the USB speaker, same as test_speaker.py does).
-            _out_env = os.getenv('AUDIO_OUTPUT_DEVICE_INDEX')
-            output_device_index = int(_out_env) if _out_env not in (None, "") else pulse_index
-            if _out_env not in (None, ""):
-                logger.info(f"🔊 Output overridden by AUDIO_OUTPUT_DEVICE_INDEX={output_device_index}")
+            input_index = pulse_index
+            output_device_index = pulse_index
 
             # Initialize VAD with dedicated INPUT stream
             continuous_vad = ContinuousVADCapture(

@@ -16,6 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from dotenv import load_dotenv
 load_dotenv()
 
+from audio.device_finder import resolve_input_device, resolve_output_device, DeviceNotFoundError
+
 
 def test_microphone(device_index=None, duration=5, sample_rate=16000):
     """
@@ -30,12 +32,18 @@ def test_microphone(device_index=None, duration=5, sample_rate=16000):
     print("RESPEAKER 2-MIC PI HAT - MICROPHONE TEST")
     print("="*70)
     
-    # Get device index from environment if not provided
-    if device_index is None:
-        device_index = int(os.getenv('AUDIO_INPUT_DEVICE_INDEX', 1))
-    
     pa = pyaudio.PyAudio()
-    
+
+    # Resolve by device name, not a stored index — USB enumeration order
+    # (and therefore the index) can change on every boot.
+    if device_index is None:
+        try:
+            device_index = resolve_input_device(pa)
+        except DeviceNotFoundError as e:
+            print(f"\n❌ {e}")
+            pa.terminate()
+            return
+
     # Show device info
     try:
         device_info = pa.get_device_info_by_index(device_index)
@@ -101,8 +109,9 @@ def test_microphone(device_index=None, duration=5, sample_rate=16000):
         stream.stop_stream()
         stream.close()
         
-        # Save to file
-        output_file = "./tests/test_recording.wav"
+        # Save to file, relative to this script's own directory (not cwd) so
+        # the test works regardless of where it's invoked from.
+        output_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_recording.wav")
         print(f"\n💾 Saving recording to {output_file}...")
         
         wf = wave.open(output_file, 'wb')
@@ -119,18 +128,17 @@ def test_microphone(device_index=None, duration=5, sample_rate=16000):
         print("\n🔊 Playing back recording...")
         print("   (You should hear what you just said)\n")
         
-        # Prefer the env override; otherwise find the pulse output device so
-        # PipeWire routes to the speaker without fighting echo-cancel-playback.
-        env_out = os.getenv('AUDIO_OUTPUT_DEVICE_INDEX')
-        if env_out is not None:
-            output_device_index = int(env_out)
-        else:
+        # Prefer PipeWire's "pulse" device by name so playback routes through
+        # echo-cancel-playback; fall back to the resolved USB output device.
+        try:
+            from audio.device_finder import find_device, DEFAULT_OUTPUT_NAME_HINTS
+            output_device_index = find_device(
+                pa, "output",
+                name_env_var="AUDIO_OUTPUT_DEVICE_NAME",
+                default_name_hints=["pulse"] + DEFAULT_OUTPUT_NAME_HINTS,
+            )
+        except DeviceNotFoundError:
             output_device_index = None
-            for i in range(pa.get_device_count()):
-                info = pa.get_device_info_by_index(i)
-                if info['maxOutputChannels'] > 0 and 'pulse' in info['name'].lower():
-                    output_device_index = i
-                    break
         
         output_stream = pa.open(
             format=format,

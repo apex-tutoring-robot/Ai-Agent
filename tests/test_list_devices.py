@@ -4,7 +4,17 @@ Lists all available audio input and output devices on the Raspberry Pi.
 Useful for identifying device indices for ReSpeaker 2-Mic Pi HAT and USB speakers.
 """
 
+import os
+import sys
+
 import pyaudio
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from audio.device_finder import resolve_input_device, resolve_output_device, DeviceNotFoundError
 
 
 def list_audio_devices():
@@ -68,39 +78,39 @@ def list_audio_devices():
         print("  No output devices found")
     
     print("\n" + "="*70)
-    print("RECOMMENDATIONS FOR .env FILE")
+    print("AUTO-RESOLVED DEVICES (what the tests/ scripts will actually use)")
     print("="*70)
-    
-    # Find ReSpeaker for input
-    respeaker_idx = None
-    for idx, name, _ in input_devices:
-        if 'seeed' in name.lower() or 'respeaker' in name.lower():
-            respeaker_idx = idx
-            break
-    
-    # Find USB or default output
-    usb_output_idx = None
-    for idx, name, _ in output_devices:
-        if 'usb' in name.lower():
-            usb_output_idx = idx
-            break
-    
-    if respeaker_idx is not None:
-        print(f"\nFor ReSpeaker 2-Mic Pi HAT input:")
-        print(f"  AUDIO_INPUT_DEVICE_INDEX={respeaker_idx}")
-    else:
-        print(f"\n⚠️  ReSpeaker not detected. Using first available input device.")
-        if input_devices:
-            print(f"  AUDIO_INPUT_DEVICE_INDEX={input_devices[0][0]}")
-    
-    if usb_output_idx is not None:
-        print(f"\nFor USB Speaker output:")
-        print(f"  AUDIO_OUTPUT_DEVICE_INDEX={usb_output_idx}")
-    else:
-        print(f"\n⚠️  USB speaker not detected. Using first available output device.")
-        if output_devices:
-            print(f"  AUDIO_OUTPUT_DEVICE_INDEX={output_devices[0][0]}")
-    
+    print(
+        "\nDevice indices shift across reboots as USB re-enumerates, so nothing "
+        "here should be hardcoded to an index. The scripts in tests/ resolve "
+        "devices by name every time they run instead, via src/audio/device_finder.py. "
+        "This just shows what that resolution picks right now, given the name hints "
+        "in .env (AUDIO_INPUT_DEVICE_NAME / AUDIO_OUTPUT_DEVICE_NAME). Note: main.py "
+        "has its own separate PipeWire (\"pulse\") auto-discovery and doesn't use "
+        "these variables.\n"
+    )
+
+    pa2 = pyaudio.PyAudio()
+    try:
+        idx = resolve_input_device(pa2)
+        info = pa2.get_device_info_by_index(idx)
+        print(f"  Input  -> [{idx}] {info['name']}")
+    except DeviceNotFoundError as e:
+        print(f"  Input  -> ❌ {e}")
+
+    try:
+        idx = resolve_output_device(pa2)
+        info = pa2.get_device_info_by_index(idx)
+        print(f"  Output -> [{idx}] {info['name']}")
+    except DeviceNotFoundError as e:
+        print(f"  Output -> ❌ {e}")
+    pa2.terminate()
+
+    print(
+        "\nIf either line is wrong or errors out, set AUDIO_INPUT_DEVICE_NAME / "
+        "AUDIO_OUTPUT_DEVICE_NAME in .env to a substring of the device name you "
+        "want from the lists above (e.g. AUDIO_INPUT_DEVICE_NAME=usb pnp)."
+    )
     print("\n" + "="*70 + "\n")
     
     pa.terminate()

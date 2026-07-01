@@ -66,12 +66,7 @@ class ContinuousVADCapture:
         self.vad_aggressiveness = vad_aggressiveness or int(os.getenv('VAD_AGGRESSIVENESS', 2))
         self.silence_timeout_ms = silence_timeout_ms or int(os.getenv('SILENCE_TIMEOUT_MS', 2000))
         self.idle_timeout_seconds = idle_timeout_seconds or int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
-        env_input = os.getenv('AUDIO_INPUT_DEVICE_INDEX')
-        self.input_device_index = (
-            input_device_index
-            if input_device_index is not None
-            else (int(env_input) if env_input not in (None, "") else None)
-        )   
+        self.input_device_index = input_device_index
         
         # Validate sample rate for WebRTC VAD
         if self.sample_rate not in [8000, 16000, 32000, 48000]:
