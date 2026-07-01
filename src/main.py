@@ -1285,6 +1285,9 @@ class JarvisBot:
         logger.info("Press Ctrl+C to stop\n")
 
         self._is_running = True
+        # Sync hardware state on startup: a prior run may have left the display off
+        # (idle timeout or crash) without updating self._display_on, so don't trust it here.
+        self._set_display_power(True)
         self._schedule_display_sleep()
 
         try:
@@ -1379,6 +1382,11 @@ def main():
         logger.info("Running headless mode")
 
     if face_enabled:
+        # cv2 (imported by the face widget) sets QT_QPA_PLATFORM_PLUGIN_PATH to its
+        # own bundled Qt plugin dir on import, which only ships the xcb platform
+        # plugin. That shadows the system Wayland plugin and breaks fullscreen
+        # negotiation with the compositor, so drop it before creating QApplication.
+        os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
         app = QApplication(sys.argv)
         ui_signals = UISignals()
         window = MainWindow(ui_signals)

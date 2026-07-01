@@ -1,5 +1,6 @@
 import os
 from PyQt5.QtWidgets import QMainWindow
+from PyQt5.QtCore import Qt
 import math
 
 from visuals.ui.face_widget import FaceWidget
@@ -42,7 +43,13 @@ class MainWindow(QMainWindow):
         # Window settings
         # -----------------------------
         self.setWindowTitle("CHIPPY AI Tutor")
-        self.resize(1024, 600)
+        # Kiosk mode: some compositors (e.g. labwc) don't strip decorations for
+        # xdg-shell fullscreen requests on their own, so hide them explicitly.
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        # Deliberately no explicit resize() here: on this QtWayland version, an
+        # explicit resize() before the first show takes precedence over the
+        # later showFullScreen() request and the window gets stuck at that size.
+        # TutorView scales its scene to whatever size the window ends up with.
 
         # -----------------------------
         # Connect signals → UI methods
