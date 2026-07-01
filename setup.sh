@@ -24,9 +24,14 @@ python3 -m venv --system-site-packages .venv
 echo "=== Installing Python dependencies ==="
 .venv/bin/pip install -r config/requirements.txt
 
-echo "=== Configuring PipeWire WebRTC AEC ==="
+echo "=== Configuring PipeWire WebRTC AEC (ReSpeaker Lite, both directions) ==="
 
-# PipeWire echo-cancel module: ReSpeaker mic + USB speaker + WebRTC AEC
+# The ReSpeaker Lite's own onboard "hardware AEC" (XMOS XU316 DSP) is a known
+# broken/unreliable firmware feature over USB (confirmed both empirically —
+# identical echo leak at 100%/120%/200% volume — and via Seeed's own product
+# forum). So software AEC is still required, but now both the capture (mic)
+# and playback (speaker) sides point at the ReSpeaker Lite itself, since the
+# speaker has been physically moved to its 2-pin terminal.
 mkdir -p ~/.config/pipewire/pipewire.conf.d
 cat > ~/.config/pipewire/pipewire.conf.d/99-echo-cancel.conf << 'PIPEWIRE_EOF'
 context.modules = [
@@ -46,7 +51,7 @@ context.modules = [
 
       monitor.mode = false
 
-      # Mic input: ReSpeaker Lite (physically separated from the speaker)
+      # Mic input: ReSpeaker Lite
       capture.props = {
         node.name        = "echo-cancel-capture"
         node.description = "Echo Cancellation Capture"
@@ -64,18 +69,18 @@ context.modules = [
         node.description = "Echo Cancellation Source"
         media.class      = Audio/Source
       }
-      # Relay to real hardware speaker: USB PnP Audio Device
+      # Relay to real hardware speaker: ReSpeaker Lite's own 2-pin terminal
       playback.props = {
         node.name        = "echo-cancel-playback"
         node.description = "Echo Cancellation Playback"
-        target.object    = "alsa_output.usb-Solid_State_System_Co._Ltd._USB_PnP_Audio_Device_000000000000-00.analog-stereo"
+        target.object    = "alsa_output.usb-Seeed_Studio_ReSpeaker_Lite_0000000001-00.analog-stereo"
       }
     }
   }
 ]
 PIPEWIRE_EOF
 
-# WirePlumber routing rules: enforce capture → ReSpeaker, playback → USB speaker
+# WirePlumber routing rules: enforce capture → ReSpeaker input, playback → ReSpeaker output
 # (WirePlumber 0.5 does not honour target.object from PipeWire module props alone)
 mkdir -p ~/.config/wireplumber/wireplumber.conf.d
 cat > ~/.config/wireplumber/wireplumber.conf.d/99-echo-cancel-routing.conf << 'WP_EOF'
@@ -84,7 +89,7 @@ wireplumber.rules = [
     matches = [ { node.name = "echo-cancel-playback" } ]
     actions = {
       update-props = {
-        target.object = "alsa_output.usb-Solid_State_System_Co._Ltd._USB_PnP_Audio_Device_000000000000-00.analog-stereo"
+        target.object = "alsa_output.usb-Seeed_Studio_ReSpeaker_Lite_0000000001-00.analog-stereo"
         node.dont-reconnect = false
       }
     }

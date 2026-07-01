@@ -22,7 +22,7 @@ Resolution order (first match wins):
 import os
 
 DEFAULT_INPUT_NAME_HINTS = ["usb pnp", "respeaker", "seeed", "usb audio", "usb"]
-DEFAULT_OUTPUT_NAME_HINTS = ["usb pnp", "usb audio", "usb"]
+DEFAULT_OUTPUT_NAME_HINTS = ["respeaker", "seeed", "usb pnp", "usb audio", "usb"]
 
 
 class DeviceNotFoundError(RuntimeError):
