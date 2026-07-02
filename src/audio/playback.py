@@ -60,6 +60,16 @@ class AudioPlayer:
         self.on_audio_played = on_audio_played
         self.has_fatal_error = False
         self._owns_stream = True
+
+        # ── Watchdog: detects the output stream dying for reasons outside our
+        # control (e.g. a USB DAC physically disconnecting mid-playback).
+        # Our own stop paths (stop_streaming, the stop_event/sentinel branches
+        # in _audio_callback) always flip _is_playing False before the stream
+        # goes inactive, so "_is_playing True but stream inactive" only happens
+        # when PortAudio killed the stream itself — that's the fatal signal
+        # main.py's recovery loop watches for via has_fatal_error.
+        self._watchdog_thread = None
+        self._watchdog_stop = threading.Event()
         
         # Latency tracking and real-time state
         self.first_token_time = None
@@ -148,6 +158,12 @@ class AudioPlayer:
             self.audio_stream.start_stream()
             self.playback_thread = None  # No worker thread — callback drives everything
 
+            if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+                self._watchdog_thread = threading.Thread(
+                    target=self._watchdog_loop, daemon=True, name="AudioPlayerWatchdog"
+                )
+                self._watchdog_thread.start()
+
             logger.info(f"🔊 Audio stream opened (callback mode): {self.sample_rate}Hz, "
                         f"buffer={self._FRAMES_PER_BUFFER}, device={target_device_index}")
             logger.info("Streaming playback started")
@@ -163,6 +179,23 @@ class AudioPlayer:
                 self.audio_stream = None
             raise
     
+    def _watchdog_loop(self) -> None:
+        """Poll the output stream while it should be playing; flag has_fatal_error
+        if it went inactive without us telling it to (device disconnect, ALSA death)."""
+        while not self._watchdog_stop.is_set():
+            time.sleep(0.3)
+            stream = self.audio_stream
+            if not self._is_playing or stream is None:
+                continue
+            try:
+                active = stream.is_active()
+            except Exception:
+                active = False
+            if not active:
+                logger.error("🔴 Output stream died unexpectedly (device disconnected?) — flagging fatal error")
+                self.has_fatal_error = True
+                self._is_playing = False
+
     def _audio_callback(self, in_data, frame_count, time_info, status):
         """
         PortAudio callback — runs in PortAudio's internal C thread every 64ms.
@@ -337,8 +370,9 @@ class AudioPlayer:
         # Only terminate in __exit__ or explicit shutdown
     
     def shutdown(self) -> None:
+        self._watchdog_stop.set()
         self.cleanup()
-        
+
         # Now terminate PyAudio only if we own it
         try:
             if self._owns_pa and self.pa:
