@@ -26,9 +26,12 @@ from vision.camera import Camera
 from guardrails.guardrails_manager import GuardrailsManager
 from memory.study_session_manager import StudySessionManager, SESSION_COMPLETE_RE, OFF_TOPIC_RE
 import logging
+import subprocess
+import signal
 
 load_dotenv(".env")
 
+PID_FILE = "splash.pid"
 
 def _setup_logging():
     """Write logs to console, and optionally to a timestamped file in logs/."""
@@ -1394,6 +1397,14 @@ def main():
         jarvis = JarvisBot(ui_signals=ui_signals)
         worker = threading.Thread(target=jarvis.run, daemon=True)
         worker.start()
+        
+        try:
+            with open(PID_FILE, "r") as f:
+            target_pid = int(f.read().strip())
+            os.kill(target_pid, signal.SIGTERM)
+        except FileNotFoundError:
+            logger.warning(f"Loading screen not found")
+
         sys.exit(app.exec_())
     else:
         jarvis = JarvisBot(ui_signals=None)
