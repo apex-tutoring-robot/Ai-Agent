@@ -29,7 +29,7 @@ class FaceAnimator:
 
         self.window = "CHIPPY"
         cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.window, 1280, 720)
+        cv2.resizeWindow(self.window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
         print("[FACE] Ready")
 
@@ -126,8 +126,7 @@ class FaceAnimator:
         if self.blink > 0.7:
             frame = self.faces["blinking"].copy()
 
-
-        return cv2.resize(frame, (1280, 720))
+        return cv2.resize(frame, (cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN))
 
     # --------------------------------------------------
     # Render Loop
