@@ -1400,8 +1400,8 @@ def main():
         
         try:
             with open(PID_FILE, "r") as f:
-            target_pid = int(f.read().strip())
-            os.kill(target_pid, signal.SIGTERM)
+                target_pid = int(f.read().strip())
+                os.kill(target_pid, signal.SIGTERM)
         except FileNotFoundError:
             logger.warning(f"Loading screen not found")
 
