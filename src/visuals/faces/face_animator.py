@@ -126,7 +126,7 @@ class FaceAnimator:
         if self.blink > 0.7:
             frame = self.faces["blinking"].copy()
 
-        return cv2.resize(frame, (1024, 600))
+        return cv2.resize(frame, (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT))
 
     # --------------------------------------------------
     # Render Loop
