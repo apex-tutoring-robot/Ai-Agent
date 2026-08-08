@@ -7,7 +7,7 @@ import sys
 import subprocess
 import threading
 
-REPO_PATH = '/home/likhitjuttada/Ai-Agent'
+REPO_PATH = '/home/tutor/Ai-Agent'
 PID_FILE = "splash.pid"
 
 gi.require_version('Gtk', '3.0')
