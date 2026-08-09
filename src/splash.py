@@ -45,7 +45,7 @@ class SplashScreen(Gtk.Window):
         self.add(overlay)
 
         # 3. Load Background Image Safely
-        img_path = "/home/likhitjuttada/Downloads/JARVIS.png" 
+        img_path = "/home/tutor/Downloads/JARVIS.png" 
         try:
             pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
                 filename=img_path,
