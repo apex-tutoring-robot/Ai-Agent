@@ -1396,14 +1396,14 @@ def main():
         window.showFullScreen()
         jarvis = JarvisBot(ui_signals=ui_signals)
         worker = threading.Thread(target=jarvis.run, daemon=True)
-        worker.start()            
-        sys.exit(app.exec_())
+        worker.start()
         try:
             with open(PID_FILE, "r") as f:
                 target_pid = int(f.read().strip())
                 os.kill(target_pid, signal.SIGTERM)
         except FileNotFoundError:
             logger.warning(f"Loading screen not found")
+        sys.exit(app.exec_())
     else:
         jarvis = JarvisBot(ui_signals=None)
         jarvis.run()
