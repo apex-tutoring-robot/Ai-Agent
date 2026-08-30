@@ -7,6 +7,10 @@ import numpy as np
 
 class FaceAnimator:
     def __init__(self, face_dir):
+        self.is_connected = True
+        self.wifi_thread = threading.Thread(target=self._check_wifi_state, daemon=True)
+        self.wifi_thread.start()
+        
         self.face_dir = face_dir
         self.running = True
 
@@ -135,8 +139,56 @@ class FaceAnimator:
     def render_forever(self):
         print("[FACE] Render loop started (MAIN THREAD)")
         while self.running:
+            if not self.is_connected:
+                text = "NO WI-FI CONNECTION"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 1
+                thickness = 2
+                
+                # Get frame dimensions
+                h, w = frame.shape[:2]
+                
+                # Center the text
+                text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+                text_x = (w - text_size[0]) // 2
+                text_y = (h + text_size[1]) // 2
+
+                # Draw a black background rectangle for readability
+                pad = 10
+                cv2.rectangle(frame, 
+                              (text_x - pad, text_y - text_size[1] - pad), 
+                              (text_x + text_size[0] + pad, text_y + pad), 
+                              (0, 0, 0), cv2.FILLED)
+
+                # Draw the red text
+                cv2.putText(frame, text, (text_x, text_y), font, font_scale, 
+                            (0, 0, 255), thickness, cv2.LINE_AA)
+            
             cv2.imshow(self.window, self._frame())
             cv2.waitKey(1)
             time.sleep(1 / 60)  # 60 FPS
 
         cv2.destroyAllWindows()
+
+
+    def _check_wifi_state(self):
+        """
+        Runs continuously in the background on the Pi. 
+        Reads the hardware state file directly for zero CPU overhead.
+        """
+        # Note: If your Pi uses ethernet, change 'wlan0' to 'eth0'
+        state_file = '/sys/class/net/wlan0/operstate'
+        
+        while True:
+            try:
+                if os.path.exists(state_file):
+                    with open(state_file, 'r') as f:
+                        state = f.read().strip()
+                        # 'up' means connected to a router
+                        self.is_connected = (state == "up")
+                else:
+                    self.is_connected = False
+            except Exception:
+                self.is_connected = False
+                
+            time.sleep(1) # Check once per second
