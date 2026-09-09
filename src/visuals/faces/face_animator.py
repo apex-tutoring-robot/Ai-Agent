@@ -136,9 +136,13 @@ class FaceAnimator:
     # Render Loop
     # --------------------------------------------------
 
-    def render_forever(self):
+def render_forever(self):
         print("[FACE] Render loop started (MAIN THREAD)")
         while self.running:
+            # 1. Generate the face frame FIRST
+            frame = self._frame()
+
+            # 2. Draw the warning over it if Wi-Fi is down
             if not self.is_connected:
                 text = "NO WI-FI CONNECTION"
                 font = cv2.FONT_HERSHEY_SIMPLEX
@@ -164,12 +168,13 @@ class FaceAnimator:
                 cv2.putText(frame, text, (text_x, text_y), font, font_scale, 
                             (0, 0, 255), thickness, cv2.LINE_AA)
             
-            cv2.imshow(self.window, self._frame())
+            # 3. Show the modified frame (don't call self._frame() again here)
+            cv2.imshow(self.window, frame)
+            
             cv2.waitKey(1)
             time.sleep(1 / 60)  # 60 FPS
 
         cv2.destroyAllWindows()
-
 
     def _check_wifi_state(self):
         """
