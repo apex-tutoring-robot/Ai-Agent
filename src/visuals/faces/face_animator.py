@@ -3,14 +3,9 @@ import os
 import time
 import random
 import numpy as np
-import threading
 
 class FaceAnimator:
-    def __init__(self, face_dir):
-        self.is_connected = True
-        self.wifi_thread = threading.Thread(target=self._check_wifi_state, daemon=True)
-        self.wifi_thread.start()
-        
+    def __init__(self, face_dir):     
         self.face_dir = face_dir
         self.running = True
 
@@ -175,23 +170,6 @@ def render_forever(self):
             time.sleep(1 / 60)  # 60 FPS
 
         cv2.destroyAllWindows()
-
-    def _check_wifi_state(self):
-        """
-        Runs continuously in the background on the Pi. 
-        Reads the hardware state file directly for zero CPU overhead.
-        """
-        # Note: If your Pi uses ethernet, change 'wlan0' to 'eth0'
-        state_file = '/sys/class/net/wlan0/operstate'
-        
-        while True:
-            try:
-                if os.path.exists(state_file):
-                    with open(state_file, 'r') as f:
-                        state = f.read().strip()
-                        # 'up' means connected to a router
-                        self.is_connected = (state == "up")
-                else:
                     self.is_connected = False
             except Exception:
                 self.is_connected = False
