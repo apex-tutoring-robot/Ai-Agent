@@ -28,7 +28,7 @@ class SplashScreen(Gtk.Window):
         self.fullscreen()
         self.set_decorated(False)
         
-        # 1. CSS for Black Background and White Text
+        # 1. CSS for Background, Text, AND the new Wi-Fi Warning
         screen = Gdk.Screen.get_default()
         provider = Gtk.CssProvider()
         style_context = Gtk.StyleContext()
@@ -37,6 +37,12 @@ class SplashScreen(Gtk.Window):
         css = b"""
         window { background-color: black; }
         label { color: white; font-size: 48px; font-weight: bold; }
+        #wifi-warning { 
+            color: red; 
+            background-color: rgba(0, 0, 0, 0.8); 
+            font-size: 36px;
+            padding: 10px;
+        }
         """
         provider.load_from_data(css)
 
@@ -58,7 +64,7 @@ class SplashScreen(Gtk.Window):
         except Exception as e:
             print(f"Image load failed: {e}")
 
-        # 4. Foreground UI
+        # 4. Foreground UI (Spinner and Init Text)
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=30)
         vbox.set_valign(Gtk.Align.CENTER)
         vbox.set_halign(Gtk.Align.CENTER)
@@ -67,24 +73,65 @@ class SplashScreen(Gtk.Window):
         self.spinner.set_size_request(100, 100)
         self.spinner.start()
 
-        # Set an initial label
         self.label = Gtk.Label(label="Initializing System...")
         
         vbox.pack_start(self.spinner, False, False, 0)
         vbox.pack_start(self.label, False, False, 0)
-
         overlay.add_overlay(vbox)
-        self.show_all()
 
-        # 5. Start the background tasks in a separate thread
+        # ---> NEW: WI-FI WARNING LABEL <---
+        self.wifi_warning = Gtk.Label(label="NO WI-FI CONNECTION")
+        self.wifi_warning.set_name("wifi-warning") # Hooks into the CSS above
+        # Position it near the top center of the screen
+        self.wifi_warning.set_valign(Gtk.Align.START)
+        self.wifi_warning.set_halign(Gtk.Align.CENTER)
+        self.wifi_warning.set_margin_top(20)
+        
+        # Add to the overlay and hide it by default
+        overlay.add_overlay(self.wifi_warning)
+        self.wifi_warning.hide()
+        
+        self.show_all()
+        # Keep it hidden immediately after show_all() forces everything visible
+        self.wifi_warning.hide() 
+
+        # 5. Start the background system tasks
         update_thread = threading.Thread(target=self.run_background_tasks)
-        update_thread.daemon = True # Ensures thread dies if main program exits
+        update_thread.daemon = True
         update_thread.start()
+
+        # ---> NEW: START GTK WI-FI MONITOR <---
+        # This tells GTK to run this function every 1000ms natively
+        GLib.timeout_add_seconds(1, self.check_wifi_state)
+
+
+    # ---> NEW: WI-FI CHECK FUNCTION <---
+    def check_wifi_state(self):
+        """ Checks the hardware state file and updates the warning label."""
+        state_file = '/sys/class/net/wlan0/operstate'
+        is_connected = False
+        
+        try:
+            if os.path.exists(state_file):
+                with open(state_file, 'r') as f:
+                    if f.read().strip() == "up":
+                        is_connected = True
+        except Exception:
+            pass
+
+        # Toggle UI visibility
+        if is_connected:
+            self.wifi_warning.hide()
+        else:
+            self.wifi_warning.show()
+            
+        return True # Returning True tells GLib to keep running this timer
+
 
     # Safely updates the label from the background thread
     def update_label(self, text):
         self.label.set_text(text)
-        return False # Required so GLib.idle_add only runs this once per call
+        return False
 
     # The background worker
     def run_background_tasks(self):
@@ -106,7 +153,7 @@ class SplashScreen(Gtk.Window):
                 GLib.idle_add(self.update_label, "Rebooting to apply system updates...")
                 time.sleep(1)
                 subprocess.run(["sudo", "reboot"], check=True)
-                return # Stop execution here as the system is going down
+                return 
             else:
                 GLib.idle_add(self.update_label, "No system updates found. Checking AI...")
             
@@ -126,7 +173,6 @@ class SplashScreen(Gtk.Window):
                 GLib.idle_add(self.update_label, "No AI updates found. Booting Jarvis...")
                 
         except subprocess.CalledProcessError as e:
-            # Catch errors so the UI doesn't crash silently
             GLib.idle_add(self.update_label, "An error occurred during boot.")
             print(f"Subprocess failed: {e}")
 
@@ -136,4 +182,3 @@ signal.signal(signal.SIGTERM, signal_handler)
 win = SplashScreen()
 win.connect("destroy", Gtk.main_quit)
 Gtk.main()
-
