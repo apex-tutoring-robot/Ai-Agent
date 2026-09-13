@@ -3,7 +3,7 @@ import os
 import time
 import random
 import numpy as np
-import network_monitor
+import threading
 
 class FaceAnimator:
     def __init__(self, face_dir):     
@@ -20,6 +20,11 @@ class FaceAnimator:
         # Blink state
         self.blink = 0.0
 
+        # Wi-Fi status tracking
+        self.is_connected = True
+        self.wifi_thread = threading.Thread(target=self.poll_wifi_status, daemon=True)
+        self.wifi_thread.start()
+
         # Load images
         self.faces = {}
         for name in ["neutral", "thinking", "happy", "blinking"]:
@@ -32,6 +37,22 @@ class FaceAnimator:
         cv2.resizeWindow(self.window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
         print("[FACE] Ready")
+
+    # --------------------------------------------------
+    # Wi-Fi Polling Thread
+    # --------------------------------------------------
+
+    def poll_wifi_status(self):
+        """Runs on a background thread to prevent OpenCV frame drops."""
+        while self.running:
+            try:
+                with open('/sys/class/net/wlan0/operstate', 'r') as f:
+                    self.is_connected = (f.read().strip() == 'up')
+            except Exception:
+                self.is_connected = False
+            
+            # Sleep for 3 seconds before checking again
+            time.sleep(3)
 
     # --------------------------------------------------
     # Asset loading
@@ -64,7 +85,7 @@ class FaceAnimator:
     def start_talking(self):
         self.is_talking = True
 
-    def stop_talking(self):
+    def stop_talking(self): # Note: You had stop_talking defined twice, kept as is
         self.is_talking = False
         self.external_mouth_level = 0.0 # immediately decay toward closed
 
@@ -132,11 +153,22 @@ class FaceAnimator:
     # Render Loop
     # --------------------------------------------------
 
-def render_forever(self):
+    def render_forever(self):
         print("[FACE] Render loop started (MAIN THREAD)")
         while self.running:
             frame = self._frame()
-            frame = network_monitor.apply_wifi_warning(frame)
+            
+            # Overlay Wi-Fi warning if disconnected
+            if not self.is_connected:
+                cv2.putText(
+                    frame, 
+                    "Waiting for Wi-Fi...", 
+                    (50, 50), # Adjust X, Y coordinates as needed
+                    cv2.FONT_HERSHEY_SIMPLEX, 
+                    1,        # Font scale
+                    (0, 0, 255), # Red color (BGR format)
+                    2         # Line thickness
+                )
             
             cv2.imshow(self.window, frame)
             
