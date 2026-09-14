@@ -4,6 +4,7 @@ import time
 import random
 import numpy as np
 import threading
+import socket
 
 class FaceAnimator:
     def __init__(self, face_dir):     
@@ -36,7 +37,7 @@ class FaceAnimator:
         cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-        print("[FACE] Ready")
+        print("[FACE] Ready", flush=True)
 
     # --------------------------------------------------
     # Wi-Fi Polling Thread
@@ -44,28 +45,25 @@ class FaceAnimator:
 
     def poll_wifi_status(self):
         """Runs on a background thread to prevent OpenCV frame drops."""
-        print("[WIFI THREAD] Started monitoring.")
+        # flush=True forces the output to journalctl instantly
+        print("[WIFI THREAD] Started monitoring internet connection.", flush=True)
+        
         while self.running:
             try:
-                # Check hardware carrier state directly (1 = connected to AP, 0 = disconnected)
-                with open('/sys/class/net/wlan0/carrier', 'r') as f:
-                    current_state = (f.read().strip() == '1')
-                
-                # Print to console if state changes so you can debug
-                if self.is_connected and not current_state:
-                    print("[WIFI THREAD] Wi-Fi disconnected!")
-                elif not self.is_connected and current_state:
-                    print("[WIFI THREAD] Wi-Fi reconnected!")
-                    
-                self.is_connected = current_state
-            except Exception as e:
-                # If the file doesn't exist (interface down) or can't be read
-                if self.is_connected:
-                    print(f"[WIFI THREAD] Error reading status: {e}")
-                self.is_connected = False
+                # Attempt connection to a public DNS. 
+                # This bypasses false hardware states caused by BTBerryWIFI.
+                socket.create_connection(("1.1.1.1", 53), timeout=2.0)
+                current_state = True
+            except OSError:
+                current_state = False
             
-            # Sleep for 2 seconds before checking again
-            time.sleep(2)
+            if self.is_connected and not current_state:
+                print("[WIFI THREAD] Connection lost! Displaying warning text.", flush=True)
+            elif not self.is_connected and current_state:
+                print("[WIFI THREAD] Connection restored! Hiding warning text.", flush=True)
+                
+            self.is_connected = current_state
+            time.sleep(3)
 
     # --------------------------------------------------
     # Asset loading
@@ -98,9 +96,9 @@ class FaceAnimator:
     def start_talking(self):
         self.is_talking = True
 
-    def stop_talking_mouth(self): # Renamed to avoid duplicate function name
+    def stop_talking_mouth(self): 
         self.is_talking = False
-        self.external_mouth_level = 0.0 # immediately decay toward closed
+        self.external_mouth_level = 0.0 
 
     def shutdown(self):
         self.running = False
@@ -116,14 +114,11 @@ class FaceAnimator:
         self.blink *= 0.85  # smooth decay
         
     def push_mouth_level(self, level: float):
-        # Called from audio thread; keep it dead simple
         self.external_mouth_level = float(level)
-
 
     def _update_mouth(self):
         attack = 0.60   # opens faster
         release = 0.22  # closes smoother
-
         target = self.external_mouth_level
 
         # Noise gate
@@ -132,12 +127,10 @@ class FaceAnimator:
 
         # Attack when rising, release when falling
         k = attack if target > self.mouth_open else release
-
         self.mouth_open += (target - self.mouth_open) * k
 
         if self.mouth_open < 0.01:
             self.mouth_open = 0.0
-
 
     # --------------------------------------------------
     # Frame Generation
@@ -167,7 +160,7 @@ class FaceAnimator:
     # --------------------------------------------------
 
     def render_forever(self):
-        print("[FACE] Render loop started (MAIN THREAD)")
+        print("[FACE] Render loop started (MAIN THREAD)", flush=True)
         while self.running:
             frame = self._frame()
             
@@ -176,17 +169,17 @@ class FaceAnimator:
                 cv2.putText(
                     frame, 
                     "Waiting for Wi-Fi...", 
-                    (150, 150), # Pushed inward to avoid screen overscan issues
+                    (150, 150), 
                     cv2.FONT_HERSHEY_SIMPLEX, 
-                    1.5,        # Made font slightly larger
-                    (0, 0, 255), # Red color (BGR format)
-                    3         # Made text thicker
+                    1.5,        
+                    (0, 0, 255), 
+                    3         
                 )
             
             cv2.imshow(self.window, frame)
             
             cv2.waitKey(1)
-            time.sleep(1 / 60)  # 60 FPS
+            time.sleep(1 / 60)  
 
         cv2.destroyAllWindows()
-        time.sleep(1) # Check once per second
+        time.sleep(1)
