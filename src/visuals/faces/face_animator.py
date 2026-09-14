@@ -4,6 +4,7 @@ import time
 import random
 import numpy as np
 import threading
+import socket
 
 class FaceAnimator:
     def __init__(self, face_dir):     
@@ -46,9 +47,11 @@ class FaceAnimator:
         """Runs on a background thread to prevent OpenCV frame drops."""
         while self.running:
             try:
-                with open('/sys/class/net/wlan0/operstate', 'r') as f:
-                    self.is_connected = (f.read().strip() == 'up')
-            except Exception:
+                # Attempt a fast connection to Cloudflare's public DNS. 
+                # If this succeeds, the Pi has a real network route.
+                socket.create_connection(("1.1.1.1", 53), timeout=2.0)
+                self.is_connected = True
+            except OSError:
                 self.is_connected = False
             
             # Sleep for 3 seconds before checking again
