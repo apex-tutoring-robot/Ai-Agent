@@ -4,7 +4,6 @@ import time
 import random
 import numpy as np
 import threading
-import socket
 
 class FaceAnimator:
     def __init__(self, face_dir):     
@@ -45,17 +44,28 @@ class FaceAnimator:
 
     def poll_wifi_status(self):
         """Runs on a background thread to prevent OpenCV frame drops."""
+        print("[WIFI THREAD] Started monitoring.")
         while self.running:
             try:
-                # Attempt a fast connection to Cloudflare's public DNS. 
-                # If this succeeds, the Pi has a real network route.
-                socket.create_connection(("1.1.1.1", 53), timeout=2.0)
-                self.is_connected = True
-            except OSError:
+                # Check hardware carrier state directly (1 = connected to AP, 0 = disconnected)
+                with open('/sys/class/net/wlan0/carrier', 'r') as f:
+                    current_state = (f.read().strip() == '1')
+                
+                # Print to console if state changes so you can debug
+                if self.is_connected and not current_state:
+                    print("[WIFI THREAD] Wi-Fi disconnected!")
+                elif not self.is_connected and current_state:
+                    print("[WIFI THREAD] Wi-Fi reconnected!")
+                    
+                self.is_connected = current_state
+            except Exception as e:
+                # If the file doesn't exist (interface down) or can't be read
+                if self.is_connected:
+                    print(f"[WIFI THREAD] Error reading status: {e}")
                 self.is_connected = False
             
-            # Sleep for 3 seconds before checking again
-            time.sleep(3)
+            # Sleep for 2 seconds before checking again
+            time.sleep(2)
 
     # --------------------------------------------------
     # Asset loading
@@ -88,7 +98,7 @@ class FaceAnimator:
     def start_talking(self):
         self.is_talking = True
 
-    def stop_talking(self): # Note: You had stop_talking defined twice, kept as is
+    def stop_talking_mouth(self): # Renamed to avoid duplicate function name
         self.is_talking = False
         self.external_mouth_level = 0.0 # immediately decay toward closed
 
@@ -166,11 +176,11 @@ class FaceAnimator:
                 cv2.putText(
                     frame, 
                     "Waiting for Wi-Fi...", 
-                    (50, 50), # Adjust X, Y coordinates as needed
+                    (150, 150), # Pushed inward to avoid screen overscan issues
                     cv2.FONT_HERSHEY_SIMPLEX, 
-                    1,        # Font scale
+                    1.5,        # Made font slightly larger
                     (0, 0, 255), # Red color (BGR format)
-                    2         # Line thickness
+                    3         # Made text thicker
                 )
             
             cv2.imshow(self.window, frame)
