@@ -47,6 +47,18 @@ class SpeechToTextClient:
             region=self.speech_region,
             speech_recognition_language=self.language
         )
+
+        # Azure's default segmentation silence timeout (~500ms) is short enough
+        # that a natural mid-sentence pause gets closed out as its own final
+        # "Recognized" segment. Since the app queues every final result as an
+        # independent conversation turn, that fires a separate LLM/TTS answer
+        # per fragment instead of one answer for the whole sentence. Widening
+        # this window lets brief pauses pass without ending the segment.
+        segmentation_silence_ms = os.getenv('STT_SEGMENTATION_SILENCE_TIMEOUT_MS', '1000')
+        self.speech_config.set_property(
+            speechsdk.PropertyId.Speech_SegmentationSilenceTimeoutMs,
+            segmentation_silence_ms
+        )
         
         # Warm-start the STT service
         logger.info("Skipping STT warm-up on Raspberry Pi")

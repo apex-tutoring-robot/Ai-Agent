@@ -275,8 +275,16 @@ class JarvisBot:
         except Exception as e:
             logger.error(f"Speaker loop error: {e}")
 
-    def _get_pulse_device_index(self, pa) -> int:
-        """Find the index of the 'pulse' audio device."""
+    def _get_pulse_device_index(self, pa, direction: str = 'output') -> int:
+        """Find the index of the 'pulse' audio device.
+
+        PulseAudio (Linux/Pi) exposes a single bridging device that handles
+        both directions, so a single index normally works for input and
+        output alike. Platforms without PulseAudio (e.g. native Windows) have
+        no such device, so the fallback must use the correctly-directioned
+        env var instead of reusing the output device index for microphone
+        input (which has no input channels and silently mis-selects a mic).
+        """
         try:
             for i in range(pa.get_device_count()):
                 info = pa.get_device_info_by_index(i)
@@ -285,10 +293,10 @@ class JarvisBot:
                     return i
         except Exception as e:
             logger.warning(f"Error searching for PulseAudio device: {e}")
-        
-        # Fallback to env var or default 1 (but log warning)
-        fallback = int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 1))
-        logger.warning(f"⚠️  PulseAudio not found - falling back to index {fallback}")
+
+        env_var = 'AUDIO_INPUT_DEVICE_INDEX' if direction == 'input' else 'AUDIO_OUTPUT_DEVICE_INDEX'
+        fallback = int(os.getenv(env_var, 1))
+        logger.warning(f"⚠️  PulseAudio not found - falling back to {env_var}={fallback} for {direction}")
         return fallback
 
     def _handle_wake_word(self):
@@ -318,14 +326,16 @@ class JarvisBot:
             # Enter continuous conversation mode
             idle_timeout = int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
             
-            # DYNAMICALLY FIND PULSE DEVICE
-            pulse_index = self._get_pulse_device_index(self.pa)
-            
+            # DYNAMICALLY FIND PULSE DEVICE (falls back to the correctly-directioned
+            # env var per direction when no PulseAudio device exists, e.g. Windows)
+            pulse_input_index = self._get_pulse_device_index(self.pa, direction='input')
+            pulse_output_index = self._get_pulse_device_index(self.pa, direction='output')
+
             # Initialize VAD with dedicated INPUT stream
             continuous_vad = ContinuousVADCapture(
                 idle_timeout_seconds=idle_timeout,
                 pa=self.pa,
-                input_device_index=pulse_index,
+                input_device_index=pulse_input_index,
                 player=self.audio_player
             )
             
@@ -350,7 +360,7 @@ class JarvisBot:
             )
             speaker_thread = threading.Thread(
                 target=self._speaker_loop, 
-                args=(continuous_vad, pulse_index),
+                args=(continuous_vad, pulse_output_index),
                 name="SpeakerThread"
             )
             
