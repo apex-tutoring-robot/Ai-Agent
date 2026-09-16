@@ -203,13 +203,10 @@ class JarvisBot:
                     if self.face:
                         self.face.start_talking()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
-                    
-                    # ── ECHO GUARD: Signal that bot is now speaking ──
-                    self._bot_is_speaking = True
-                    continuous_vad.set_playback_state(True)
-                    
+
                     response_chunks = []
-                    
+                    first_audio_chunk = True
+
                     # Helper to collect text while streaming
                     def text_collector(stream):
                         for chunk in stream:
@@ -227,7 +224,17 @@ class JarvisBot:
                         if self._interruption_event.is_set():
                             logger.warning("🛑 Speaker aborted due to interruption event")
                             break
-                        
+
+                        # ── ECHO GUARD: Close the STT gate only once real audio is
+                        # about to play — not when the turn starts processing. Gating
+                        # earlier mutes the STT pipe for the entire LLM+TTS-first-chunk
+                        # latency (1-2+ seconds), silently dropping any speech the user
+                        # makes during that "thinking" gap instead of transcribing it.
+                        if first_audio_chunk:
+                            self._bot_is_speaking = True
+                            continuous_vad.set_playback_state(True)
+                            first_audio_chunk = False
+
                         # Defensive check: ensure streaming is still active
                         if self.audio_player._is_playing:
                             try:
@@ -299,6 +306,57 @@ class JarvisBot:
         logger.warning(f"⚠️  PulseAudio not found - falling back to {env_var}={fallback} for {direction}")
         return fallback
 
+    def _speak_system_message(self, phrase: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Speak a fixed, non-LLM-generated phrase (check-in prompt, goodbye,
+        etc). Reuses the same TTS/playback/echo-guard pattern as a normal
+        turn, just with fixed text instead of an LLM-generated response.
+        """
+        if self._speaker_busy.is_set():
+            # Speaker thread is mid-turn (race with the idle-timeout/end firing
+            # right as a turn starts) - skip this cycle rather than step on it.
+            return
+
+        logger.info(f"🗣️  System message: '{phrase}'")
+
+        try:
+            self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
+            self.audio_player.start_streaming(output_device_index=output_device_index)
+
+            self._bot_is_speaking = True
+            continuous_vad.set_playback_state(True)
+
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+                if self.audio_player._is_playing:
+                    self.audio_player.queue_audio(audio_chunk)
+                else:
+                    break
+
+            self.audio_player.stop_streaming(immediate=False)
+            self._last_bot_response = phrase
+        except Exception as e:
+            logger.error(f"Error speaking system message: {e}")
+        finally:
+            self._bot_is_speaking = False
+            continuous_vad.set_playback_state(False)
+            self.audio_player.stop_streaming(immediate=True)
+
+    def _speak_check_in_prompt(self, continuous_vad, output_device_index: int) -> None:
+        """Speak a short "are you still there?" prompt before ending an idle conversation."""
+        phrase = os.getenv(
+            'CHECK_IN_PROMPT',
+            "Are you still there? Let me know if you'd like to keep going!"
+        )
+        self._speak_system_message(phrase, continuous_vad, output_device_index)
+
+    def _speak_goodbye(self, continuous_vad, output_device_index: int) -> None:
+        """Speak a farewell message when a conversation is about to end."""
+        phrase = os.getenv(
+            'GOODBYE_MESSAGE',
+            "Okay, talk to you later! Just say Hey Jarvis whenever you want to continue."
+        )
+        self._speak_system_message(phrase, continuous_vad, output_device_index)
+
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
         # Prevent concurrent interactions
@@ -310,8 +368,7 @@ class JarvisBot:
             logger.info("\n" + "="*60)
             logger.info("🎤 WAKE WORD DETECTED - CONVERSATION MODE ACTIVATED")
             logger.info("="*60)
-            logger.info(f"⏱️  Will end after 10 seconds of silence")
-            
+
             # Stop wake word detection to free microphone
             self.wake_word_detector.stop()
 
@@ -325,15 +382,22 @@ class JarvisBot:
 
             # Enter continuous conversation mode
             idle_timeout = int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
-            
+            check_in_grace = int(os.getenv('CHECK_IN_GRACE_SECONDS', 60))
+            logger.info(
+                f"⏱️  Will check in after {idle_timeout}s of silence, "
+                f"then end after {check_in_grace}s more with no response"
+            )
+
             # DYNAMICALLY FIND PULSE DEVICE (falls back to the correctly-directioned
             # env var per direction when no PulseAudio device exists, e.g. Windows)
             pulse_input_index = self._get_pulse_device_index(self.pa, direction='input')
             pulse_output_index = self._get_pulse_device_index(self.pa, direction='output')
 
-            # Initialize VAD with dedicated INPUT stream
+            # Initialize VAD with dedicated INPUT stream. Its own hard idle-stop
+            # must cover the check-in grace period too, otherwise it kills the
+            # mic feed before we've finished waiting for a response.
             continuous_vad = ContinuousVADCapture(
-                idle_timeout_seconds=idle_timeout,
+                idle_timeout_seconds=idle_timeout + check_in_grace,
                 pa=self.pa,
                 input_device_index=pulse_input_index,
                 player=self.audio_player
@@ -369,20 +433,39 @@ class JarvisBot:
             
             logger.info("🚀 Full-Duplex engines started")
             
-            # Wait for conversation to end (timeout or manual stop)
+            # Wait for conversation to end (timeout or manual stop).
+            # Two-stage idle handling: after `idle_timeout` of silence, ask if
+            # the student is still there instead of ending immediately; only
+            # end for real if there's no response within `check_in_grace`.
+            checked_in = False
+            prompt_finished_at = None
             while self._conversation_active.is_set():
                 # Check for fatal errors in audio components and recover
                 if self.audio_player.has_fatal_error:
                     logger.warning("♻️  FATAL AUDIO ERROR - Recreating system...")
                     self._recreate_audio_system()
-                
-                # Check if idle timeout exceeded
-                idle_duration = time.time() - continuous_vad.last_speech_time
-                if idle_duration >= idle_timeout:
-                    logger.info(f"⏱️  {idle_timeout}s idle timeout - ending")
-                    self._conversation_active.clear()
-                    break
-                    
+
+                if not checked_in:
+                    idle_duration = time.time() - continuous_vad.last_speech_time
+                    if idle_duration >= idle_timeout:
+                        logger.info(f"⏱️  {idle_timeout}s idle - checking if student is still there")
+                        self._speak_check_in_prompt(continuous_vad, pulse_output_index)
+                        checked_in = True
+                        prompt_finished_at = time.time()
+                else:
+                    # last_speech_time keeps advancing on its own while the bot
+                    # speaks the prompt (tracked as activity), so only count it
+                    # as a response if it moves meaningfully PAST when the
+                    # prompt actually finished playing.
+                    if continuous_vad.last_speech_time > prompt_finished_at + 0.5:
+                        logger.info("✅ Student responded to check-in - resuming conversation")
+                        checked_in = False
+                    elif time.time() - prompt_finished_at >= check_in_grace:
+                        logger.info(f"⏱️  No response {check_in_grace}s after check-in - ending conversation")
+                        self._speak_goodbye(continuous_vad, pulse_output_index)
+                        self._conversation_active.clear()
+                        break
+
                 time.sleep(0.5)
             
             logger.info(f"\n👋 Conversation ended")
