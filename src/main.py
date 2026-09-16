@@ -357,6 +357,15 @@ class JarvisBot:
         )
         self._speak_system_message(phrase, continuous_vad, output_device_index)
 
+    def _speak_greeting(self, continuous_vad, output_device_index: int) -> None:
+        """Speak a short, fixed introduction right when a conversation starts."""
+        phrase = os.getenv(
+            'GREETING_MESSAGE',
+            "Hi! I'm Jarvis. I can help you with homework, explain new topics, "
+            "or just answer questions you're curious about. What would you like to do today?"
+        )
+        self._speak_system_message(phrase, continuous_vad, output_device_index)
+
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
         # Prevent concurrent interactions
@@ -430,9 +439,14 @@ class JarvisBot:
             
             listener_thread.start()
             speaker_thread.start()
-            
+
             logger.info("🚀 Full-Duplex engines started")
-            
+
+            # Greet the student right away instead of waiting on an LLM round-trip
+            # for the first response. Threads are already running at this point,
+            # so barge-in still works if the student starts talking over it.
+            self._speak_greeting(continuous_vad, pulse_output_index)
+
             # Wait for conversation to end (timeout or manual stop).
             # Two-stage idle handling: after `idle_timeout` of silence, ask if
             # the student is still there instead of ending immediately; only
