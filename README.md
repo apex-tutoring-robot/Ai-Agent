@@ -62,7 +62,7 @@ nano config/.env
 
 Fill in your Azure credentials:
 - `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION`
-- `AZURE_OPENAI_KEY`, `AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_DEPLOYMENT`
+- `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_DEPLOYMENT`
 - `PICOVOICE_ACCESS_KEY`
 
 ### 5. Configure USB Audio Devices
@@ -168,7 +168,7 @@ Jarvis/
 |----------|-------------|----------|
 | `AZURE_SPEECH_KEY` | Azure Speech Services API key | ✅ |
 | `AZURE_SPEECH_REGION` | Azure region (e.g., eastus) | ✅ |
-| `AZURE_OPENAI_KEY` | Azure OpenAI API key | ✅ |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key | ✅ |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL | ✅ |
 | `AZURE_OPENAI_DEPLOYMENT` | Deployment name | ✅ |
 | `PICOVOICE_ACCESS_KEY` | Picovoice access key | ✅ |
