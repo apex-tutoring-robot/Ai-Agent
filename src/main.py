@@ -62,7 +62,10 @@ class JarvisBot:
         self._last_bot_response = ""           # Full text of last bot response
         self._playback_ended_time = 0.0        # time.time() when playback stopped
         self._barge_in_detected = threading.Event()  # Set by VAD when real user speech detected
-        
+
+        # ── Display sleep tracking ──
+        self._standby_since = time.time()      # When we last returned to wake-word listening
+
         logger.info("Jarvis initialized successfully!")
     
     def _recreate_audio_system(self):
@@ -366,6 +369,26 @@ class JarvisBot:
         )
         self._speak_system_message(phrase, continuous_vad, output_device_index)
 
+    def _speak_standalone(self, phrase: str, output_device_index: int) -> None:
+        """
+        Speak a fixed phrase with no active conversation (e.g. the
+        going-to-sleep announcement). No echo-guard/continuous_vad needed
+        here since wake-word detection uses its own model, not Azure STT.
+        """
+        logger.info(f"🗣️  {phrase}")
+        try:
+            self.audio_player.start_streaming(output_device_index=output_device_index)
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+                if self.audio_player._is_playing:
+                    self.audio_player.queue_audio(audio_chunk)
+                else:
+                    break
+            self.audio_player.stop_streaming(immediate=False)
+        except Exception as e:
+            logger.error(f"Error speaking standalone message: {e}")
+        finally:
+            self.audio_player.stop_streaming(immediate=True)
+
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
         # Prevent concurrent interactions
@@ -377,6 +400,10 @@ class JarvisBot:
             logger.info("\n" + "="*60)
             logger.info("🎤 WAKE WORD DETECTED - CONVERSATION MODE ACTIVATED")
             logger.info("="*60)
+
+            # Wake the screen back up immediately if it was asleep
+            if self.face and getattr(self.face, 'sleeping', False):
+                self.face.wake_up()
 
             # Stop wake word detection to free microphone
             self.wake_word_detector.stop()
@@ -531,6 +558,7 @@ class JarvisBot:
             
             # 4. Always restart wake word detection
             logger.info("▶️  Resuming wake word detection...")
+            self._standby_since = time.time()
             self._restart_wake_word()
             self._interaction_lock.release()
     
@@ -831,7 +859,22 @@ class JarvisBot:
 
             # Keep run() alive while wake-word/conversation cycles continue in daemon threads.
             # Only exit when _is_running is cleared by stop() or a signal arrives.
+            display_sleep_timeout = int(os.getenv('DISPLAY_SLEEP_TIMEOUT', 0))
             while self._is_running:
+                # After enough standby idle time (no conversation, no new wake
+                # word), announce it and put the physical display to sleep.
+                if (self.face and not getattr(self.face, 'sleeping', False)
+                        and display_sleep_timeout > 0
+                        and not self._conversation_active.is_set()
+                        and (time.time() - self._standby_since) >= display_sleep_timeout):
+                    logger.info(f"💤 {display_sleep_timeout}s idle - going to sleep")
+                    sleep_output_index = self._get_pulse_device_index(self.pa, direction='output')
+                    self._speak_standalone(
+                        os.getenv('SLEEP_MESSAGE', "I'm going to sleep now. Just say Hey Jarvis to wake me up!"),
+                        sleep_output_index
+                    )
+                    self.face.enter_sleep()
+
                 time.sleep(0.5)
 
         except KeyboardInterrupt:
