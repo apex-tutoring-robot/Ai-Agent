@@ -947,7 +947,13 @@ def main():
     face = None
     if face_enabled:
         try:
-            face = FaceAnimator("./visuals/faces")
+            # Resolve relative to this file's own location, not the process's
+            # CWD - "./visuals/faces" only works if launched as `cd src &&
+            # python main.py`, but breaks under `python3 src/main.py` from
+            # the repo root (the convention actually used to run this on the
+            # Pi), silently falling back to headless instead of erroring loudly.
+            faces_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visuals", "faces")
+            face = FaceAnimator(faces_dir)
         except Exception as e:
             logger.warning(f"Failed to init face animation: {e}. Falling back to headless.")
 
