@@ -17,8 +17,8 @@ from audio.playback import AudioPlayer
 from azure_services.stt_client import SpeechToTextClient
 from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
-from conversation.state_manager import ConversationStateManager
 from privacy.privacy_manager import PrivacyManager
+from profiles.profile_manager import ProfileManager
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -46,9 +46,18 @@ class JarvisBot:
         self.llm_client = LLMClient()
         self.tts_client = TextToSpeechClient()
         self.privacy_manager = PrivacyManager()
-        self.conversation_manager = ConversationStateManager(
+
+        # Per-profile persistent history (one physical robot, multiple family
+        # members) - resolved relative to this file's own location, not CWD,
+        # same reasoning as the SYSTEM_PROMPT_PATH/face-path fixes.
+        db_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "data", "jarvis_profiles.db"
+        )
+        self.profile_manager = ProfileManager(
+            db_path=db_path,
             max_history=int(os.getenv('MAX_CONVERSATION_HISTORY', 20))
         )
+        self.conversation_manager = self.profile_manager.get_conversation_manager()
         
         self._is_running = False
         self._interaction_lock = threading.Lock()
