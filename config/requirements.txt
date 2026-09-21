@@ -59,6 +59,12 @@ aiofiles==24.1.0
 # Noise Cancellation (Requires libspeexdsp-dev)
 # speexdsp
 # openai
+
+# Camera (Arducam 5MP / OV5647, CSI ribbon cable) - avatar photo capture
+# IMPORTANT: install via apt, NOT pip - picamera2 depends on system libcamera
+# bindings that pip can't provide correctly on Raspberry Pi:
+#   sudo apt install -y python3-picamera2
+# Not installable/importable on Windows at all - Pi/Linux only.
  build
  cython
  pyaudio

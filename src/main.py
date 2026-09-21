@@ -19,6 +19,7 @@ from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
 from privacy.privacy_manager import PrivacyManager
 from profiles.profile_manager import ProfileManager
+from profiles.camera_capture import capture_avatar_photo
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -64,6 +65,9 @@ class JarvisBot:
             max_history=int(os.getenv('MAX_CONVERSATION_HISTORY', 20))
         )
         self.conversation_manager = self.profile_manager.get_conversation_manager()
+        self._avatars_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "data", "avatars"
+        )
         
         self._is_running = False
         self._interaction_lock = threading.Lock()
@@ -199,6 +203,17 @@ class JarvisBot:
             if created:
                 self._speak_fixed_phrase(
                     f"Nice to meet you, {spoken_name}! I'll remember our conversations from now on. "
+                    "Let me take your picture - look at the camera!",
+                    continuous_vad, output_device_index
+                )
+
+                avatar_path = os.path.join(self._avatars_dir, f"{profile_id}.jpg")
+                if capture_avatar_photo(avatar_path):
+                    self.profile_manager.set_avatar(profile_id, avatar_path)
+                # If capture fails (no camera, wrong platform, etc.) we just
+                # skip the avatar - not fatal to profile creation.
+
+                self._speak_fixed_phrase(
                     f"Let's get to know each other a bit - {self.ONBOARDING_QUESTIONS[0]}",
                     continuous_vad, output_device_index
                 )
