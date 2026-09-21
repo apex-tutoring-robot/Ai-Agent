@@ -113,6 +113,85 @@ class JarvisBot:
         overlap = words_a & words_b
         return len(overlap) / min(len(words_a), len(words_b))
 
+    def _speak_fixed_phrase(self, phrase: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Speak a fixed, non-LLM-generated phrase (profile switch/creation
+        confirmations). Same TTS/playback/echo-guard pattern as a normal
+        turn in _speaker_loop, just with fixed text.
+        """
+        logger.info(f"🗣️  {phrase}")
+        try:
+            self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
+            if self.face:
+                self.face.start_talking()
+            self.audio_player.start_streaming(output_device_index=output_device_index)
+            self._bot_is_speaking = True
+            continuous_vad.set_playback_state(True)
+
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+                if self.audio_player._is_playing:
+                    self.audio_player.queue_audio(audio_chunk)
+                else:
+                    break
+
+            self.audio_player.stop_streaming(immediate=False)
+            self._last_bot_response = phrase
+        except Exception as e:
+            logger.error(f"Error speaking fixed phrase: {e}")
+        finally:
+            if self.face:
+                self.face.start_idle()
+            self._bot_is_speaking = False
+            self._playback_ended_time = time.time()
+            continuous_vad.set_playback_state(False)
+            self.audio_player.stop_streaming(immediate=True)
+
+    def _try_handle_profile_command(self, user_text: str, continuous_vad, output_device_index: int) -> bool:
+        """
+        Intercepts profile-management voice commands before they'd otherwise
+        be sent to the LLM as a normal question. Returns True if user_text
+        was such a command (already handled here - caller should skip the
+        normal LLM turn for it), False if it's a normal conversational turn.
+        """
+        normalized = user_text.strip().lower()
+
+        # "go back to your last session" (fuzzy - STT won't transcribe this
+        # identically every time, so match on the key phrase, not verbatim)
+        if "go back" in normalized and "session" in normalized:
+            manager = self.profile_manager.go_back()
+            if manager:
+                self.conversation_manager = manager
+                name = self.profile_manager.get_profile_name(self.profile_manager.get_active_profile_id())
+                self._speak_fixed_phrase(f"Okay, switching back to {name}'s session.", continuous_vad, output_device_index)
+            else:
+                self._speak_fixed_phrase("There's no previous session to go back to.", continuous_vad, output_device_index)
+            return True
+
+        # "Jarvis Voice Recognition <name>" - switch to or create a profile
+        trigger = "voice recognition"
+        idx = normalized.find(trigger)
+        if idx != -1:
+            spoken_name = user_text[idx + len(trigger):].strip(" ,.!?")
+            if not spoken_name:
+                self._speak_fixed_phrase(
+                    "I heard Voice Recognition, but I didn't catch a name — can you say your name too?",
+                    continuous_vad, output_device_index
+                )
+                return True
+
+            profile_id, created = self.profile_manager.find_or_create_profile(spoken_name)
+            self.conversation_manager = self.profile_manager.switch_to(profile_id)
+            if created:
+                self._speak_fixed_phrase(
+                    f"Nice to meet you, {spoken_name}! I'll remember our conversations from now on.",
+                    continuous_vad, output_device_index
+                )
+            else:
+                self._speak_fixed_phrase(f"Welcome back, {spoken_name}!", continuous_vad, output_device_index)
+            return True
+
+        return False
+
     def _listener_loop(self, continuous_vad, request_queue):
         """Producer: Always listening, detecting interruptions in real-time.
         
@@ -195,7 +274,15 @@ class JarvisBot:
                 self._speaker_busy.set()
                 self._interruption_event.clear()
                 self._barge_in_detected.clear()
-                
+
+                # Profile-management commands ("Jarvis Voice Recognition <name>",
+                # "go back to your last session") are handled directly here and
+                # never reach the LLM - they're not real tutoring questions.
+                if self._try_handle_profile_command(user_text, continuous_vad, output_device_index):
+                    self._speaker_busy.clear()
+                    continuous_vad.reset_idle_timer()
+                    continue
+
                 try:
                     logger.info(f"📝 Processing Turn: {user_text}")
                     # Anonymize and prepare history
