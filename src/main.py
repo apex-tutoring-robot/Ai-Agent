@@ -26,7 +26,13 @@ logger = logging.getLogger(__name__)
 
 class JarvisBot:
     """Main orchestrator for Jarvis tutoring robot."""
-    
+
+    # Asked in order right after a brand new profile is created.
+    ONBOARDING_QUESTIONS = [
+        "What grade are you in?",
+        "What's your favorite subject to learn about?",
+    ]
+
     def __init__(self, face: Optional['FaceAnimator'] = None):
         """Initialize Jarvis with all components."""
         logger.info("Initializing Jarvis...")
@@ -71,7 +77,14 @@ class JarvisBot:
         self._last_bot_response = ""           # Full text of last bot response
         self._playback_ended_time = 0.0        # time.time() when playback stopped
         self._barge_in_detected = threading.Event()  # Set by VAD when real user speech detected
-        
+
+        # ── New-profile onboarding state ──
+        # A short Q&A after a brand new profile is created - doubles as
+        # useful context-gathering and (later) enrollment audio for voice
+        # verification, since one "my name is X" utterance isn't enough
+        # speech for a reliable voiceprint. None when no onboarding is active.
+        self._pending_onboarding: Optional[dict] = None
+
         logger.info("Jarvis initialized successfully!")
     
     def _recreate_audio_system(self):
@@ -161,6 +174,7 @@ class JarvisBot:
             manager = self.profile_manager.go_back()
             if manager:
                 self.conversation_manager = manager
+                self._pending_onboarding = None  # switching profiles cancels any in-progress onboarding
                 name = self.profile_manager.get_profile_name(self.profile_manager.get_active_profile_id())
                 self._speak_fixed_phrase(f"Okay, switching back to {name}'s session.", continuous_vad, output_device_index)
             else:
@@ -181,16 +195,41 @@ class JarvisBot:
 
             profile_id, created = self.profile_manager.find_or_create_profile(spoken_name)
             self.conversation_manager = self.profile_manager.switch_to(profile_id)
+            self._pending_onboarding = None  # switching profiles cancels any in-progress onboarding
             if created:
                 self._speak_fixed_phrase(
-                    f"Nice to meet you, {spoken_name}! I'll remember our conversations from now on.",
+                    f"Nice to meet you, {spoken_name}! I'll remember our conversations from now on. "
+                    f"Let's get to know each other a bit - {self.ONBOARDING_QUESTIONS[0]}",
                     continuous_vad, output_device_index
                 )
+                self._pending_onboarding = {"profile_id": profile_id, "question_index": 1}
             else:
                 self._speak_fixed_phrase(f"Welcome back, {spoken_name}!", continuous_vad, output_device_index)
             return True
 
         return False
+
+    def _handle_onboarding_answer(self, user_text: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Records the answer to the current onboarding question, then asks the
+        next one or wraps up. Stored as normal conversation turns (via
+        add_user_message/add_assistant_message) so it's genuinely remembered,
+        not just thrown away after asking.
+        """
+        anonymized = self.privacy_manager.anonymize(user_text)
+        self.conversation_manager.add_user_message(anonymized)
+
+        next_index = self._pending_onboarding["question_index"]
+        if next_index < len(self.ONBOARDING_QUESTIONS):
+            question = self.ONBOARDING_QUESTIONS[next_index]
+            self._speak_fixed_phrase(question, continuous_vad, output_device_index)
+            self.conversation_manager.add_assistant_message(question)
+            self._pending_onboarding["question_index"] = next_index + 1
+        else:
+            wrap_up = "Great, thanks for telling me about yourself! I'm ready whenever you want to start learning."
+            self._speak_fixed_phrase(wrap_up, continuous_vad, output_device_index)
+            self.conversation_manager.add_assistant_message(wrap_up)
+            self._pending_onboarding = None
 
     def _listener_loop(self, continuous_vad, request_queue):
         """Producer: Always listening, detecting interruptions in real-time.
@@ -279,6 +318,14 @@ class JarvisBot:
                 # "go back to your last session") are handled directly here and
                 # never reach the LLM - they're not real tutoring questions.
                 if self._try_handle_profile_command(user_text, continuous_vad, output_device_index):
+                    self._speaker_busy.clear()
+                    continuous_vad.reset_idle_timer()
+                    continue
+
+                # Mid-onboarding: this turn is an answer to the current
+                # onboarding question, not a real tutoring question either.
+                if self._pending_onboarding is not None:
+                    self._handle_onboarding_answer(user_text, continuous_vad, output_device_index)
                     self._speaker_busy.clear()
                     continuous_vad.reset_idle_timer()
                     continue
