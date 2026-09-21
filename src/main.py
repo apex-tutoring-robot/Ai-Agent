@@ -920,6 +920,9 @@ class JarvisBot:
 
 def main():
     import os
+    import sys
+
+    is_windows = sys.platform == "win32"
 
     # ── Display configuration ──────────────────────────────────────────────────
     # FACE_ENABLED=true          → show face animation
@@ -930,17 +933,27 @@ def main():
     # DISPLAY_BACKEND=auto       → pick first available X11 socket (:1 then :0)
     #
     # You can also skip DISPLAY_BACKEND and set DISPLAY directly, e.g. DISPLAY=:0
+    #
+    # None of the above (DISPLAY/XAUTHORITY/X11 sockets) is a Linux/X11 concept
+    # that applies on native Windows — OpenCV opens a normal Win32 window
+    # directly there, so Windows gets its own simpler default/path below.
     # ──────────────────────────────────────────────────────────────────────────
     face_env = os.getenv("FACE_ENABLED", "").strip().lower()
     if face_env in ("true", "1", "yes"):
         face_enabled = True
     elif face_env in ("false", "0", "no"):
         face_enabled = False
+    elif is_windows:
+        # No DISPLAY-style signal exists on Windows to auto-detect from -
+        # a normal interactive session always has a GUI available.
+        face_enabled = True
     else:
-        # Auto: enable face only when DISPLAY is already set in the environment
+        # Linux/Pi auto: enable face only when DISPLAY is already set
         face_enabled = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
-    if face_enabled:
+    if face_enabled and is_windows:
+        logger.info("Face animation enabled (native Windows GUI, no X11 needed)")
+    elif face_enabled:
         # DISPLAY_BACKEND always wins when explicitly set — it overrides whatever
         # DISPLAY was loaded from .env so that a single knob controls the display.
         # Priority: DISPLAY_BACKEND (explicit) > DISPLAY (env/shell) > default :0
@@ -996,7 +1009,10 @@ def main():
             # the repo root (the convention actually used to run this on the
             # Pi), silently falling back to headless instead of erroring loudly.
             faces_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visuals", "faces")
-            face = FaceAnimator(faces_dir)
+            # Windows here is always local dev/testing, not the Pi's actual
+            # dedicated robot screen - windowed so it doesn't take over the
+            # whole display while you're also watching logs/terminal.
+            face = FaceAnimator(faces_dir, fullscreen=not is_windows)
         except Exception as e:
             logger.warning(f"Failed to init face animation: {e}. Falling back to headless.")
 

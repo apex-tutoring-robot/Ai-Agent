@@ -6,7 +6,7 @@ import subprocess
 import numpy as np
 
 class FaceAnimator:
-    def __init__(self, face_dir):
+    def __init__(self, face_dir, fullscreen: bool = True):
         self.face_dir = face_dir
         self.running = True
         self.sleeping = False
@@ -30,7 +30,12 @@ class FaceAnimator:
 
         self.window = "CHIPPY"
         cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
-        cv2.setWindowProperty(self.window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        if fullscreen:
+            cv2.setWindowProperty(self.window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        else:
+            # Dev/testing convenience - a real window you can see alongside
+            # logs/terminal, instead of taking over the whole screen.
+            cv2.resizeWindow(self.window, 640, 360)
 
         print("[FACE] Ready")
 
