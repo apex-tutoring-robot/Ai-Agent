@@ -127,6 +127,10 @@ class ProfileManager:
             ).fetchone()
         return row["id"] if row else None
 
+    def is_default_profile(self, profile_id: int) -> bool:
+        """True if `profile_id` is the auto-created placeholder, not a real enrolled person."""
+        return self.get_profile_name(profile_id) == DEFAULT_PROFILE_NAME
+
     def _create_profile(self, name: str) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:

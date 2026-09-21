@@ -452,9 +452,20 @@ class JarvisBot:
             
             listener_thread.start()
             speaker_thread.start()
-            
+
             logger.info("🚀 Full-Duplex engines started")
-            
+
+            # No real profile has been created on this robot yet - invite
+            # account creation instead of silently using the placeholder
+            # "Guest" profile as if it were a real person.
+            active_id = self.profile_manager.get_active_profile_id()
+            if active_id is not None and self.profile_manager.is_default_profile(active_id):
+                self._speak_fixed_phrase(
+                    "Please create your account before you start learning! "
+                    "Just say Voice Recognition, then say your name, and I'll remember you from now on.",
+                    continuous_vad, pulse_index
+                )
+
             # Wait for conversation to end (timeout or manual stop)
             while self._conversation_active.is_set():
                 # Check for fatal errors in audio components and recover
