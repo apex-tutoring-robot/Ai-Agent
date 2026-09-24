@@ -80,6 +80,13 @@ cython
 # 1.26.4 (the previous pin here) predates Python 3.13 entirely - no wheel
 # for it exists on any platform, not just this Windows dev machine.
 numpy>=2.0
-opencv-python-headless==4.8.1.78  # headless, NOT opencv-python - the GUI variant bundles its own Qt and segfaults when PyQt5 (Teaching Canvas) is also loaded
+# 4.8.1.78 (the previous pin here) predates numpy 2.0's release and wasn't
+# built against its C API - importing cv2 raised "AttributeError: _ARRAY_API
+# not found" the moment numpy>=2.0 actually resolved to a 2.x wheel on a
+# fresh install (confirmed live, rebuilding this venv from scratch after it
+# was unexpectedly wiped). 4.10.0.84 is opencv's first release with real
+# numpy 2.x support. headless, NOT opencv-python - the GUI variant bundles
+# its own Qt and segfaults when PyQt5 (Teaching Canvas) is also loaded.
+opencv-python-headless==4.10.0.84
 httpx==0.27.0
 typing-extensions==4.15.0

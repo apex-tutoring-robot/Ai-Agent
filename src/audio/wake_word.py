@@ -93,9 +93,30 @@ class WakeWordDetector:
             callback: Function to call when wake word is detected
         """
         try:
+            # openWakeWord's pretrained models (both .tflite and .onnx
+            # variants) aren't bundled in the pip package - they need a
+            # separate download_models() call, which apparently happened
+            # invisibly at some point on every machine this has run on
+            # before now. Confirmed live: a completely fresh install (this
+            # venv was unexpectedly wiped and recreated) had an empty
+            # resources/models/ directory, and Model() raised a confusing
+            # "tflite runtime ... not found" error - not because tflite
+            # itself was missing (it never worked here, always fell back
+            # to onnx), but because the onnx files it should have fallen
+            # back to didn't exist either, so the whole thing crashed
+            # instead of degrading gracefully like every other optional
+            # dependency in this codebase. download_models() checks each
+            # file's existence before fetching it, so this is a fast no-op
+            # on every run after the first.
+            try:
+                from openwakeword.utils import download_models
+                download_models()
+            except Exception as e:
+                logger.warning(f"Could not verify/download openWakeWord models (continuing anyway): {e}")
+
             # Initialize openWakeWord model
             logger.info("Loading openWakeWord model...")
-            
+
             # Determine model paths
             if self.model_path and os.path.exists(self.model_path):
                 # Load specific custom model file
