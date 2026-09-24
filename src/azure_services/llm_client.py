@@ -219,11 +219,17 @@ class LLMClient:
                           "visuals": [{"speech_id": int, "action": str, ...}, ...]}
         """
         try:
+            # Deliberately NOT prepending self.system_prompt here - it's the
+            # conversational K-8 tutoring persona ("keep responses to 2-4
+            # sentences", "ask comprehension questions", "no formatting"),
+            # which directly conflicts with "return ONLY JSON" below. Tested
+            # live: combining them makes the model follow the conversational
+            # persona and ignore the JSON requirement entirely, returning
+            # plain chat text instead of a parseable plan.
             full_messages = [
                 {
                     "role": "system",
-                    "content": self.system_prompt + """
-
+                    "content": """
     You are an AI math tutor.
 
     Return ONLY valid JSON.

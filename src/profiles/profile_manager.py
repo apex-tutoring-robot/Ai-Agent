@@ -45,6 +45,7 @@ class ProfileManager:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
+        self._migrate_schema()
 
         # Ensure there's always an active profile, even before any real
         # enrollment flow exists - keeps the rest of the app working
@@ -87,6 +88,28 @@ class ProfileManager:
                     value TEXT
                 );
             """)
+            self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """
+        CREATE TABLE IF NOT EXISTS only creates a table the first time it's
+        ever run - it does NOT retroactively add new columns to a table
+        that already exists from an earlier version of this schema. Any
+        column added to `profiles` after the first release needs an entry
+        here, or every existing database (real family data, not just dev
+        databases) breaks with "no such column" the moment it's read/written -
+        confirmed live: exactly this happened for `grade`, and because
+        _handle_onboarding_answer's exception wasn't caught locally, it took
+        the entire speaker thread down for the rest of the conversation, not
+        just that one turn.
+        """
+        with self._lock:
+            existing_columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(profiles)")
+            }
+            if "grade" not in existing_columns:
+                self._conn.execute("ALTER TABLE profiles ADD COLUMN grade TEXT")
+                logger.info("🔧 Migrated profiles table: added 'grade' column")
             self._conn.commit()
 
     # --------------------------------------------------

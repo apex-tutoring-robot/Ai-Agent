@@ -145,6 +145,11 @@ class JarvisBot:
         # speech for a reliable voiceprint. None when no onboarding is active.
         self._pending_onboarding: Optional[dict] = None
 
+        # True right after asking "I heard Voice Recognition but didn't
+        # catch a name" - the next utterance is the name, whatever it is,
+        # not a fresh unrelated turn.
+        self._pending_name_capture: bool = False
+
         # ── Current conversation session (see session.py) ──
         # None outside of an active conversation; a fresh Session is created
         # each time the wake word fires.
@@ -240,6 +245,7 @@ class JarvisBot:
             if manager:
                 self.conversation_manager = manager
                 self._pending_onboarding = None  # switching profiles cancels any in-progress onboarding
+                self._pending_name_capture = False
                 name = self.profile_manager.get_profile_name(self.profile_manager.get_active_profile_id())
                 self._speak_fixed_phrase(f"Okay, switching back to {name}'s session.", continuous_vad, output_device_index)
             else:
@@ -256,34 +262,52 @@ class JarvisBot:
                     "I heard Voice Recognition, but I didn't catch a name — can you say your name too?",
                     continuous_vad, output_device_index
                 )
+                # Track that the NEXT utterance is the answer to this
+                # question, regardless of its content - otherwise it falls
+                # through to the normal LLM path and gets treated as an
+                # unrelated question (confirmed via live testing: saying
+                # "Ryan Lewis" as a follow-up got answered as if asking
+                # about a music producer named Ryan Lewis).
+                self._pending_name_capture = True
                 return True
 
-            profile_id, created = self.profile_manager.find_or_create_profile(spoken_name)
-            self.conversation_manager = self.profile_manager.switch_to(profile_id)
-            self._pending_onboarding = None  # switching profiles cancels any in-progress onboarding
-            if created:
-                self._speak_fixed_phrase(
-                    f"Nice to meet you, {spoken_name}! I'll remember our conversations from now on. "
-                    "Let me take your picture - look at the camera!",
-                    continuous_vad, output_device_index
-                )
-
-                avatar_path = os.path.join(self._avatars_dir, f"{profile_id}.jpg")
-                if capture_avatar_photo(avatar_path):
-                    self.profile_manager.set_avatar(profile_id, avatar_path)
-                # If capture fails (no camera, wrong platform, etc.) we just
-                # skip the avatar - not fatal to profile creation.
-
-                self._speak_fixed_phrase(
-                    f"Let's get to know each other a bit - {self.ONBOARDING_QUESTIONS[0]}",
-                    continuous_vad, output_device_index
-                )
-                self._pending_onboarding = {"profile_id": profile_id, "question_index": 1}
-            else:
-                self._speak_fixed_phrase(f"Welcome back, {spoken_name}!", continuous_vad, output_device_index)
+            self._switch_or_create_profile(spoken_name, continuous_vad, output_device_index)
             return True
 
         return False
+
+    def _switch_or_create_profile(self, spoken_name: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Switch to (or create) a profile by name, speaking the appropriate
+        confirmation and kicking off onboarding for new profiles. Shared by
+        both the direct "Voice Recognition <name>" trigger and the
+        name-recovery follow-up (see _pending_name_capture).
+        """
+        profile_id, created = self.profile_manager.find_or_create_profile(spoken_name)
+        self.conversation_manager = self.profile_manager.switch_to(profile_id)
+        self._pending_onboarding = None  # switching profiles cancels any in-progress onboarding
+        self._pending_name_capture = False
+
+        if created:
+            self._speak_fixed_phrase(
+                f"Nice to meet you, {spoken_name}! I'll remember our conversations from now on. "
+                "Let me take your picture - look at the camera!",
+                continuous_vad, output_device_index
+            )
+
+            avatar_path = os.path.join(self._avatars_dir, f"{profile_id}.jpg")
+            if capture_avatar_photo(avatar_path):
+                self.profile_manager.set_avatar(profile_id, avatar_path)
+            # If capture fails (no camera, wrong platform, etc.) we just
+            # skip the avatar - not fatal to profile creation.
+
+            self._speak_fixed_phrase(
+                f"Let's get to know each other a bit - {self.ONBOARDING_QUESTIONS[0]}",
+                continuous_vad, output_device_index
+            )
+            self._pending_onboarding = {"profile_id": profile_id, "question_index": 1}
+        else:
+            self._speak_fixed_phrase(f"Welcome back, {spoken_name}!", continuous_vad, output_device_index)
 
     def _handle_onboarding_answer(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
@@ -547,27 +571,53 @@ class JarvisBot:
                 self._interruption_event.clear()
                 self._barge_in_detected.clear()
 
-                # Profile-management commands ("Jarvis Voice Recognition <name>",
-                # "go back to your last session") are handled directly here and
-                # never reach the LLM - they're not real tutoring questions.
-                if self._try_handle_profile_command(user_text, continuous_vad, output_device_index):
+                # Profile commands, name-recovery, onboarding-answers, and
+                # math/teaching turns are all dispatched here, before the
+                # normal LLM path. Wrapped in one try/except so a bug in any
+                # of these can't kill the whole speaker thread for the rest
+                # of the conversation - confirmed live: an uncaught "no such
+                # column: grade" error in _handle_onboarding_answer did
+                # exactly that, silencing Jarvis for the remainder of the
+                # session (the normal-turn path below already has its own
+                # try/except and doesn't need this - only these four didn't).
+                try:
+                    # "Jarvis Voice Recognition <name>", "go back to your
+                    # last session" - never reach the LLM, not real
+                    # tutoring questions.
+                    if self._try_handle_profile_command(user_text, continuous_vad, output_device_index):
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
+                    # Recovering a name after "I heard Voice Recognition but
+                    # didn't catch a name" - this turn IS the name, not a
+                    # tutoring question, regardless of what it contains.
+                    if self._pending_name_capture:
+                        self._pending_name_capture = False
+                        self._switch_or_create_profile(user_text.strip(), continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
+                    # Mid-onboarding: this turn is an answer to the current
+                    # onboarding question, not a real tutoring question either.
+                    if self._pending_onboarding is not None:
+                        self._handle_onboarding_answer(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
+                    # Math/geometry questions get a teaching plan (speech
+                    # steps + synchronized whiteboard diagram) instead of a
+                    # plain answer.
+                    if self.is_math_query(user_text):
+                        self._run_teaching_turn(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continue
+                except Exception as dispatch_err:
+                    logger.error(f"Error handling turn dispatch (recovering, not ending the conversation): {dispatch_err}")
                     self._speaker_busy.clear()
                     continuous_vad.reset_idle_timer()
-                    continue
-
-                # Mid-onboarding: this turn is an answer to the current
-                # onboarding question, not a real tutoring question either.
-                if self._pending_onboarding is not None:
-                    self._handle_onboarding_answer(user_text, continuous_vad, output_device_index)
-                    self._speaker_busy.clear()
-                    continuous_vad.reset_idle_timer()
-                    continue
-
-                # Math/geometry questions get a teaching plan (speech steps +
-                # synchronized whiteboard diagram) instead of a plain answer.
-                if self.is_math_query(user_text):
-                    self._run_teaching_turn(user_text, continuous_vad, output_device_index)
-                    self._speaker_busy.clear()
                     continue
 
                 try:
