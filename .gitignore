@@ -17,6 +17,10 @@ __pycache__/
 *.wav
 *.mp3
 
+# Profile/conversation data (real student data - never commit)
+/data/
+*.db
+
 # Windows Zone Identifier files
 *.Zone.Identifier
 

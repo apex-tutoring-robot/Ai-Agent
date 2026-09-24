@@ -1,53 +1,163 @@
 import os
 # Allow the OS to use its default display and QT backend, rather than hardcoding.
 
+import re
+import subprocess
 import threading
 import time
 import queue
 from queue import Queue
-from typing import Optional
+from typing import Dict, Optional
 from difflib import SequenceMatcher
 from dotenv import load_dotenv
-from visuals.faces.face_animator import FaceAnimator
 import numpy as np
 
+# audio.wake_word (openwakeword -> onnxruntime) MUST be imported before any
+# PyQt5 import (visuals.ui.*, below) - onnxruntime and PyQt5 each bundle
+# their own native runtime DLLs, and loading PyQt5 first causes a hard
+# segfault on Windows when onnxruntime is imported afterward. Importing
+# onnxruntime's DLLs into the process first avoids the conflict. Verified:
+# swapping this order reliably segfaults; this order doesn't.
 from audio.wake_word import WakeWordDetector
 from audio.continuous_vad import ContinuousVADCapture
 from audio.playback import AudioPlayer
 from azure_services.stt_client import SpeechToTextClient
 from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
-from conversation.state_manager import ConversationStateManager
+from azure_services.interfaces import SpeechToTextProvider, LLMProvider, TextToSpeechProvider
 from privacy.privacy_manager import PrivacyManager
+from profiles.profile_manager import ProfileManager
+from profiles.camera_capture import capture_avatar_photo
+from session import Session
+from knowledge.textbook_search import TextbookSearch, normalize_grade
+from guardrails.guardrails_manager import GuardrailsManager
+
+from visuals.ui.ui_signals import UISignals
+from visuals.ui.main_window import MainWindow
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# OpenAI function-calling schema for the one real tool Jarvis currently
+# exposes to the LLM - see JarvisBot._tool_search_curriculum(). The model
+# decides for itself whether a question needs this, rather than a
+# keyword-routed heuristic like is_math_query().
+CURRICULUM_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_curriculum",
+        "description": (
+            "Search the official California Common Core math curriculum "
+            "standards for this student's grade level. Use this to ground "
+            "your explanation in what's actually expected at their grade, "
+            "or to check whether a topic is grade-appropriate before answering."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search for, e.g. 'fractions with unlike denominators' or 'area of shapes'"
+                }
+            },
+            "required": ["query"]
+        }
+    }
+}
+
+# System-level tool: lets the LLM actually act on requests like "please talk
+# more loudly" or "can you be quieter" instead of just replying in words.
+# `level` is relative (louder/quieter/normal) rather than a raw number since
+# that's how kids actually phrase the request - see JarvisBot._tool_set_volume().
+VOLUME_CONTROL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "set_volume",
+        "description": (
+            "Actually changes how loud Jarvis's speaking voice is - this is "
+            "a real hardware volume change, not a suggestion. Call this "
+            "whenever the student asks you to speak louder, quieter, or "
+            "back to normal volume. The call always succeeds immediately, "
+            "so afterward tell the student in a natural, upbeat way that "
+            "you've done it (e.g. 'Sure, I'll talk louder!'). Never claim "
+            "you can't change your volume - you just did. Only call this "
+            "once per request; don't call it again on a later, unrelated "
+            "turn unless the student asks again."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "string",
+                    "enum": ["louder", "quieter", "normal"],
+                    "description": "Direction to adjust the speaking volume."
+                }
+            },
+            "required": ["level"]
+        }
+    }
+}
+
 class JarvisBot:
     """Main orchestrator for Jarvis tutoring robot."""
-    
-    def __init__(self, face: Optional['FaceAnimator'] = None):
+
+    # Asked in order right after a brand new profile is created.
+    ONBOARDING_QUESTIONS = [
+        "What grade are you in?",
+        "What's your favorite subject to learn about?",
+    ]
+
+    def __init__(self, ui_signals: Optional['UISignals'] = None):
         """Initialize Jarvis with all components."""
         logger.info("Initializing Jarvis...")
-        self.face = face
-        
+        self.ui_signals = ui_signals
+
         # Initialize shared PyAudio instance
         import pyaudio
         self.pa = pyaudio.PyAudio()
-        
+
         # Initialize components with shared PyAudio
         self.wake_word_detector = WakeWordDetector(pa=self.pa)
         self.audio_player = AudioPlayer(
             pa=self.pa,
-            on_level=self.face.push_mouth_level if self.face else None
+            # Qt signal emission is thread-safe (queued to the GUI thread)
+            # unlike calling a widget method directly from this audio thread.
+            on_level=self.ui_signals.mouth_level.emit if self.ui_signals else None
         )
         self.stt_client = SpeechToTextClient()
         self.llm_client = LLMClient()
         self.tts_client = TextToSpeechClient()
+        # Verifies each client actually satisfies the provider-agnostic
+        # interface (see interfaces.py) - not just documentation, a real
+        # check that a future provider swap won't silently break main.py.
+        assert isinstance(self.stt_client, SpeechToTextProvider)
+        assert isinstance(self.llm_client, LLMProvider)
+        assert isinstance(self.tts_client, TextToSpeechProvider)
         self.privacy_manager = PrivacyManager()
-        self.conversation_manager = ConversationStateManager(
+
+        # Grade-scoped curriculum retrieval (RAG) - the data was already
+        # extracted (preprocess_textbooks.py) but never actually connected
+        # to the LLM until now. Exposed to the LLM as a callable tool, see
+        # llm_client.py's generate_response_with_tools().
+        textbooks_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "processed_json_textbooks"
+        )
+        self.textbook_search = TextbookSearch(textbooks_dir)
+
+        # Per-profile persistent history (one physical robot, multiple family
+        # members) - resolved relative to this file's own location, not CWD,
+        # same reasoning as the SYSTEM_PROMPT_PATH/face-path fixes.
+        db_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "data", "jarvis_profiles.db"
+        )
+        self.profile_manager = ProfileManager(
+            db_path=db_path,
             max_history=int(os.getenv('MAX_CONVERSATION_HISTORY', 20))
+        )
+        self.conversation_manager = self.profile_manager.get_conversation_manager()
+        self._avatars_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "data", "avatars"
         )
         
         self._is_running = False
@@ -63,8 +173,44 @@ class JarvisBot:
         self._playback_ended_time = 0.0        # time.time() when playback stopped
         self._barge_in_detected = threading.Event()  # Set by VAD when real user speech detected
 
+        # ── New-profile onboarding state ──
+        # A short Q&A after a brand new profile is created - doubles as
+        # useful context-gathering and (later) enrollment audio for voice
+        # verification, since one "my name is X" utterance isn't enough
+        # speech for a reliable voiceprint. None when no onboarding is active.
+        self._pending_onboarding: Optional[dict] = None
+
+        # True right after asking "I heard Voice Recognition but didn't
+        # catch a name" - the next utterance is the name, whatever it is,
+        # not a fresh unrelated turn.
+        self._pending_name_capture: bool = False
+
+        # ── Current conversation session (see session.py) ──
+        # None outside of an active conversation; a fresh Session is created
+        # each time the wake word fires.
+        self.current_session: Optional[Session] = None
+
+        # Output-only safety check (NeMo Guardrails) - checks what the LLM
+        # actually said, run in the background in parallel with TTS already
+        # speaking it (see _run_output_safety_check). Input-side checking
+        # was evaluated and deliberately left disabled: it roughly doubled
+        # per-turn latency and showed non-deterministic false-positive
+        # blocks on trivial input like "hello" in live testing. Fails open
+        # (GuardrailsManager.is_enabled is False) if NeMo/the config/the
+        # env vars aren't available, so a guardrails outage never silences
+        # Jarvis - it just runs without this safety net.
+        self.guardrails_manager = GuardrailsManager(
+            config_path=os.getenv('GUARDRAILS_CONFIG_PATH', 'config/guardrails')
+        )
+        # Identifies which turn's audio a background safety check belongs
+        # to (by object identity) - lets a check that resolves after the
+        # conversation has already moved to a newer turn recognize it's
+        # stale and skip interrupting unrelated, already-playing audio.
+        self._active_turn_token = None
+
         # ── Display sleep tracking ──
         self._standby_since = time.time()      # When we last returned to wake-word listening
+        self._display_sleeping = False         # Replaces the old FaceAnimator's self.face.sleeping
 
         logger.info("Jarvis initialized successfully!")
     
@@ -106,6 +252,383 @@ class JarvisBot:
             return 0.0
         overlap = words_a & words_b
         return len(overlap) / min(len(words_a), len(words_b))
+
+    def _speak_fixed_phrase(self, phrase: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Speak a fixed, non-LLM-generated phrase (profile switch/creation
+        confirmations). Same TTS/playback/echo-guard pattern as a normal
+        turn in _speaker_loop, just with fixed text.
+        """
+        logger.info(f"🗣️  {phrase}")
+        try:
+            self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
+            if self.ui_signals:
+                self.ui_signals.start_talking.emit()
+            self.audio_player.start_streaming(output_device_index=output_device_index)
+            self._bot_is_speaking = True
+            continuous_vad.set_playback_state(True)
+
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+                if self.audio_player._is_playing:
+                    self.audio_player.queue_audio(audio_chunk)
+                else:
+                    break
+
+            self.audio_player.stop_streaming(immediate=False)
+            self._last_bot_response = phrase
+        except Exception as e:
+            logger.error(f"Error speaking fixed phrase: {e}")
+        finally:
+            if self.ui_signals:
+                self.ui_signals.stop_talking.emit()
+            self._bot_is_speaking = False
+            self._playback_ended_time = time.time()
+            continuous_vad.set_playback_state(False)
+            self.audio_player.stop_streaming(immediate=True)
+
+    def _run_output_safety_check(self, full_response: str, turn_token: object, continuous_vad, output_device_index: int) -> None:
+        """
+        Runs in a background thread, kicked off right after a turn's full
+        response text is known - which by then is already synthesized and
+        queued/playing through the speaker (see _speaker_loop). A real LLM
+        round-trip (~8s live), too slow to gate speech-start on without
+        badly hurting time-to-first-audio, so it acts as a safety net
+        instead: if the response gets flagged, cut off playback immediately
+        (same mechanism as barge-in interruption) and speak a kid-friendly
+        refusal in its place.
+
+        turn_token is compared by identity against self._active_turn_token
+        so a check that resolves after the conversation has already moved
+        on to a newer turn recognizes it's stale and doesn't interrupt
+        unrelated, already-playing audio.
+        """
+        try:
+            safe, refusal_text = self.guardrails_manager.check_output(full_response)
+        except Exception as exc:
+            logger.error(f"Output safety check crashed (failing open): {exc}")
+            return
+
+        if safe:
+            return
+        if self._active_turn_token is not turn_token:
+            logger.warning(
+                "Guardrails flagged a response, but the conversation already "
+                "moved on to a newer turn - not interrupting."
+            )
+            return
+
+        logger.warning(f"🚨 Guardrails BLOCKED output after it started playing: '{full_response[:80]}'")
+        self.audio_player.stop_streaming(immediate=True)
+        self._speak_fixed_phrase(refusal_text, continuous_vad, output_device_index)
+
+    def _try_handle_profile_command(self, user_text: str, continuous_vad, output_device_index: int) -> bool:
+        """
+        Intercepts profile-management voice commands before they'd otherwise
+        be sent to the LLM as a normal question. Returns True if user_text
+        was such a command (already handled here - caller should skip the
+        normal LLM turn for it), False if it's a normal conversational turn.
+        """
+        normalized = user_text.strip().lower()
+
+        # "go back to your last session" (fuzzy - STT won't transcribe this
+        # identically every time, so match on the key phrase, not verbatim)
+        if "go back" in normalized and "session" in normalized:
+            manager = self.profile_manager.go_back()
+            if manager:
+                self.conversation_manager = manager
+                self._pending_onboarding = None  # switching profiles cancels any in-progress onboarding
+                self._pending_name_capture = False
+                name = self.profile_manager.get_profile_name(self.profile_manager.get_active_profile_id())
+                self._speak_fixed_phrase(f"Okay, switching back to {name}'s session.", continuous_vad, output_device_index)
+            else:
+                self._speak_fixed_phrase("There's no previous session to go back to.", continuous_vad, output_device_index)
+            return True
+
+        # "Jarvis Voice Recognition <name>" - switch to or create a profile
+        trigger = "voice recognition"
+        idx = normalized.find(trigger)
+        if idx != -1:
+            spoken_name = user_text[idx + len(trigger):].strip(" ,.!?")
+            if not spoken_name:
+                self._speak_fixed_phrase(
+                    "I heard Voice Recognition, but I didn't catch a name — can you say your name too?",
+                    continuous_vad, output_device_index
+                )
+                # Track that the NEXT utterance is the answer to this
+                # question, regardless of its content - otherwise it falls
+                # through to the normal LLM path and gets treated as an
+                # unrelated question (confirmed via live testing: saying
+                # "Ryan Lewis" as a follow-up got answered as if asking
+                # about a music producer named Ryan Lewis).
+                self._pending_name_capture = True
+                return True
+
+            self._switch_or_create_profile(spoken_name, continuous_vad, output_device_index)
+            return True
+
+        return False
+
+    def _switch_or_create_profile(self, spoken_name: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Switch to (or create) a profile by name, speaking the appropriate
+        confirmation and kicking off onboarding for new profiles. Shared by
+        both the direct "Voice Recognition <name>" trigger and the
+        name-recovery follow-up (see _pending_name_capture).
+        """
+        profile_id, created = self.profile_manager.find_or_create_profile(spoken_name)
+        self.conversation_manager = self.profile_manager.switch_to(profile_id)
+        self._pending_onboarding = None  # switching profiles cancels any in-progress onboarding
+        self._pending_name_capture = False
+
+        if created:
+            self._speak_fixed_phrase(
+                f"Nice to meet you, {spoken_name}! I'll remember our conversations from now on. "
+                "Let me take your picture - look at the camera!",
+                continuous_vad, output_device_index
+            )
+
+            avatar_path = os.path.join(self._avatars_dir, f"{profile_id}.jpg")
+            if capture_avatar_photo(avatar_path):
+                self.profile_manager.set_avatar(profile_id, avatar_path)
+            # If capture fails (no camera, wrong platform, etc.) we just
+            # skip the avatar - not fatal to profile creation.
+
+            self._speak_fixed_phrase(
+                f"Let's get to know each other a bit - {self.ONBOARDING_QUESTIONS[0]}",
+                continuous_vad, output_device_index
+            )
+            self._pending_onboarding = {"profile_id": profile_id, "question_index": 1}
+        else:
+            self._speak_fixed_phrase(f"Welcome back, {spoken_name}!", continuous_vad, output_device_index)
+
+    def _handle_onboarding_answer(self, user_text: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Records the answer to the current onboarding question, then asks the
+        next one or wraps up. Stored as normal conversation turns (via
+        add_user_message/add_assistant_message) so it's genuinely remembered,
+        not just thrown away after asking.
+        """
+        anonymized = self.privacy_manager.anonymize(user_text)
+        self.conversation_manager.add_user_message(anonymized)
+
+        next_index = self._pending_onboarding["question_index"]
+
+        # question_index == 1 means this answer is responding to
+        # ONBOARDING_QUESTIONS[0] ("What grade are you in?") - parse and
+        # store it so RAG retrieval (search_curriculum tool) can scope
+        # results to this student's actual grade level.
+        if next_index == 1:
+            grade = normalize_grade(user_text)
+            if grade:
+                self.profile_manager.set_grade(self._pending_onboarding["profile_id"], grade)
+                logger.info(f"📓 Stored grade '{grade}' for profile {self._pending_onboarding['profile_id']}")
+            else:
+                logger.info(f"📓 Could not parse a grade from: '{user_text}'")
+
+        if next_index < len(self.ONBOARDING_QUESTIONS):
+            question = self.ONBOARDING_QUESTIONS[next_index]
+            self._speak_fixed_phrase(question, continuous_vad, output_device_index)
+            self.conversation_manager.add_assistant_message(question)
+            self._pending_onboarding["question_index"] = next_index + 1
+        else:
+            wrap_up = "Great, thanks for telling me about yourself! I'm ready whenever you want to start learning."
+            self._speak_fixed_phrase(wrap_up, continuous_vad, output_device_index)
+            self.conversation_manager.add_assistant_message(wrap_up)
+            self._pending_onboarding = None
+
+    def _tool_search_curriculum(self, query: str) -> str:
+        """Implementation behind the search_curriculum tool the LLM can call."""
+        profile_id = self.profile_manager.get_active_profile_id()
+        grade = self.profile_manager.get_grade(profile_id) if profile_id else None
+        if not grade:
+            return "No grade level is known for this student yet, so results may not be grade-appropriate."
+
+        results = self.textbook_search.search(query, grade)
+        if not results:
+            return f"No matching curriculum content found for grade {grade} on '{query}'."
+        return "\n\n".join(results)
+
+    # Step size per "louder"/"quieter" call, and the hard ceiling/floor -
+    # matches the clamp already enforced in AudioPlayer.set_volume().
+    _VOLUME_STEP = 0.25
+    _VOLUME_MIN = 0.25
+    _VOLUME_MAX = 2.0
+
+    def _tool_set_volume(self, level: str) -> str:
+        """Implementation behind the set_volume tool the LLM can call."""
+        current = self.audio_player.volume
+        if level == "louder":
+            new_volume = min(current + self._VOLUME_STEP, self._VOLUME_MAX)
+        elif level == "quieter":
+            new_volume = max(current - self._VOLUME_STEP, self._VOLUME_MIN)
+        elif level == "normal":
+            new_volume = 1.0
+        else:
+            return f"Unknown volume level: {level}"
+
+        self.audio_player.set_volume(new_volume)
+        if self.ui_signals:
+            self.ui_signals.volume_changed.emit(new_volume)
+
+        if new_volume >= self._VOLUME_MAX:
+            detail = "Volume raised to maximum."
+        elif new_volume <= self._VOLUME_MIN:
+            detail = "Volume lowered to minimum."
+        else:
+            detail = f"Volume set to {int(new_volume * 100)}% of normal."
+        # The tool already succeeded by the time the model sees this -
+        # phrased as a direct instruction because gpt-4o-mini otherwise
+        # tends to hedge and tell the student it "can't" change volume
+        # even in the same turn it just changed it (seen live).
+        return f"{detail} This already happened. Confirm it to the student now - do not say you can't change volume."
+
+    def _execute_tool(self, tool_name: str, args: dict) -> str:
+        """Dispatches a tool call requested by the LLM and records it in the
+        current session's audit trail (Session.tool_calls)."""
+        if tool_name == "search_curriculum":
+            result = self._tool_search_curriculum(args.get("query", ""))
+        elif tool_name == "set_volume":
+            result = self._tool_set_volume(args.get("level", ""))
+        else:
+            result = f"Unknown tool: {tool_name}"
+
+        if self.current_session:
+            self.current_session.record_tool_call(tool_name, args, result)
+        return result
+
+    def is_math_query(self, text: str) -> bool:
+        """Detect math/geometry questions that should get a teaching plan
+        (whiteboard diagram + synced speech) instead of a plain answer."""
+        t = text.lower().strip()
+
+        math_keywords = [
+            # arithmetic / algebra
+            "solve", "equation", "equations", "add", "subtract", "multiply", "divide",
+            "fraction", "algebra", "calculate", "compute", "simplify", "evaluate",
+            "factor", "expand", "expression", "variable", "coefficient",
+            # geometry - shapes
+            "area", "perimeter", "surface area",
+            "radius", "diameter", "circumference",
+            "rectangle", "square", "circle", "triangle", "polygon",
+            "pentagon", "hexagon", "heptagon", "octagon", "nonagon", "decagon",
+            "trapezoid", "trapezium", "parallelogram", "rhombus", "kite",
+            "ellipse", "oval", "sector", "segment",
+            "sided", "sides", "shape", "diagonal", "hypotenuse",
+            # geometry - measurements
+            "angle", "degree", "height", "width", "length", "base", "depth",
+            "pythagorean", "theorem", "congruent", "similar",
+            # misc math
+            "graph", "geometry", "probability", "percent", "ratio", "proportion",
+            "mean", "median", "mode", "average", "prime", "exponent", "power",
+            "square root", "cube root", "logarithm",
+        ]
+
+        if any(word in t for word in math_keywords):
+            return True
+
+        # "volume" alone is ambiguous - a real geometry term (volume of a
+        # cube) but also loudness (see the set_volume tool). A bare
+        # substring match here sent "please tell me in maximum volume"
+        # to the teaching-plan pipeline instead of set_volume, confirmed
+        # live - the JSON-only prompt got a conversational reply back and
+        # errored, ultimately just apologizing instead of changing the
+        # volume. Only treat it as math when paired with "of" or an actual
+        # 3D-shape word, not just present anywhere in the sentence.
+        if re.search(r"\bvolume\s+of\b", t) or (
+            "volume" in t
+            and re.search(r"\b(cube|sphere|cylinder|cone|prism|pyramid|box|container|tank)\b", t)
+        ):
+            return True
+
+        return bool(re.search(r"\d", t) and re.search(r"[\+\-\*/=]", t))
+
+    def _run_teaching_turn(self, user_text: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Handle a math/geometry question: generate a teaching plan (speech
+        steps + synchronized whiteboard draw actions) via
+        LLMClient.generate_teaching_plan(), instead of a plain LLM answer.
+        Each step's draw actions are emitted right before that step's speech
+        is synthesized/played, using the same streaming TTS pipeline as
+        normal turns (one text chunk per step, since each step's text is
+        already complete - not token-by-token like a live LLM stream).
+        """
+        self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
+        if self.ui_signals:
+            self.ui_signals.show_teaching_layout.emit()
+            self.ui_signals.clear_canvas.emit()
+            self.ui_signals.start_talking.emit()
+        self.audio_player.start_streaming(output_device_index=output_device_index)
+        self._bot_is_speaking = True
+        continuous_vad.set_playback_state(True)
+
+        response_parts = []
+        try:
+            logger.info(f"📐 Processing Teaching Turn: {user_text}")
+            anonymized_text = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized_text)
+            messages = self.conversation_manager.get_messages()
+
+            plan = self.llm_client.generate_teaching_plan(messages)
+            visuals = plan.get("visuals", [])
+
+            for step in plan.get("speech", []):
+                if self._interruption_event.is_set():
+                    break
+
+                step_text = step.get("text", "").strip()
+                if not step_text:
+                    continue
+
+                actions = [v for v in visuals if v.get("speech_id") == step.get("id")]
+                if actions and self.ui_signals:
+                    self.ui_signals.draw_actions.emit(actions)
+
+                response_parts.append(step_text)
+                for audio_chunk in self.tts_client.synthesize_stream(iter([step_text])):
+                    if self._interruption_event.is_set():
+                        break
+                    if self.audio_player._is_playing:
+                        try:
+                            self.audio_player.queue_audio(audio_chunk)
+                        except RuntimeError as e:
+                            logger.warning(f"⚠️ Playback queueing failed (likely stopped): {e}")
+                            break
+                    else:
+                        break
+
+            if not self._interruption_event.is_set():
+                self.audio_player.stop_streaming(immediate=False)
+                full_response = " ".join(response_parts)
+                if full_response:
+                    self._last_bot_response = full_response
+                    self.conversation_manager.add_assistant_message(full_response)
+                    logger.info(f"🤖 Bot (teaching): {full_response}")
+            else:
+                partial = " ".join(response_parts)
+                if partial:
+                    self._last_bot_response = partial
+
+            continuous_vad.reset_idle_timer()
+
+        except Exception as e:
+            logger.error(f"Error in teaching turn: {e}")
+            # Fall back to a spoken apology rather than leaving the student
+            # in silence if the LLM didn't return a valid teaching plan.
+            try:
+                apology = "Sorry, I had trouble working that one out. Could you try asking again?"
+                for audio_chunk in self.tts_client.synthesize_stream(iter([apology])):
+                    if self.audio_player._is_playing:
+                        self.audio_player.queue_audio(audio_chunk)
+                self._last_bot_response = apology
+            except Exception:
+                pass
+        finally:
+            if self.ui_signals:
+                self.ui_signals.stop_talking.emit()
+            self._bot_is_speaking = False
+            self._playback_ended_time = time.time()
+            continuous_vad.set_playback_state(False)
+            self.audio_player.stop_streaming(immediate=True)
 
     def _listener_loop(self, continuous_vad, request_queue):
         """Producer: Always listening, detecting interruptions in real-time.
@@ -189,40 +712,107 @@ class JarvisBot:
                 self._speaker_busy.set()
                 self._interruption_event.clear()
                 self._barge_in_detected.clear()
-                
+
+                # Profile commands, name-recovery, onboarding-answers, and
+                # math/teaching turns are all dispatched here, before the
+                # normal LLM path. Wrapped in one try/except so a bug in any
+                # of these can't kill the whole speaker thread for the rest
+                # of the conversation - confirmed live: an uncaught "no such
+                # column: grade" error in _handle_onboarding_answer did
+                # exactly that, silencing Jarvis for the remainder of the
+                # session (the normal-turn path below already has its own
+                # try/except and doesn't need this - only these four didn't).
+                try:
+                    # "Jarvis Voice Recognition <name>", "go back to your
+                    # last session" - never reach the LLM, not real
+                    # tutoring questions.
+                    if self._try_handle_profile_command(user_text, continuous_vad, output_device_index):
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
+                    # Recovering a name after "I heard Voice Recognition but
+                    # didn't catch a name" - this turn IS the name, not a
+                    # tutoring question, regardless of what it contains.
+                    if self._pending_name_capture:
+                        self._pending_name_capture = False
+                        self._switch_or_create_profile(user_text.strip(), continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
+                    # Mid-onboarding: this turn is an answer to the current
+                    # onboarding question, not a real tutoring question either.
+                    if self._pending_onboarding is not None:
+                        self._handle_onboarding_answer(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
+                    # Math/geometry questions get a teaching plan (speech
+                    # steps + synchronized whiteboard diagram) instead of a
+                    # plain answer.
+                    if self.is_math_query(user_text):
+                        self._run_teaching_turn(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continue
+                except Exception as dispatch_err:
+                    logger.error(f"Error handling turn dispatch (recovering, not ending the conversation): {dispatch_err}")
+                    self._speaker_busy.clear()
+                    continuous_vad.reset_idle_timer()
+                    continue
+
                 try:
                     logger.info(f"📝 Processing Turn: {user_text}")
+                    turn_start = time.perf_counter()
+                    if self.current_session:
+                        self.current_session.new_turn()
+
                     # Anonymize and prepare history
                     anonymized_text = self.privacy_manager.anonymize(user_text)
                     self.conversation_manager.add_user_message(anonymized_text)
-                    
+
                     # LLM Generation
                     messages = self.conversation_manager.get_messages()
-                    llm_start = time.perf_counter()
-                    
+
                     # Start audio playback (callback mode)
                     # AEC: Provide reference audio back to VAD
                     self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
-                    if self.face:
-                        self.face.start_talking()
+                    if self.ui_signals:
+                        self.ui_signals.show_face_fullscreen.emit()
+                        self.ui_signals.start_talking.emit()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
 
                     response_chunks = []
+                    latency: Dict[str, float] = {}
                     first_audio_chunk = True
 
-                    # Helper to collect text while streaming
+                    # Helper to collect text while streaming, timestamping
+                    # the first chunk for the LLM-TTFT latency figure.
                     def text_collector(stream):
                         for chunk in stream:
                             if self._interruption_event.is_set():
                                 break
+                            if not response_chunks:
+                                latency["llm_ttft_ms"] = round((time.perf_counter() - turn_start) * 1000, 1)
                             response_chunks.append(chunk)
                             yield chunk
-                            
-                    # Pipeline: LLM -> TTS -> AudioPlayer
-                    llm_stream = self.llm_client.generate_response_stream(messages)
+
+                    # Helper to timestamp the first audio chunk for the
+                    # TTS-first-byte latency figure.
+                    def audio_timing(stream):
+                        for i, chunk in enumerate(stream):
+                            if i == 0:
+                                latency["tts_first_byte_ms"] = round((time.perf_counter() - turn_start) * 1000, 1)
+                            yield chunk
+
+                    # Pipeline: LLM (with tool-calling) -> TTS -> AudioPlayer
+                    llm_stream = self.llm_client.generate_response_with_tools(
+                        messages, tools=[CURRICULUM_SEARCH_TOOL, VOLUME_CONTROL_TOOL], tool_executor=self._execute_tool
+                    )
                     collected_stream = text_collector(llm_stream)
-                    tts_stream = self.tts_client.synthesize_stream(collected_stream)
-                    
+                    tts_stream = audio_timing(self.tts_client.synthesize_stream(collected_stream))
+
                     for audio_chunk in tts_stream:
                         if self._interruption_event.is_set():
                             logger.warning("🛑 Speaker aborted due to interruption event")
@@ -247,11 +837,27 @@ class JarvisBot:
                                 break
                         else:
                             break
-                        
+
                     # Wait for playback to finish naturally (if not interrupted)
                     if not self._interruption_event.is_set():
+                        # Kick off the output safety check now, before the
+                        # blocking wait below - the response is already
+                        # synthesized and queued/playing, so this runs
+                        # concurrently with the actual speech instead of
+                        # delaying it. See _run_output_safety_check.
+                        if self.guardrails_manager.is_enabled:
+                            full_response_so_far = "".join(response_chunks)
+                            if full_response_so_far:
+                                turn_token = object()
+                                self._active_turn_token = turn_token
+                                threading.Thread(
+                                    target=self._run_output_safety_check,
+                                    args=(full_response_so_far, turn_token, continuous_vad, output_device_index),
+                                    daemon=True,
+                                ).start()
+
                         self.audio_player.stop_streaming(immediate=False)
-                        
+
                         # Add full response to history only if NOT interrupted
                         full_response = "".join(response_chunks)
                         if full_response:
@@ -263,15 +869,24 @@ class JarvisBot:
                         partial = "".join(response_chunks)
                         if partial:
                             self._last_bot_response = partial
-                    
+
+                    latency["total_ms"] = round((time.perf_counter() - turn_start) * 1000, 1)
+                    logger.info(
+                        f"⏱️  LLM TTFT: {latency.get('llm_ttft_ms', '?')}ms | "
+                        f"TTS first byte: {latency.get('tts_first_byte_ms', '?')}ms | "
+                        f"Total: {latency['total_ms']}ms"
+                    )
+                    if self.current_session:
+                        self.current_session.last_latency_breakdown = latency
+
                     # Reset idle timer because we just finished a turn
                     continuous_vad.reset_idle_timer()
-                    
+
                 except Exception as turn_err:
                     logger.error(f"Error in speaker turn: {turn_err}")
                 finally:
-                    if self.face:
-                        self.face.start_idle()
+                    if self.ui_signals:
+                        self.ui_signals.stop_talking.emit()
                     # ── ECHO GUARD: Signal playback ended + start cooldown ──
                     self._bot_is_speaking = False
                     self._playback_ended_time = time.time()
@@ -308,6 +923,39 @@ class JarvisBot:
         fallback = int(os.getenv(env_var, 1))
         logger.warning(f"⚠️  PulseAudio not found - falling back to {env_var}={fallback} for {direction}")
         return fallback
+
+    @staticmethod
+    def _set_display_power(on: bool) -> None:
+        """
+        Toggle HDMI display power via vcgencmd (Raspberry Pi only).
+
+        Ported as-is from the old cv2 FaceAnimator.enter_sleep()/wake_up() -
+        silently no-ops off-Pi (FileNotFoundError when vcgencmd doesn't
+        exist, e.g. this Windows dev machine), so it's safe to call
+        unconditionally everywhere.
+        """
+        try:
+            subprocess.run(
+                ["vcgencmd", "display_power", "1" if on else "0"],
+                check=False, timeout=3,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    def _enter_sleep(self) -> None:
+        """Blank the display and turn off physical HDMI power (Pi only)."""
+        self._display_sleeping = True
+        self._set_display_power(False)
+        if self.ui_signals:
+            self.ui_signals.enter_sleep.emit()
+
+    def _wake_up(self) -> None:
+        """Restore the display and turn physical HDMI power back on (Pi only)."""
+        self._display_sleeping = False
+        self._set_display_power(True)
+        if self.ui_signals:
+            self.ui_signals.wake_up.emit()
 
     def _speak_system_message(self, phrase: str, continuous_vad, output_device_index: int) -> None:
         """
@@ -402,11 +1050,17 @@ class JarvisBot:
             logger.info("="*60)
 
             # Wake the screen back up immediately if it was asleep
-            if self.face and getattr(self.face, 'sleeping', False):
-                self.face.wake_up()
+            if self._display_sleeping:
+                self._wake_up()
 
             # Stop wake word detection to free microphone
             self.wake_word_detector.stop()
+
+            # New session for this conversation - a fresh session_id, turn
+            # counter, and tool-call audit trail each time the wake word
+            # fires (long-term memory lives in ProfileManager, not here).
+            self.current_session = Session(profile_id=self.profile_manager.get_active_profile_id())
+            logger.info(f"🆕 Session {self.current_session.session_id} started")
 
             # Flush any stale items (e.g. a leftover None sentinel from the previous
             # conversation's idle-timeout cleanup) so the new speaker thread starts clean.
@@ -469,10 +1123,22 @@ class JarvisBot:
 
             logger.info("🚀 Full-Duplex engines started")
 
-            # Greet the student right away instead of waiting on an LLM round-trip
-            # for the first response. Threads are already running at this point,
-            # so barge-in still works if the student starts talking over it.
-            self._speak_greeting(continuous_vad, pulse_output_index)
+            # No real profile has been created on this robot yet - invite
+            # account creation instead of silently using the placeholder
+            # "Guest" profile as if it were a real person. Otherwise greet
+            # the student right away instead of waiting on an LLM
+            # round-trip for the first response - threads are already
+            # running at this point, so barge-in still works if the
+            # student starts talking over it.
+            active_id = self.profile_manager.get_active_profile_id()
+            if active_id is not None and self.profile_manager.is_default_profile(active_id):
+                self._speak_fixed_phrase(
+                    "Please create your account before you start learning! "
+                    "Just say Voice Recognition, then say your name, and I'll remember you from now on.",
+                    continuous_vad, pulse_output_index
+                )
+            else:
+                self._speak_greeting(continuous_vad, pulse_output_index)
 
             # Wait for conversation to end (timeout or manual stop).
             # Two-stage idle handling: after `idle_timeout` of silence, ask if
@@ -660,8 +1326,8 @@ class JarvisBot:
         """
         try:
             # Step 1: Stream audio chunks to STT
-            if self.face:
-                self.face.start_thinking()
+            if self.ui_signals:
+                self.ui_signals.thinking.emit()
             logger.info("☁️  Starting streaming speech recognition...")
             stt_start = time.perf_counter()
             
@@ -717,8 +1383,8 @@ class JarvisBot:
                 # Start audio player BEFORE first audio arrives for lower latency
                 # CRITICAL: Use dedicated PulseAudio output stream
                 self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
-                if self.face:
-                    self.face.start_talking()
+                if self.ui_signals:
+                    self.ui_signals.start_talking.emit()
                 self.audio_player.start_streaming(output_device_index=output_device_index)
                 
                 # Full Duplex: Start monitoring for interruptions while bot speaks
@@ -804,8 +1470,8 @@ class JarvisBot:
                 # This ensures we don't timeout while bot is generating/speaking
                 continuous_vad.reset_idle_timer()
                 
-                if self.face:
-                    self.face.start_idle()
+                if self.ui_signals:
+                    self.ui_signals.listening.emit()
                 return True
                 
             except Exception as e:
@@ -839,8 +1505,9 @@ class JarvisBot:
     
     def run(self):
         """Start Jarvis and run the main loop."""
-        if self.face:
-            self.face.start_idle()
+        # MainWindow.__init__ already puts the face in idle state on construction,
+        # and show_idle_mode() there is only reachable via signals from this
+        # thread once running - nothing to emit here at startup.
         logger.info("\n" + "🤖 "*20)
         logger.info("Jarvis TUTORING ROBOT STARTED")
         logger.info("🤖 "*20 + "\n")
@@ -863,7 +1530,7 @@ class JarvisBot:
             while self._is_running:
                 # After enough standby idle time (no conversation, no new wake
                 # word), announce it and put the physical display to sleep.
-                if (self.face and not getattr(self.face, 'sleeping', False)
+                if (not self._display_sleeping
                         and display_sleep_timeout > 0
                         and not self._conversation_active.is_set()
                         and (time.time() - self._standby_since) >= display_sleep_timeout):
@@ -873,7 +1540,7 @@ class JarvisBot:
                         os.getenv('SLEEP_MESSAGE', "I'm going to sleep now. Just say Hey Jarvis to wake me up!"),
                         sleep_output_index
                     )
-                    self.face.enter_sleep()
+                    self._enter_sleep()
 
                 time.sleep(0.5)
 
@@ -919,14 +1586,18 @@ class JarvisBot:
         logger.info("Jarvis shutdown complete. Goodbye! 👋\n")
 
 def main():
-    import os
     import sys
 
     is_windows = sys.platform == "win32"
 
     # ── Display configuration ──────────────────────────────────────────────────
-    # FACE_ENABLED=true          → show face animation
+    # FACE_ENABLED=true          → show the face/teaching-canvas window
     # FACE_ENABLED=false         → headless, no GUI (default when DISPLAY not set)
+    # unset                      → auto: on Windows, on (normal desktop session,
+    #                              Qt opens its own native window, no DISPLAY
+    #                              needed); on Linux/Pi, on only if DISPLAY/
+    #                              WAYLAND_DISPLAY is already set (matches a
+    #                              headless-SSH-session default)
     #
     # DISPLAY_BACKEND=physical   → HDMI monitor          (DISPLAY=:0)
     # DISPLAY_BACKEND=vnc        → TigerVNC session      (DISPLAY=:1)
@@ -935,8 +1606,9 @@ def main():
     # You can also skip DISPLAY_BACKEND and set DISPLAY directly, e.g. DISPLAY=:0
     #
     # None of the above (DISPLAY/XAUTHORITY/X11 sockets) is a Linux/X11 concept
-    # that applies on native Windows — OpenCV opens a normal Win32 window
-    # directly there, so Windows gets its own simpler default/path below.
+    # that applies on native Windows — Qt opens a normal Win32 window directly
+    # there, so Windows gets its own simpler default/path below. On Linux, Qt
+    # still needs a real X11 DISPLAY the same way the old cv2-based face did.
     # ──────────────────────────────────────────────────────────────────────────
     face_env = os.getenv("FACE_ENABLED", "").strip().lower()
     if face_env in ("true", "1", "yes"):
@@ -1000,29 +1672,41 @@ def main():
     if not face_enabled:
         logger.info("Face animation disabled — running headless (set FACE_ENABLED=true to enable)")
 
-    face = None
+    app = None
+    ui_signals = None
     if face_enabled:
         try:
+            from PyQt5.QtWidgets import QApplication
+            # QApplication must exist before any other Qt object (UISignals,
+            # MainWindow) is constructed, and must live on the main thread.
+            app = QApplication(sys.argv)
+            ui_signals = UISignals()
+
             # Resolve relative to this file's own location, not the process's
             # CWD - "./visuals/faces" only works if launched as `cd src &&
             # python main.py`, but breaks under `python3 src/main.py` from
             # the repo root (the convention actually used to run this on the
             # Pi), silently falling back to headless instead of erroring loudly.
             faces_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visuals", "faces")
-            # Windows here is always local dev/testing, not the Pi's actual
-            # dedicated robot screen - windowed so it doesn't take over the
-            # whole display while you're also watching logs/terminal.
-            face = FaceAnimator(faces_dir, fullscreen=not is_windows)
+            window = MainWindow(ui_signals, faces_dir, fullscreen=not is_windows)
+            window.show()
+
+            logger.info(
+                "Face animation enabled (native Windows GUI)" if is_windows
+                else f"Face animation enabled on display {os.environ.get('DISPLAY', '')}"
+            )
         except Exception as e:
             logger.warning(f"Failed to init face animation: {e}. Falling back to headless.")
+            app = None
+            ui_signals = None
 
-    jarvis = JarvisBot(face)
+    jarvis = JarvisBot(ui_signals)
 
-    if face:
+    if app:
         worker = threading.Thread(target=jarvis.run, daemon=True)
         worker.start()
-        # cv2 GUI event loop must run on the main thread
-        face.render_forever()
+        # Qt's event loop must run on the main thread
+        sys.exit(app.exec_())
     else:
         jarvis.run()
 

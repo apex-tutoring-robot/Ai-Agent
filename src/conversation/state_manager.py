@@ -5,7 +5,7 @@ Manages conversation history and context for multi-turn interactions.
 
 import logging
 import threading
-from typing import List, Dict, Optional
+from typing import Callable, List, Dict, Optional
 from collections import deque
 
 logging.basicConfig(level='INFO')
@@ -14,24 +14,29 @@ logger = logging.getLogger(__name__)
 
 class ConversationStateManager:
     """Thread-safe conversation state manager."""
-    
-    def __init__(self, max_history: int = 20):
+
+    def __init__(self, max_history: int = 20, on_message: Optional[Callable[[str, str], None]] = None):
         """
         Initialize conversation state manager.
-        
+
         Args:
             max_history: Maximum number of messages to keep in history
+            on_message: Optional callback(role, content) invoked after each
+                message is added, e.g. to persist it. Kept separate from the
+                in-memory deque so this class stays a plain, fast LLM-context
+                cache regardless of whether a caller wants persistence.
         """
         self.max_history = max_history
         self._messages: deque = deque(maxlen=max_history)
         self._lock = threading.Lock()
-        
+        self._on_message = on_message
+
         logger.info(f"Conversation state manager initialized (max history: {max_history})")
-    
+
     def add_user_message(self, content: str) -> None:
         """
         Add a user message to conversation history.
-        
+
         Args:
             content: User message content
         """
@@ -41,11 +46,13 @@ class ConversationStateManager:
                 "content": content
             })
             logger.debug(f"Added user message: {content[:50]}...")
-    
+        if self._on_message:
+            self._on_message("user", content)
+
     def add_assistant_message(self, content: str) -> None:
         """
         Add an assistant message to conversation history.
-        
+
         Args:
             content: Assistant message content
         """
@@ -55,7 +62,18 @@ class ConversationStateManager:
                 "content": content
             })
             logger.debug(f"Added assistant message: {content[:50]}...")
-    
+        if self._on_message:
+            self._on_message("assistant", content)
+
+    def load_message(self, role: str, content: str) -> None:
+        """
+        Append a message without invoking on_message - for hydrating from
+        persisted storage, where it's already saved and re-persisting would
+        just duplicate it.
+        """
+        with self._lock:
+            self._messages.append({"role": role, "content": content})
+
     def get_messages(self) -> List[Dict[str, str]]:
         """
         Get all messages in conversation history.
