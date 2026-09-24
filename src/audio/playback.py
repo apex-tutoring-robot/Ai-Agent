@@ -319,6 +319,41 @@ class AudioPlayer:
         logger.info("✅ Streaming playback stopped")
         return True
 
+    def request_immediate_stop(self) -> None:
+        """
+        Cross-thread-safe way to cut off playback from a thread that does
+        NOT own this AudioPlayer's lifecycle - e.g. a background guardrails
+        safety-check thread reacting to a response flagged unsafe partway
+        through being spoken (see JarvisBot._run_output_safety_check).
+
+        stop_streaming() is documented as single-writer only (see the
+        "we're the only closer" comment below) - the owning thread is
+        normally the speaker thread, and it's frequently already inside
+        its OWN stop_streaming(immediate=False) call (waiting for natural
+        playback completion) when a safety check resolves. Calling the
+        full stop_streaming(immediate=True) from a second thread in that
+        window means two threads can both reach stream.stop_stream() on
+        the same PortAudio stream concurrently - undefined behavior in a
+        C audio library, not just a logic bug.
+
+        This only touches primitives that are already safe to use from
+        any thread: threading.Event.set() and queue.Queue's own locking.
+        Setting _stop_event makes _audio_callback (running in PortAudio's
+        own thread) return paAbort on its very next invocation (~20ms,
+        one callback buffer), which PortAudio itself then reflects in
+        stream.is_active(). Whichever thread already owns the stream -
+        normally the speaker thread's own in-flight stop_streaming() wait
+        loop - observes that quickly and performs the actual
+        stream.stop_stream()/close() itself, alone, as intended.
+        """
+        self._is_playing = False
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._stop_event.set()
+
     def cleanup(self) -> None:
         """Clean up audio stream (but keep PyAudio instance for reuse)."""
         # Clean up stream

@@ -318,7 +318,21 @@ class JarvisBot:
             return
 
         logger.warning(f"🚨 Guardrails BLOCKED output after it started playing: '{full_response[:80]}'")
-        self.audio_player.stop_streaming(immediate=True)
+        # request_immediate_stop() (not stop_streaming(), which this thread
+        # doesn't own) only touches primitives that are already safe to use
+        # cross-thread - see its docstring in playback.py for why calling
+        # the full stop_streaming(immediate=True) here raced with the
+        # speaker thread's own in-flight stop_streaming(immediate=False)
+        # call and could reach PortAudio's stream.stop_stream() from two
+        # threads at once.
+        self.audio_player.request_immediate_stop()
+        # Brief margin before opening a new stream for the refusal:
+        # start_streaming() closes any stale stream under its own
+        # "no worker thread is running yet" assumption - this gives the
+        # speaker thread's own stop_streaming() call time to notice the
+        # abort (one ~20ms callback cycle) and finish that cleanup itself
+        # first, so this thread isn't racing it to touch the same stream.
+        time.sleep(0.2)
         self._speak_fixed_phrase(refusal_text, continuous_vad, output_device_index)
 
     def _try_handle_profile_command(self, user_text: str, continuous_vad, output_device_index: int) -> bool:
