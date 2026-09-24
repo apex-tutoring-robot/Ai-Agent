@@ -6,7 +6,7 @@ the main thread instead of FaceAnimator.render_forever()'s blocking cv2 loop
 """
 
 import os
-from PyQt5.QtWidgets import QMainWindow
+from PyQt5.QtWidgets import QMainWindow, QWidget
 from visuals.ui.face_widget import FaceWidget
 from visuals.ui.teaching_canvas import TeachingCanvas
 from visuals.ui.tutor_scene import TutorScene
@@ -32,6 +32,15 @@ class MainWindow(QMainWindow):
         # volume overlay - positioned in _position_volume_indicator().
         self.volume_indicator = VolumeIndicator(self)
 
+        # Plain black overlay shown during the display-sleep cycle (after
+        # prolonged idle - see JarvisBot's run() loop). Qt-side equivalent
+        # of the old cv2 FaceAnimator's blanked frame; paired with an actual
+        # HDMI power-off via vcgencmd on a real Pi (main.py), which this
+        # doesn't need to know about - it just needs to show/hide.
+        self.sleep_overlay = QWidget(self)
+        self.sleep_overlay.setStyleSheet("background-color: black;")
+        self.sleep_overlay.hide()
+
         if fullscreen:
             self.showFullScreen()
         else:
@@ -41,6 +50,7 @@ class MainWindow(QMainWindow):
             self.resize(1280, 720)
 
         self._position_volume_indicator()
+        self._position_sleep_overlay()
         self._connect_signals()
         self.show_idle_mode()
 
@@ -58,6 +68,8 @@ class MainWindow(QMainWindow):
         self.signals.show_face_fullscreen.connect(self.scene.show_face_fullscreen)
         self.signals.show_teaching_layout.connect(self.scene.show_teaching_layout)
         self.signals.volume_changed.connect(self.volume_indicator.show_level)
+        self.signals.enter_sleep.connect(self.show_sleep_mode)
+        self.signals.wake_up.connect(self.show_wake_mode)
 
     def _position_volume_indicator(self) -> None:
         margin = 24
@@ -65,9 +77,13 @@ class MainWindow(QMainWindow):
             self.width() - self.volume_indicator.width() - margin, margin
         )
 
+    def _position_sleep_overlay(self) -> None:
+        self.sleep_overlay.setGeometry(0, 0, self.width(), self.height())
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._position_volume_indicator()
+        self._position_sleep_overlay()
 
     def show_idle_mode(self):
         self.face_widget.stop_talking()
@@ -79,3 +95,12 @@ class MainWindow(QMainWindow):
 
     def show_thinking_mode(self):
         self.face_widget.start_thinking()
+
+    def show_sleep_mode(self):
+        self._position_sleep_overlay()
+        self.sleep_overlay.raise_()
+        self.sleep_overlay.show()
+
+    def show_wake_mode(self):
+        self.sleep_overlay.hide()
+        self.show_idle_mode()

@@ -27,3 +27,10 @@ class UISignals(QObject):
     # Emitted with the new AudioPlayer.volume (0.0-2.0) whenever the
     # set_volume tool actually changes it - see JarvisBot._tool_set_volume.
     volume_changed = pyqtSignal(float)
+
+    # Display-sleep cycle after prolonged idle (see JarvisBot.run()'s main
+    # loop) - Qt-side equivalent of the old cv2 FaceAnimator's
+    # enter_sleep()/wake_up(), paired with an actual HDMI power toggle via
+    # vcgencmd on a real Pi.
+    enter_sleep = pyqtSignal()
+    wake_up = pyqtSignal()

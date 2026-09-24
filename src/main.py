@@ -2,6 +2,7 @@ import os
 # Allow the OS to use its default display and QT backend, rather than hardcoding.
 
 import re
+import subprocess
 import threading
 import time
 import queue
@@ -206,6 +207,10 @@ class JarvisBot:
         # conversation has already moved to a newer turn recognize it's
         # stale and skip interrupting unrelated, already-playing audio.
         self._active_turn_token = None
+
+        # ── Display sleep tracking ──
+        self._standby_since = time.time()      # When we last returned to wake-word listening
+        self._display_sleeping = False         # Replaces the old FaceAnimator's self.face.sleeping
 
         logger.info("Jarvis initialized successfully!")
     
@@ -764,12 +769,9 @@ class JarvisBot:
                         self.ui_signals.start_talking.emit()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
 
-                    # ── ECHO GUARD: Signal that bot is now speaking ──
-                    self._bot_is_speaking = True
-                    continuous_vad.set_playback_state(True)
-
                     response_chunks = []
                     latency: Dict[str, float] = {}
+                    first_audio_chunk = True
 
                     # Helper to collect text while streaming, timestamping
                     # the first chunk for the LLM-TTFT latency figure.
@@ -801,6 +803,16 @@ class JarvisBot:
                         if self._interruption_event.is_set():
                             logger.warning("🛑 Speaker aborted due to interruption event")
                             break
+
+                        # ── ECHO GUARD: Close the STT gate only once real audio is
+                        # about to play — not when the turn starts processing. Gating
+                        # earlier mutes the STT pipe for the entire LLM+TTS-first-chunk
+                        # latency (1-2+ seconds), silently dropping any speech the user
+                        # makes during that "thinking" gap instead of transcribing it.
+                        if first_audio_chunk:
+                            self._bot_is_speaking = True
+                            continuous_vad.set_playback_state(True)
+                            first_audio_chunk = False
 
                         # Defensive check: ensure streaming is still active
                         if self.audio_player._is_playing:
@@ -874,8 +886,16 @@ class JarvisBot:
         except Exception as e:
             logger.error(f"Speaker loop error: {e}")
 
-    def _get_pulse_device_index(self, pa) -> int:
-        """Find the index of the 'pulse' audio device."""
+    def _get_pulse_device_index(self, pa, direction: str = 'output') -> int:
+        """Find the index of the 'pulse' audio device.
+
+        PulseAudio (Linux/Pi) exposes a single bridging device that handles
+        both directions, so a single index normally works for input and
+        output alike. Platforms without PulseAudio (e.g. native Windows) have
+        no such device, so the fallback must use the correctly-directioned
+        env var instead of reusing the output device index for microphone
+        input (which has no input channels and silently mis-selects a mic).
+        """
         try:
             for i in range(pa.get_device_count()):
                 info = pa.get_device_info_by_index(i)
@@ -884,11 +904,124 @@ class JarvisBot:
                     return i
         except Exception as e:
             logger.warning(f"Error searching for PulseAudio device: {e}")
-        
-        # Fallback to env var or default 1 (but log warning)
-        fallback = int(os.getenv('AUDIO_OUTPUT_DEVICE_INDEX', 1))
-        logger.warning(f"⚠️  PulseAudio not found - falling back to index {fallback}")
+
+        env_var = 'AUDIO_INPUT_DEVICE_INDEX' if direction == 'input' else 'AUDIO_OUTPUT_DEVICE_INDEX'
+        fallback = int(os.getenv(env_var, 1))
+        logger.warning(f"⚠️  PulseAudio not found - falling back to {env_var}={fallback} for {direction}")
         return fallback
+
+    @staticmethod
+    def _set_display_power(on: bool) -> None:
+        """
+        Toggle HDMI display power via vcgencmd (Raspberry Pi only).
+
+        Ported as-is from the old cv2 FaceAnimator.enter_sleep()/wake_up() -
+        silently no-ops off-Pi (FileNotFoundError when vcgencmd doesn't
+        exist, e.g. this Windows dev machine), so it's safe to call
+        unconditionally everywhere.
+        """
+        try:
+            subprocess.run(
+                ["vcgencmd", "display_power", "1" if on else "0"],
+                check=False, timeout=3,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    def _enter_sleep(self) -> None:
+        """Blank the display and turn off physical HDMI power (Pi only)."""
+        self._display_sleeping = True
+        self._set_display_power(False)
+        if self.ui_signals:
+            self.ui_signals.enter_sleep.emit()
+
+    def _wake_up(self) -> None:
+        """Restore the display and turn physical HDMI power back on (Pi only)."""
+        self._display_sleeping = False
+        self._set_display_power(True)
+        if self.ui_signals:
+            self.ui_signals.wake_up.emit()
+
+    def _speak_system_message(self, phrase: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Speak a fixed, non-LLM-generated phrase (check-in prompt, goodbye,
+        etc). Reuses the same TTS/playback/echo-guard pattern as a normal
+        turn, just with fixed text instead of an LLM-generated response.
+        """
+        if self._speaker_busy.is_set():
+            # Speaker thread is mid-turn (race with the idle-timeout/end firing
+            # right as a turn starts) - skip this cycle rather than step on it.
+            return
+
+        logger.info(f"🗣️  System message: '{phrase}'")
+
+        try:
+            self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
+            self.audio_player.start_streaming(output_device_index=output_device_index)
+
+            self._bot_is_speaking = True
+            continuous_vad.set_playback_state(True)
+
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+                if self.audio_player._is_playing:
+                    self.audio_player.queue_audio(audio_chunk)
+                else:
+                    break
+
+            self.audio_player.stop_streaming(immediate=False)
+            self._last_bot_response = phrase
+        except Exception as e:
+            logger.error(f"Error speaking system message: {e}")
+        finally:
+            self._bot_is_speaking = False
+            continuous_vad.set_playback_state(False)
+            self.audio_player.stop_streaming(immediate=True)
+
+    def _speak_check_in_prompt(self, continuous_vad, output_device_index: int) -> None:
+        """Speak a short "are you still there?" prompt before ending an idle conversation."""
+        phrase = os.getenv(
+            'CHECK_IN_PROMPT',
+            "Are you still there? Let me know if you'd like to keep going!"
+        )
+        self._speak_system_message(phrase, continuous_vad, output_device_index)
+
+    def _speak_goodbye(self, continuous_vad, output_device_index: int) -> None:
+        """Speak a farewell message when a conversation is about to end."""
+        phrase = os.getenv(
+            'GOODBYE_MESSAGE',
+            "Okay, talk to you later! Just say Hey Jarvis whenever you want to continue."
+        )
+        self._speak_system_message(phrase, continuous_vad, output_device_index)
+
+    def _speak_greeting(self, continuous_vad, output_device_index: int) -> None:
+        """Speak a short, fixed introduction right when a conversation starts."""
+        phrase = os.getenv(
+            'GREETING_MESSAGE',
+            "Hi! I'm Jarvis. I can help you with homework, explain new topics, "
+            "or just answer questions you're curious about. What would you like to do today?"
+        )
+        self._speak_system_message(phrase, continuous_vad, output_device_index)
+
+    def _speak_standalone(self, phrase: str, output_device_index: int) -> None:
+        """
+        Speak a fixed phrase with no active conversation (e.g. the
+        going-to-sleep announcement). No echo-guard/continuous_vad needed
+        here since wake-word detection uses its own model, not Azure STT.
+        """
+        logger.info(f"🗣️  {phrase}")
+        try:
+            self.audio_player.start_streaming(output_device_index=output_device_index)
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+                if self.audio_player._is_playing:
+                    self.audio_player.queue_audio(audio_chunk)
+                else:
+                    break
+            self.audio_player.stop_streaming(immediate=False)
+        except Exception as e:
+            logger.error(f"Error speaking standalone message: {e}")
+        finally:
+            self.audio_player.stop_streaming(immediate=True)
 
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
@@ -901,8 +1034,11 @@ class JarvisBot:
             logger.info("\n" + "="*60)
             logger.info("🎤 WAKE WORD DETECTED - CONVERSATION MODE ACTIVATED")
             logger.info("="*60)
-            logger.info(f"⏱️  Will end after 10 seconds of silence")
-            
+
+            # Wake the screen back up immediately if it was asleep
+            if self._display_sleeping:
+                self._wake_up()
+
             # Stop wake word detection to free microphone
             self.wake_word_detector.stop()
 
@@ -922,15 +1058,24 @@ class JarvisBot:
 
             # Enter continuous conversation mode
             idle_timeout = int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
-            
-            # DYNAMICALLY FIND PULSE DEVICE
-            pulse_index = self._get_pulse_device_index(self.pa)
-            
-            # Initialize VAD with dedicated INPUT stream
+            check_in_grace = int(os.getenv('CHECK_IN_GRACE_SECONDS', 60))
+            logger.info(
+                f"⏱️  Will check in after {idle_timeout}s of silence, "
+                f"then end after {check_in_grace}s more with no response"
+            )
+
+            # DYNAMICALLY FIND PULSE DEVICE (falls back to the correctly-directioned
+            # env var per direction when no PulseAudio device exists, e.g. Windows)
+            pulse_input_index = self._get_pulse_device_index(self.pa, direction='input')
+            pulse_output_index = self._get_pulse_device_index(self.pa, direction='output')
+
+            # Initialize VAD with dedicated INPUT stream. Its own hard idle-stop
+            # must cover the check-in grace period too, otherwise it kills the
+            # mic feed before we've finished waiting for a response.
             continuous_vad = ContinuousVADCapture(
-                idle_timeout_seconds=idle_timeout,
+                idle_timeout_seconds=idle_timeout + check_in_grace,
                 pa=self.pa,
-                input_device_index=pulse_index,
+                input_device_index=pulse_input_index,
                 player=self.audio_player
             )
             
@@ -955,7 +1100,7 @@ class JarvisBot:
             )
             speaker_thread = threading.Thread(
                 target=self._speaker_loop, 
-                args=(continuous_vad, pulse_index),
+                args=(continuous_vad, pulse_output_index),
                 name="SpeakerThread"
             )
             
@@ -966,29 +1111,54 @@ class JarvisBot:
 
             # No real profile has been created on this robot yet - invite
             # account creation instead of silently using the placeholder
-            # "Guest" profile as if it were a real person.
+            # "Guest" profile as if it were a real person. Otherwise greet
+            # the student right away instead of waiting on an LLM
+            # round-trip for the first response - threads are already
+            # running at this point, so barge-in still works if the
+            # student starts talking over it.
             active_id = self.profile_manager.get_active_profile_id()
             if active_id is not None and self.profile_manager.is_default_profile(active_id):
                 self._speak_fixed_phrase(
                     "Please create your account before you start learning! "
                     "Just say Voice Recognition, then say your name, and I'll remember you from now on.",
-                    continuous_vad, pulse_index
+                    continuous_vad, pulse_output_index
                 )
+            else:
+                self._speak_greeting(continuous_vad, pulse_output_index)
 
-            # Wait for conversation to end (timeout or manual stop)
+            # Wait for conversation to end (timeout or manual stop).
+            # Two-stage idle handling: after `idle_timeout` of silence, ask if
+            # the student is still there instead of ending immediately; only
+            # end for real if there's no response within `check_in_grace`.
+            checked_in = False
+            prompt_finished_at = None
             while self._conversation_active.is_set():
                 # Check for fatal errors in audio components and recover
                 if self.audio_player.has_fatal_error:
                     logger.warning("♻️  FATAL AUDIO ERROR - Recreating system...")
                     self._recreate_audio_system()
-                
-                # Check if idle timeout exceeded
-                idle_duration = time.time() - continuous_vad.last_speech_time
-                if idle_duration >= idle_timeout:
-                    logger.info(f"⏱️  {idle_timeout}s idle timeout - ending")
-                    self._conversation_active.clear()
-                    break
-                    
+
+                if not checked_in:
+                    idle_duration = time.time() - continuous_vad.last_speech_time
+                    if idle_duration >= idle_timeout:
+                        logger.info(f"⏱️  {idle_timeout}s idle - checking if student is still there")
+                        self._speak_check_in_prompt(continuous_vad, pulse_output_index)
+                        checked_in = True
+                        prompt_finished_at = time.time()
+                else:
+                    # last_speech_time keeps advancing on its own while the bot
+                    # speaks the prompt (tracked as activity), so only count it
+                    # as a response if it moves meaningfully PAST when the
+                    # prompt actually finished playing.
+                    if continuous_vad.last_speech_time > prompt_finished_at + 0.5:
+                        logger.info("✅ Student responded to check-in - resuming conversation")
+                        checked_in = False
+                    elif time.time() - prompt_finished_at >= check_in_grace:
+                        logger.info(f"⏱️  No response {check_in_grace}s after check-in - ending conversation")
+                        self._speak_goodbye(continuous_vad, pulse_output_index)
+                        self._conversation_active.clear()
+                        break
+
                 time.sleep(0.5)
             
             logger.info(f"\n👋 Conversation ended")
@@ -1040,6 +1210,7 @@ class JarvisBot:
             
             # 4. Always restart wake word detection
             logger.info("▶️  Resuming wake word detection...")
+            self._standby_since = time.time()
             self._restart_wake_word()
             self._interaction_lock.release()
     
@@ -1141,8 +1312,8 @@ class JarvisBot:
         """
         try:
             # Step 1: Stream audio chunks to STT
-            if self.face:
-                self.face.start_thinking()
+            if self.ui_signals:
+                self.ui_signals.thinking.emit()
             logger.info("☁️  Starting streaming speech recognition...")
             stt_start = time.perf_counter()
             
@@ -1198,8 +1369,8 @@ class JarvisBot:
                 # Start audio player BEFORE first audio arrives for lower latency
                 # CRITICAL: Use dedicated PulseAudio output stream
                 self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
-                if self.face:
-                    self.face.start_talking()
+                if self.ui_signals:
+                    self.ui_signals.start_talking.emit()
                 self.audio_player.start_streaming(output_device_index=output_device_index)
                 
                 # Full Duplex: Start monitoring for interruptions while bot speaks
@@ -1285,8 +1456,8 @@ class JarvisBot:
                 # This ensures we don't timeout while bot is generating/speaking
                 continuous_vad.reset_idle_timer()
                 
-                if self.face:
-                    self.face.start_idle()
+                if self.ui_signals:
+                    self.ui_signals.listening.emit()
                 return True
                 
             except Exception as e:
@@ -1341,7 +1512,22 @@ class JarvisBot:
 
             # Keep run() alive while wake-word/conversation cycles continue in daemon threads.
             # Only exit when _is_running is cleared by stop() or a signal arrives.
+            display_sleep_timeout = int(os.getenv('DISPLAY_SLEEP_TIMEOUT', 0))
             while self._is_running:
+                # After enough standby idle time (no conversation, no new wake
+                # word), announce it and put the physical display to sleep.
+                if (not self._display_sleeping
+                        and display_sleep_timeout > 0
+                        and not self._conversation_active.is_set()
+                        and (time.time() - self._standby_since) >= display_sleep_timeout):
+                    logger.info(f"💤 {display_sleep_timeout}s idle - going to sleep")
+                    sleep_output_index = self._get_pulse_device_index(self.pa, direction='output')
+                    self._speak_standalone(
+                        os.getenv('SLEEP_MESSAGE', "I'm going to sleep now. Just say Hey Jarvis to wake me up!"),
+                        sleep_output_index
+                    )
+                    self._enter_sleep()
+
                 time.sleep(0.5)
 
         except KeyboardInterrupt:
@@ -1391,12 +1577,24 @@ def main():
     is_windows = sys.platform == "win32"
 
     # ── Display configuration ──────────────────────────────────────────────────
-    # FACE_ENABLED=true   → show the face/teaching-canvas window
-    # FACE_ENABLED=false  → headless, no GUI
-    # unset               → auto: on Windows, on (normal desktop session,
-    #                       Qt opens its own native window, no DISPLAY needed);
-    #                       on Linux/Pi, on only if DISPLAY/WAYLAND_DISPLAY is
-    #                       already set (matches a headless-SSH-session default)
+    # FACE_ENABLED=true          → show the face/teaching-canvas window
+    # FACE_ENABLED=false         → headless, no GUI (default when DISPLAY not set)
+    # unset                      → auto: on Windows, on (normal desktop session,
+    #                              Qt opens its own native window, no DISPLAY
+    #                              needed); on Linux/Pi, on only if DISPLAY/
+    #                              WAYLAND_DISPLAY is already set (matches a
+    #                              headless-SSH-session default)
+    #
+    # DISPLAY_BACKEND=physical   → HDMI monitor          (DISPLAY=:0)
+    # DISPLAY_BACKEND=vnc        → TigerVNC session      (DISPLAY=:1)
+    # DISPLAY_BACKEND=auto       → pick first available X11 socket (:1 then :0)
+    #
+    # You can also skip DISPLAY_BACKEND and set DISPLAY directly, e.g. DISPLAY=:0
+    #
+    # None of the above (DISPLAY/XAUTHORITY/X11 sockets) is a Linux/X11 concept
+    # that applies on native Windows — Qt opens a normal Win32 window directly
+    # there, so Windows gets its own simpler default/path below. On Linux, Qt
+    # still needs a real X11 DISPLAY the same way the old cv2-based face did.
     # ──────────────────────────────────────────────────────────────────────────
     face_env = os.getenv("FACE_ENABLED", "").strip().lower()
     if face_env in ("true", "1", "yes"):
@@ -1404,9 +1602,58 @@ def main():
     elif face_env in ("false", "0", "no"):
         face_enabled = False
     elif is_windows:
+        # No DISPLAY-style signal exists on Windows to auto-detect from -
+        # a normal interactive session always has a GUI available.
         face_enabled = True
     else:
+        # Linux/Pi auto: enable face only when DISPLAY is already set
         face_enabled = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+    if face_enabled and is_windows:
+        logger.info("Face animation enabled (native Windows GUI, no X11 needed)")
+    elif face_enabled:
+        # DISPLAY_BACKEND always wins when explicitly set — it overrides whatever
+        # DISPLAY was loaded from .env so that a single knob controls the display.
+        # Priority: DISPLAY_BACKEND (explicit) > DISPLAY (env/shell) > default :0
+        backend = os.getenv("DISPLAY_BACKEND", "").strip().lower()
+
+        if backend == "vnc":
+            os.environ["DISPLAY"] = ":1"
+        elif backend == "physical":
+            os.environ["DISPLAY"] = ":0"
+        elif backend == "auto":
+            # Pick the first X11 socket that actually exists
+            for candidate in (":1", ":0"):
+                if os.path.exists(f"/tmp/.X11-unix/X{candidate[1:]}"):
+                    os.environ["DISPLAY"] = candidate
+                    break
+            else:
+                os.environ["DISPLAY"] = ":0"
+        elif not os.environ.get("DISPLAY"):
+            # No DISPLAY_BACKEND and no DISPLAY — last resort default
+            os.environ["DISPLAY"] = ":0"
+
+        # Ensure X authentication is available.
+        # TigerVNC stores its cookie in the same ~/.Xauthority file as the
+        # physical display, just under a different display entry (:1 vs :0).
+        if not os.environ.get("XAUTHORITY"):
+            xauth_path = os.path.expanduser("~/.Xauthority")
+            if os.path.exists(xauth_path):
+                os.environ["XAUTHORITY"] = xauth_path
+
+        # Pre-check: verify the X11 socket actually exists before letting Qt try.
+        # Qt calls abort() on a missing display — that can't be caught by Python.
+        display = os.environ.get("DISPLAY", "")
+        display_num = display.lstrip(":").split(".")[0]
+        socket_path = f"/tmp/.X11-unix/X{display_num}"
+        if not os.path.exists(socket_path):
+            logger.warning(
+                f"X11 socket {socket_path} not found — is the display server running? "
+                f"Falling back to headless."
+            )
+            face_enabled = False
+        else:
+            logger.info(f"Face animation enabled on display {display}")
 
     if not face_enabled:
         logger.info("Face animation disabled — running headless (set FACE_ENABLED=true to enable)")
@@ -1422,8 +1669,10 @@ def main():
             ui_signals = UISignals()
 
             # Resolve relative to this file's own location, not the process's
-            # CWD - same reasoning as the SYSTEM_PROMPT_PATH/face-path fixes
-            # elsewhere in this codebase (CWD depends on how you launch main.py).
+            # CWD - "./visuals/faces" only works if launched as `cd src &&
+            # python main.py`, but breaks under `python3 src/main.py` from
+            # the repo root (the convention actually used to run this on the
+            # Pi), silently falling back to headless instead of erroring loudly.
             faces_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visuals", "faces")
             window = MainWindow(ui_signals, faces_dir, fullscreen=not is_windows)
             window.show()
