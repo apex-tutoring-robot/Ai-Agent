@@ -2,12 +2,14 @@ import cv2
 import os
 import time
 import random
+import subprocess
 import numpy as np
 
 class FaceAnimator:
-    def __init__(self, face_dir):
+    def __init__(self, face_dir, fullscreen: bool = True):
         self.face_dir = face_dir
         self.running = True
+        self.sleeping = False
 
         self.emotion = "neutral"
         self.is_talking = False
@@ -28,7 +30,12 @@ class FaceAnimator:
 
         self.window = "CHIPPY"
         cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
-        cv2.setWindowProperty(self.window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        if fullscreen:
+            cv2.setWindowProperty(self.window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        else:
+            # Dev/testing convenience - a real window you can see alongside
+            # logs/terminal, instead of taking over the whole screen.
+            cv2.resizeWindow(self.window, 640, 360)
 
         print("[FACE] Ready")
 
@@ -64,6 +71,29 @@ class FaceAnimator:
 
     def shutdown(self):
         self.running = False
+
+    def enter_sleep(self):
+        """Blank the rendered face and turn off the physical display (Pi only)."""
+        self.sleeping = True
+        self._set_display_power(False)
+
+    def wake_up(self):
+        """Restore the face and turn the physical display back on (Pi only)."""
+        self.sleeping = False
+        self._set_display_power(True)
+        self.start_idle()
+
+    @staticmethod
+    def _set_display_power(on: bool) -> None:
+        """Toggle HDMI display power via vcgencmd. No-ops silently off-Pi."""
+        try:
+            subprocess.run(
+                ["vcgencmd", "display_power", "1" if on else "0"],
+                check=False, timeout=3,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass  # Not running on a Pi (or vcgencmd unavailable) - the blank frame still applies
 
     # --------------------------------------------------
     # Animation Updates
@@ -104,6 +134,9 @@ class FaceAnimator:
     # --------------------------------------------------
 
     def _frame(self):
+        if self.sleeping:
+            return np.zeros((720, 1280, 3), dtype=np.uint8)
+
         self._update_mouth()
 
         talking_now = self.is_talking or (self.mouth_open > 0.02)
