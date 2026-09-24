@@ -56,6 +56,9 @@ python-dotenv==1.0.1
 # Async Support
 aiofiles==24.1.0
 
+# Testing (dev only) - run with `pytest` from the repo root, see pytest.ini
+pytest>=7.0.0
+
 # Noise Cancellation (Requires libspeexdsp-dev)
 # speexdsp
 # openai
