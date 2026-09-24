@@ -10,7 +10,7 @@ and requires no change to their class declarations. It formalizes contracts
 that already exist implicitly in how main.py calls them.
 """
 
-from typing import Dict, Iterator, List, Protocol, Tuple, runtime_checkable
+from typing import Callable, Dict, Iterator, List, Protocol, Tuple, runtime_checkable
 
 
 @runtime_checkable
@@ -28,6 +28,26 @@ class LLMProvider(Protocol):
         self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 500
     ) -> Iterator[str]:
         """Yields text chunks as the LLM generates a response."""
+        ...
+
+    def generate_response_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict],
+        tool_executor: Callable[[str, dict], str],
+        temperature: float = 0.7,
+        max_tokens: int = 500,
+    ) -> Iterator[str]:
+        """
+        The actual method main.py's live turn-handling path calls (see
+        _speaker_loop) - generate_response_stream above is only reachable
+        from _process_turn/_process_turn_streaming, both dead code
+        superseded by the current listener/speaker thread architecture.
+        A provider isn't required to run real tool-calling (an
+        implementation may just answer without tools - see
+        LocalLLMClient.generate_response_with_tools), but it must accept
+        this call shape without erroring.
+        """
         ...
 
 

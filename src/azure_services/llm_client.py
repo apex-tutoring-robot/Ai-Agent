@@ -10,6 +10,7 @@ import logging
 from typing import Callable, Iterator, List, Dict, Optional
 from openai import AzureOpenAI
 from dotenv import load_dotenv
+from azure_services.local_llm_client import LocalLLMClient
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -55,6 +56,20 @@ class LLMClient:
         
         # Load system prompt
         self.system_prompt = self._load_system_prompt()
+
+        # Local (llama.cpp) fallback for when Azure is unreachable - fails
+        # open to None (not a hard dependency) since LOCAL_LLM_MODEL_PATH
+        # won't be set on most dev machines, and this client shouldn't stop
+        # Jarvis from starting at all just because the fallback isn't
+        # configured. See LocalLLMClient/generate_response_with_tools -
+        # NOT live-tested (no .gguf model/llama-server available in this
+        # dev environment), only verified at the code/structural level.
+        try:
+            self._local_client = LocalLLMClient(system_prompt=self.system_prompt)
+        except Exception as e:
+            logger.warning(f"Local LLM fallback unavailable: {e}")
+            self._local_client = None
+
         logger.info("Azure OpenAI client initialized")
     
     def _load_system_prompt(self) -> str:
@@ -110,10 +125,15 @@ class LLMClient:
                     delta = chunk.choices[0].delta
                     if hasattr(delta, 'content') and delta.content:
                         yield delta.content
-        
+
         except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            raise
+            logger.warning(f"Azure LLM stream failed ({type(e).__name__}: {e}), trying local model")
+            if self._local_client:
+                self._local_client.system_prompt = self.system_prompt
+                yield from self._local_client.generate_response_stream(messages, temperature, max_tokens)
+            else:
+                logger.error(f"Error generating response: {e}")
+                raise
 
     def generate_response_with_tools(
         self,
@@ -155,6 +175,13 @@ class LLMClient:
                 tool_choice="auto",
             )
         except Exception as e:
+            logger.warning(f"Azure tool-decision call failed ({type(e).__name__}: {e}), trying local model")
+            if self._local_client:
+                self._local_client.system_prompt = self.system_prompt
+                yield from self._local_client.generate_response_with_tools(
+                    messages, tools, tool_executor, temperature, max_tokens
+                )
+                return
             logger.error(f"Error in tool-decision call: {e}")
             raise
 
@@ -201,6 +228,15 @@ class LLMClient:
                     if hasattr(delta, 'content') and delta.content:
                         yield delta.content
         except Exception as e:
+            # Rarer than the tool-decision call failing (Azure was up a
+            # moment ago), and the local model wasn't involved in choosing
+            # this tool, so this just answers plainly rather than trying
+            # to replay tool context into a model that may not support it.
+            logger.warning(f"Azure post-tool-call response failed ({type(e).__name__}: {e}), trying local model")
+            if self._local_client:
+                self._local_client.system_prompt = self.system_prompt
+                yield from self._local_client.generate_response_stream(messages, temperature, max_tokens)
+                return
             logger.error(f"Error in post-tool-call response: {e}")
             raise
 
@@ -391,6 +427,10 @@ class LLMClient:
             return plan
 
         except Exception as e:
+            logger.warning(f"Azure teaching plan failed ({type(e).__name__}: {e}), trying local model")
+            if self._local_client:
+                self._local_client.system_prompt = self.system_prompt
+                return self._local_client.generate_teaching_plan(messages, temperature, max_tokens)
             logger.error(f"Error generating teaching plan: {e}")
             raise
 
