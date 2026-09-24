@@ -64,6 +64,39 @@ CURRICULUM_SEARCH_TOOL = {
     }
 }
 
+# System-level tool: lets the LLM actually act on requests like "please talk
+# more loudly" or "can you be quieter" instead of just replying in words.
+# `level` is relative (louder/quieter/normal) rather than a raw number since
+# that's how kids actually phrase the request - see JarvisBot._tool_set_volume().
+VOLUME_CONTROL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "set_volume",
+        "description": (
+            "Actually changes how loud Jarvis's speaking voice is - this is "
+            "a real hardware volume change, not a suggestion. Call this "
+            "whenever the student asks you to speak louder, quieter, or "
+            "back to normal volume. The call always succeeds immediately, "
+            "so afterward tell the student in a natural, upbeat way that "
+            "you've done it (e.g. 'Sure, I'll talk louder!'). Never claim "
+            "you can't change your volume - you just did. Only call this "
+            "once per request; don't call it again on a later, unrelated "
+            "turn unless the student asks again."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "string",
+                    "enum": ["louder", "quieter", "normal"],
+                    "description": "Direction to adjust the speaking volume."
+                }
+            },
+            "required": ["level"]
+        }
+    }
+}
+
 class JarvisBot:
     """Main orchestrator for Jarvis tutoring robot."""
 
@@ -356,11 +389,47 @@ class JarvisBot:
             return f"No matching curriculum content found for grade {grade} on '{query}'."
         return "\n\n".join(results)
 
+    # Step size per "louder"/"quieter" call, and the hard ceiling/floor -
+    # matches the clamp already enforced in AudioPlayer.set_volume().
+    _VOLUME_STEP = 0.25
+    _VOLUME_MIN = 0.25
+    _VOLUME_MAX = 2.0
+
+    def _tool_set_volume(self, level: str) -> str:
+        """Implementation behind the set_volume tool the LLM can call."""
+        current = self.audio_player.volume
+        if level == "louder":
+            new_volume = min(current + self._VOLUME_STEP, self._VOLUME_MAX)
+        elif level == "quieter":
+            new_volume = max(current - self._VOLUME_STEP, self._VOLUME_MIN)
+        elif level == "normal":
+            new_volume = 1.0
+        else:
+            return f"Unknown volume level: {level}"
+
+        self.audio_player.set_volume(new_volume)
+        if self.ui_signals:
+            self.ui_signals.volume_changed.emit(new_volume)
+
+        if new_volume >= self._VOLUME_MAX:
+            detail = "Volume raised to maximum."
+        elif new_volume <= self._VOLUME_MIN:
+            detail = "Volume lowered to minimum."
+        else:
+            detail = f"Volume set to {int(new_volume * 100)}% of normal."
+        # The tool already succeeded by the time the model sees this -
+        # phrased as a direct instruction because gpt-4o-mini otherwise
+        # tends to hedge and tell the student it "can't" change volume
+        # even in the same turn it just changed it (seen live).
+        return f"{detail} This already happened. Confirm it to the student now - do not say you can't change volume."
+
     def _execute_tool(self, tool_name: str, args: dict) -> str:
         """Dispatches a tool call requested by the LLM and records it in the
         current session's audit trail (Session.tool_calls)."""
         if tool_name == "search_curriculum":
             result = self._tool_search_curriculum(args.get("query", ""))
+        elif tool_name == "set_volume":
+            result = self._tool_set_volume(args.get("level", ""))
         else:
             result = f"Unknown tool: {tool_name}"
 
@@ -669,7 +738,7 @@ class JarvisBot:
 
                     # Pipeline: LLM (with tool-calling) -> TTS -> AudioPlayer
                     llm_stream = self.llm_client.generate_response_with_tools(
-                        messages, tools=[CURRICULUM_SEARCH_TOOL], tool_executor=self._execute_tool
+                        messages, tools=[CURRICULUM_SEARCH_TOOL, VOLUME_CONTROL_TOOL], tool_executor=self._execute_tool
                     )
                     collected_stream = text_collector(llm_stream)
                     tts_stream = audio_timing(self.tts_client.synthesize_stream(collected_stream))

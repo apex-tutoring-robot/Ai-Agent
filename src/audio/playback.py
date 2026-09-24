@@ -58,6 +58,7 @@ class AudioPlayer:
         self._stop_event = threading.Event()
         self.on_audio_played = on_audio_played
         self.has_fatal_error = False
+        self.volume: float = 1.0  # 1.0 = normal, see set_volume()
         self._owns_stream = True
         
         # Latency tracking and real-time state
@@ -212,6 +213,13 @@ class AudioPlayer:
         original_output = bytes(output[:required])
         self._callback_buf = output[required:]
 
+        # Apply volume gain before AEC/lip-sync see the audio, so both stay
+        # aligned with what's actually being played through the speaker.
+        if self.volume != 1.0:
+            samples = np.frombuffer(original_output, dtype=np.int16).astype(np.float32)
+            samples = np.clip(samples * self.volume, -32768, 32767).astype(np.int16)
+            original_output = samples.tobytes()
+
         # CRITICAL AEC FIX: Notify VAD ONLY about the EXACT samples being played NOW.
         # This ensures the Reference Buffer in AEC is perfectly aligned with the Speakers.
         if self.on_audio_played and original_output != b'\x00' * len(original_output):
@@ -227,7 +235,6 @@ class AudioPlayer:
                 self.on_level(0.0)
             else:
                 try:
-                    import numpy as np
                     a = np.frombuffer(original_output, dtype=np.int16).astype(np.float32)
                     rms = np.sqrt(np.mean(a * a)) / 32768.0
                     if rms < 0.02:
@@ -243,6 +250,16 @@ class AudioPlayer:
         if not self._is_playing:
             raise RuntimeError("Streaming not started.")
         self.audio_queue.put(audio_chunk)
+
+    def set_volume(self, volume: float) -> None:
+        """
+        volume: 1.0 = normal, 0.0 = silent, up to 2.0 = double amplitude
+        (clamped). Takes effect immediately on already-queued audio too,
+        since gain is applied per-callback in _audio_callback, not baked
+        into the bytes when queued.
+        """
+        self.volume = max(0.0, min(2.0, volume))
+        logger.info(f"🔊 Volume set to {self.volume:.2f}")
     
     def stop_streaming(self, immediate: bool = False) -> bool:
         """

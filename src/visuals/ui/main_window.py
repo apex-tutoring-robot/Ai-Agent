@@ -11,6 +11,7 @@ from visuals.ui.face_widget import FaceWidget
 from visuals.ui.teaching_canvas import TeachingCanvas
 from visuals.ui.tutor_scene import TutorScene
 from visuals.ui.tutor_view import TutorView
+from visuals.ui.volume_indicator import VolumeIndicator
 
 
 class MainWindow(QMainWindow):
@@ -26,6 +27,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self.setWindowTitle("Jarvis AI Tutor")
 
+        # Plain child widget (not part of the QGraphicsScene) so it floats
+        # on top of the face/canvas as a corner HUD, like a phone's on-screen
+        # volume overlay - positioned in _position_volume_indicator().
+        self.volume_indicator = VolumeIndicator(self)
+
         if fullscreen:
             self.showFullScreen()
         else:
@@ -34,6 +40,7 @@ class MainWindow(QMainWindow):
             # Windows-fixes branch.
             self.resize(1280, 720)
 
+        self._position_volume_indicator()
         self._connect_signals()
         self.show_idle_mode()
 
@@ -50,6 +57,17 @@ class MainWindow(QMainWindow):
         self.signals.clear_canvas.connect(self.canvas.clear_canvas)
         self.signals.show_face_fullscreen.connect(self.scene.show_face_fullscreen)
         self.signals.show_teaching_layout.connect(self.scene.show_teaching_layout)
+        self.signals.volume_changed.connect(self.volume_indicator.show_level)
+
+    def _position_volume_indicator(self) -> None:
+        margin = 24
+        self.volume_indicator.move(
+            self.width() - self.volume_indicator.width() - margin, margin
+        )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._position_volume_indicator()
 
     def show_idle_mode(self):
         self.face_widget.stop_talking()

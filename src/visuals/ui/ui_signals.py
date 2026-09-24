@@ -23,3 +23,7 @@ class UISignals(QObject):
     clear_canvas = pyqtSignal()
     show_face_fullscreen = pyqtSignal()
     show_teaching_layout = pyqtSignal()
+
+    # Emitted with the new AudioPlayer.volume (0.0-2.0) whenever the
+    # set_volume tool actually changes it - see JarvisBot._tool_set_volume.
+    volume_changed = pyqtSignal(float)
