@@ -42,3 +42,32 @@ class TestRecordToolCall:
         s.record_tool_call("set_volume", {"level": "louder"}, "r2")
 
         assert [c["tool"] for c in s.tool_calls] == ["search_curriculum", "set_volume"]
+
+
+class TestRecordConceptCovered:
+    def test_starts_empty(self):
+        assert Session().concepts_covered == []
+
+    def test_appends_a_new_concept(self):
+        s = Session()
+        s.record_concept_covered("area_rectangle")
+        assert s.concepts_covered == ["area_rectangle"]
+
+    def test_preserves_first_taught_order(self):
+        s = Session()
+        s.record_concept_covered("area_rectangle")
+        s.record_concept_covered("equivalent_fractions")
+        assert s.concepts_covered == ["area_rectangle", "equivalent_fractions"]
+
+    def test_does_not_duplicate_a_repeated_concept(self):
+        s = Session()
+        s.record_concept_covered("area_rectangle")
+        s.record_concept_covered("equivalent_fractions")
+        s.record_concept_covered("area_rectangle")
+        assert s.concepts_covered == ["area_rectangle", "equivalent_fractions"]
+
+    def test_ignores_empty_concept(self):
+        s = Session()
+        s.record_concept_covered("")
+        s.record_concept_covered(None)
+        assert s.concepts_covered == []

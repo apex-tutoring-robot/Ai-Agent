@@ -39,6 +39,13 @@ class Session:
     # e.g. {"llm_ttft_ms": 241, "tts_first_byte_ms": 137, "total_ms": 758}
     last_latency_breakdown: Dict[str, float] = field(default_factory=dict)
 
+    # Concept ids covered by teaching turns this session (see
+    # JarvisBot._run_teaching_turn), in the order first taught - used to
+    # give a real end-of-conversation wrap-up naming what was actually
+    # covered, instead of a generic goodbye, when the idle timeout ends
+    # the conversation. Empty for a session that was just casual chat.
+    concepts_covered: List[str] = field(default_factory=list)
+
     def record_tool_call(self, tool_name: str, arguments: dict, result: Any) -> None:
         self.tool_calls.append({
             "tool": tool_name,
@@ -49,3 +56,7 @@ class Session:
 
     def new_turn(self) -> None:
         self.turn_count += 1
+
+    def record_concept_covered(self, concept: str) -> None:
+        if concept and concept not in self.concepts_covered:
+            self.concepts_covered.append(concept)

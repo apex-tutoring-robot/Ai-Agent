@@ -552,6 +552,52 @@ Rules for "response":
                 "response": "Let's think about that one a bit more - want to try again?",
             }
 
+    def generate_session_wrapup(
+        self,
+        concepts_covered: List[str],
+        temperature: float = 0.4,
+        max_tokens: int = 150,
+    ) -> str:
+        """
+        A brief, warm end-of-conversation summary naming what was covered
+        and one genuine takeaway - not a dry list of concept ids. Spoken
+        right as the conversation is ending due to the idle timeout (see
+        JarvisBot._speak_goodbye), so this fails toward a simple templated
+        summary rather than silence or an error - there's no turn left to
+        retry on once the conversation is already ending.
+        """
+        readable = ", ".join(c.replace("_", " ") for c in concepts_covered)
+        fallback = f"Nice work today! We practiced {readable}. Talk to you later!"
+
+        try:
+            full_messages = [
+                {
+                    "role": "system",
+                    "content": f"""
+You are Jarvis, a K-8 math tutor robot, wrapping up a tutoring conversation.
+
+Concepts covered this conversation: {readable}
+
+Write a short, warm spoken goodbye for the student (2-3 sentences):
+- Briefly name what was covered, in plain kid-friendly language (not the raw concept ids)
+- State ONE genuine "big idea" takeaway - something true and specific about what was learned, not a generic platitude
+- End with encouragement and an invitation to come back
+- No formatting, no lists - this is spoken out loud
+"""
+                }
+            ]
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=full_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            text = response.choices[0].message.content.strip()
+            return text or fallback
+        except Exception as e:
+            logger.error(f"Error generating session wrap-up ({type(e).__name__}: {e}) - using fallback")
+            return fallback
+
     def generate_response(
         self,
         messages: List[Dict[str, str]],

@@ -672,6 +672,8 @@ class JarvisBot:
                     self._last_bot_response = full_response
                     self.conversation_manager.add_assistant_message(full_response)
                     logger.info(f"🤖 Bot (teaching): {full_response}")
+                    if self.current_session:
+                        self.current_session.record_concept_covered(concept)
 
                 # Set AFTER speaking, so the next turn's answer routes to
                 # _handle_teaching_answer instead of being treated as a
@@ -1175,11 +1177,29 @@ class JarvisBot:
         self._speak_system_message(phrase, continuous_vad, output_device_index)
 
     def _speak_goodbye(self, continuous_vad, output_device_index: int) -> None:
-        """Speak a farewell message when a conversation is about to end."""
-        phrase = os.getenv(
-            'GOODBYE_MESSAGE',
-            "Okay, talk to you later! Just say Hey Jarvis whenever you want to continue."
-        )
+        """
+        Speak a farewell message when a conversation is about to end.
+
+        If the conversation included real teaching (current_session.
+        concepts_covered is non-empty - see _run_teaching_turn) and no
+        explicit GOODBYE_MESSAGE override is configured, this is a genuine
+        wrap-up naming what was covered and one real takeaway, not a
+        generic farewell - see LLMClient.generate_session_wrapup(), which
+        already fails toward a simple templated summary on its own, so no
+        extra fallback handling is needed here. Falls back to the plain
+        generic goodbye for a casual conversation that never got to any
+        math.
+        """
+        override = os.getenv('GOODBYE_MESSAGE')
+        concepts = self.current_session.concepts_covered if self.current_session else []
+
+        if override:
+            phrase = override
+        elif concepts:
+            phrase = self.llm_client.generate_session_wrapup(concepts)
+        else:
+            phrase = "Okay, talk to you later! Just say Hey Jarvis whenever you want to continue."
+
         self._speak_system_message(phrase, continuous_vad, output_device_index)
 
     def _speak_greeting(self, continuous_vad, output_device_index: int) -> None:
