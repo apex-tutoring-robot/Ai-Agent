@@ -225,8 +225,19 @@ class JarvisBot:
             
             # 2. Settle period
             time.sleep(1.0)
-            
+
             # 3. Re-initialize everything to Ensure consistency
+            # Release the old PyAudio/PortAudio host handle before replacing
+            # it - every other shutdown path in this codebase (AudioPlayer.
+            # shutdown(), WakeWordDetector's cleanup, JarvisBot.stop()) does
+            # this; skipping it here leaked the old handle on every ALSA
+            # crash-recovery cycle, which matters on a device meant to run
+            # continuously.
+            if hasattr(self, 'pa') and self.pa:
+                try:
+                    self.pa.terminate()
+                except Exception:
+                    pass
             self.pa = pyaudio.PyAudio()
             
             # Re-init components with shared callbacks
@@ -611,6 +622,23 @@ class JarvisBot:
                         break
 
             if not self._interruption_event.is_set():
+                # Same output-safety net as the normal conversational path
+                # (see _speaker_loop) - teaching-turn speech is still
+                # LLM-generated text and was previously not checked at all,
+                # a real gap since any math question routes here via
+                # is_math_query(). Launched before the blocking wait below
+                # for the same reason: doesn't delay time-to-first-audio.
+                if self.guardrails_manager.is_enabled:
+                    full_response_so_far = " ".join(response_parts)
+                    if full_response_so_far:
+                        turn_token = object()
+                        self._active_turn_token = turn_token
+                        threading.Thread(
+                            target=self._run_output_safety_check,
+                            args=(full_response_so_far, turn_token, continuous_vad, output_device_index),
+                            daemon=True,
+                        ).start()
+
                 self.audio_player.stop_streaming(immediate=False)
                 full_response = " ".join(response_parts)
                 if full_response:
