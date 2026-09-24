@@ -185,6 +185,13 @@ class JarvisBot:
         # not a fresh unrelated turn.
         self._pending_name_capture: bool = False
 
+        # Set right after a teaching turn asks a comprehension-check
+        # question (see _run_teaching_turn) - {"concept", "question",
+        # "attempts"}. The next utterance is the student's answer to that
+        # question, not a fresh unrelated turn. None when no check is
+        # pending. See _handle_teaching_answer.
+        self._pending_teaching_check: Optional[dict] = None
+
         # ── Current conversation session (see session.py) ──
         # None outside of an active conversation; a fresh Session is created
         # each time the wake word fires.
@@ -595,6 +602,8 @@ class JarvisBot:
 
             plan = self.llm_client.generate_teaching_plan(messages)
             visuals = plan.get("visuals", [])
+            concept = plan.get("concept") or "general_math"
+            check_question = plan.get("check_question")
 
             for step in plan.get("speech", []):
                 if self._interruption_event.is_set():
@@ -610,6 +619,24 @@ class JarvisBot:
 
                 response_parts.append(step_text)
                 for audio_chunk in self.tts_client.synthesize_stream(iter([step_text])):
+                    if self._interruption_event.is_set():
+                        break
+                    if self.audio_player._is_playing:
+                        try:
+                            self.audio_player.queue_audio(audio_chunk)
+                        except RuntimeError as e:
+                            logger.warning(f"⚠️ Playback queueing failed (likely stopped): {e}")
+                            break
+                    else:
+                        break
+
+            # Ask the comprehension-check question, if the plan included
+            # one, right after the explanation - same streaming pattern as
+            # the speech steps above. Part of the same response for safety
+            # checking/history purposes (appended to response_parts).
+            if not self._interruption_event.is_set() and check_question:
+                response_parts.append(check_question)
+                for audio_chunk in self.tts_client.synthesize_stream(iter([check_question])):
                     if self._interruption_event.is_set():
                         break
                     if self.audio_player._is_playing:
@@ -645,6 +672,12 @@ class JarvisBot:
                     self._last_bot_response = full_response
                     self.conversation_manager.add_assistant_message(full_response)
                     logger.info(f"🤖 Bot (teaching): {full_response}")
+
+                # Set AFTER speaking, so the next turn's answer routes to
+                # _handle_teaching_answer instead of being treated as a
+                # fresh, unrelated question.
+                if check_question:
+                    self._pending_teaching_check = {"concept": concept, "question": check_question, "attempts": 0}
             else:
                 partial = " ".join(response_parts)
                 if partial:
@@ -671,6 +704,96 @@ class JarvisBot:
             self._playback_ended_time = time.time()
             continuous_vad.set_playback_state(False)
             self.audio_player.stop_streaming(immediate=True)
+
+    # Matches asking Jarvis to repeat/clarify the question - NOT an answer
+    # attempt. Found live: "can you say the question again?" was fed
+    # straight into evaluate_answer(), which judged it as a wrong answer
+    # ("the student did not attempt to answer the question"), burned an
+    # attempt, and gave a hint instead of just repeating the question -
+    # which then made the student's actual next attempt get unfairly
+    # escalated straight to "reteach" since the attempt counter was
+    # already at 1.
+    _REPEAT_REQUEST_PATTERN = re.compile(
+        r"\b(repeat (the|that|it)?|say (that|it|the question)( again)?|"
+        r"what was the question|didn't (catch|hear)|come again|one more time)\b",
+        re.IGNORECASE,
+    )
+
+    def _handle_teaching_answer(self, user_text: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Handles the student's answer to a teaching turn's comprehension-
+        check question (see _run_teaching_turn, which sets
+        self._pending_teaching_check before returning).
+
+        A deliberately small, explicit policy - not a general tutor
+        decision engine - matching just the rules that matter for a single
+        comprehension check: a correct answer means praise and move on; a
+        first wrong attempt gets one hint and a second try at the same
+        question; a repeated wrong attempt stops re-testing and explains
+        the concept a different way instead, rather than looping forever
+        on a question the student clearly isn't getting. The actual
+        judgment AND the response text itself both come from
+        LLMClient.evaluate_answer() - this method just applies the
+        resulting action and updates persistent mastery tracking.
+        """
+        pending = self._pending_teaching_check
+
+        if self._REPEAT_REQUEST_PATTERN.search(user_text):
+            # Not an answer attempt - just re-ask the same question,
+            # without touching attempts/mastery or the pending state.
+            self._speak_fixed_phrase(pending["question"], continuous_vad, output_device_index)
+            continuous_vad.reset_idle_timer()
+            return
+
+        self._pending_teaching_check = None  # consumed either way below
+
+        concept = pending["concept"]
+        question = pending["question"]
+        attempts_so_far = pending["attempts"]
+
+        try:
+            anonymized_text = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized_text)
+
+            evaluation = self.llm_client.evaluate_answer(question, concept, user_text, attempts_so_far)
+            action = evaluation.get("recommended_action", "hint")
+            response_text = evaluation.get("response") or "Let's keep going."
+
+            profile_id = self.profile_manager.get_active_profile_id()
+            if profile_id:
+                is_correct = action in ("continue", "challenge")
+                used_hint = action in ("hint", "reteach")
+                self.profile_manager.record_attempt(profile_id, concept, correct=is_correct, used_hint=used_hint)
+
+            logger.info(f"📊 Answer evaluation for '{concept}': {evaluation.get('correctness')} -> {action}")
+
+            self._speak_fixed_phrase(response_text, continuous_vad, output_device_index)
+            self.conversation_manager.add_assistant_message(response_text)
+            self._last_bot_response = response_text
+
+            if action == "hint":
+                # One more attempt at the SAME question.
+                self._pending_teaching_check = {
+                    "concept": concept, "question": question, "attempts": attempts_so_far + 1,
+                }
+            # "reteach"/"continue"/"challenge" all leave pending state
+            # cleared (already done above): reteach stops re-testing this
+            # question rather than looping on it, continue/challenge are done.
+
+            continuous_vad.reset_idle_timer()
+
+        except Exception as e:
+            logger.error(f"Error handling teaching answer: {e}")
+            # Don't leave the student in silence, and don't leave a stale
+            # pending check hanging around for an unrelated future turn
+            # (already cleared above, before the try block).
+            try:
+                self._speak_fixed_phrase(
+                    "Sorry, I had trouble with that. Let's try a different question.",
+                    continuous_vad, output_device_index
+                )
+            except Exception:
+                pass
 
     def _listener_loop(self, continuous_vad, request_queue):
         """Producer: Always listening, detecting interruptions in real-time.
@@ -787,6 +910,15 @@ class JarvisBot:
                     # onboarding question, not a real tutoring question either.
                     if self._pending_onboarding is not None:
                         self._handle_onboarding_answer(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
+                    # This turn is the student's answer to a teaching
+                    # turn's comprehension-check question, not a fresh
+                    # question - see _run_teaching_turn/_handle_teaching_answer.
+                    if self._pending_teaching_check is not None:
+                        self._handle_teaching_answer(user_text, continuous_vad, output_device_index)
                         self._speaker_busy.clear()
                         continuous_vad.reset_idle_timer()
                         continue

@@ -274,9 +274,11 @@ class LLMClient:
 
     Schema:
     {
+      "concept": "short_snake_case_identifier",
       "speech": [
         {"id": 1, "text": "string"}
       ],
+      "check_question": "string or null",
       "visuals": [
         {"speech_id": 1, "action": "clear"},
         {"speech_id": 1, "action": "draw_text", "text": "string", "x": 100, "y": 120},
@@ -298,6 +300,20 @@ class LLMClient:
     - draw_arc: x,y = top-left of bounding box, w/h = bounding box size, start_angle/span_angle in degrees.
 
     Rules:
+    - "concept": a short snake_case identifier for the specific skill being taught
+      (e.g. "equivalent_fractions", "area_rectangle", "pythagorean_theorem") - used
+      to track this student's progress on this concept across sessions. Always include it.
+    - "check_question": ONE short, natural comprehension-check question to ask the
+      student after explaining, so they demonstrate understanding rather than just
+      listening (e.g. "So if a pizza has 8 slices and you eat 4, what fraction is
+      that?"). MUST use DIFFERENT specific numbers/values than the worked example
+      above - the point is to test whether the student can apply the idea to a new
+      case, not recall the exact answer you just gave them (e.g. if you just solved
+      a rectangle with width 5 and height 6, check with different numbers like
+      width 3 and height 4 - never repeat the same numbers). Use null only for a
+      simple, already fully-answered question where a follow-up check would feel
+      repetitive. Do NOT put the check question in speech - it is spoken separately,
+      after the explanation.
     - Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc
     - Use 2-5 speech steps
     - Keep explanations short and teacher-like
@@ -433,6 +449,108 @@ class LLMClient:
                 return self._local_client.generate_teaching_plan(messages, temperature, max_tokens)
             logger.error(f"Error generating teaching plan: {e}")
             raise
+
+    def evaluate_answer(
+        self,
+        question: str,
+        concept: str,
+        student_answer: str,
+        attempts_so_far: int,
+        temperature: float = 0.0,
+        max_tokens: int = 300,
+    ) -> Dict:
+        """
+        Judge a student's spoken answer to a comprehension-check question
+        from a teaching turn (see JarvisBot._handle_teaching_answer).
+        Never reduces to exact-string matching - a K-8 student's spoken
+        answer ("um, I think it's a half?") needs real judgment.
+
+        Returns {correctness, misconception, recommended_action} - see the
+        schema in the prompt below. Unlike generate_teaching_plan(), this
+        does NOT raise or fall back to the local LLM on failure - it has a
+        universally-safe default ("unclear" -> "hint") that keeps the
+        tutoring turn moving rather than needing the conversation to stop.
+
+        LLM-as-judge caveat, confirmed live: even at temperature=0 this can
+        occasionally misjudge an objectively simple case (e.g. flagged "20"
+        as incorrect for a 4x5 rectangle's area on one call out of several
+        identical retries, correct on all others) - the same class of
+        non-determinism found earlier in guardrails' self_check_input. The
+        consequence here is mild (one redundant hint, not a safety issue),
+        so this is an accepted limitation, not something fixed here.
+        """
+        full_messages = [
+            {
+                "role": "system",
+                "content": f"""
+You are judging a K-8 student's spoken answer to a math comprehension
+question, as part of a live tutoring conversation.
+
+Question asked: "{question}"
+Concept being checked: {concept}
+This is the student's attempt number {attempts_so_far + 1} at this question.
+
+Return ONLY valid JSON, no markdown, no explanation outside the JSON.
+
+Schema:
+{{
+  "correct_answer": "work out the actual correct answer to the question yourself, step by step, BEFORE judging the student - this catches cases where a reflexive judgment would be wrong",
+  "correctness": "correct" | "partial" | "incorrect",
+  "misconception": "short description of the specific misunderstanding, or null if none",
+  "recommended_action": "continue" | "hint" | "reteach" | "challenge",
+  "response": "the exact words to say to the student next, 1-2 short sentences, warm and age-appropriate"
+}}
+
+Fill in "correct_answer" FIRST, by actually solving the question yourself -
+only then compare the student's answer against it for "correctness". Do not
+judge correctness from a first impression before you've worked it out.
+
+Rules for recommended_action:
+- "continue": the answer was correct - move on, maybe offer a harder challenge
+- "hint": the answer was incorrect or partial and this is the student's first attempt - give one small hint, don't re-explain everything
+- "reteach": the answer was incorrect AND this is the student's second or later attempt at this question - stop asking, explain the concept a different way instead
+- "challenge": the answer was correct and shows strong understanding - offer something harder
+
+Rules for "response":
+- If recommended_action is "hint": give ONE small, specific hint related to their
+  specific mistake - do not just repeat the question or give away the answer.
+- If recommended_action is "reteach": briefly explain the concept a different way
+  (a new example or analogy), do not just repeat the original explanation.
+- If recommended_action is "continue" or "challenge": brief genuine praise. Do not
+  ask a new question here - a new one will be asked separately.
+- Keep it to 1-2 sentences, spoken out loud to a K-8 student - no formatting.
+"""
+            },
+            {"role": "user", "content": student_answer},
+        ]
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=full_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            content = response.choices[0].message.content.strip()
+            logger.info(f"Answer evaluation raw: {content[:200]}")
+
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not match:
+                raise ValueError("No JSON object found in response")
+
+            result = json.loads(match.group(0))
+            if "correctness" not in result or "recommended_action" not in result or "response" not in result:
+                raise ValueError("Invalid answer-evaluation format")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error evaluating answer ({type(e).__name__}: {e}) - defaulting to hint")
+            return {
+                "correctness": "unclear",
+                "misconception": None,
+                "recommended_action": "hint",
+                "response": "Let's think about that one a bit more - want to try again?",
+            }
 
     def generate_response(
         self,
