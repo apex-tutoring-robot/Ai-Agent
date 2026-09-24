@@ -65,12 +65,19 @@ aiofiles==24.1.0
 # bindings that pip can't provide correctly on Raspberry Pi:
 #   sudo apt install -y python3-picamera2
 # Not installable/importable on Windows at all - Pi/Linux only.
+
+# Teaching Canvas GUI (face + math whiteboard)
+# On Raspberry Pi, prefer the apt package (python3-pyqt5, see system deps
+# block at top of this file) over pip - it's prebuilt for the Pi's arm64
+# architecture, whereas `pip install PyQt5` often has to compile from source
+# there and can be very slow/fail. Works fine via pip on Windows dev machines.
+PyQt5==5.15.11
  build
  cython
  pyaudio
  numpy==1.26.4  
  sounddevice==0.4.6  
- opencv-python==4.8.1.78 
+ opencv-python-headless==4.8.1.78  # headless, NOT opencv-python - the GUI variant bundles its own Qt and segfaults when PyQt5 (Teaching Canvas) is also loaded
 #  azure-cognitiveservices-speech==1.48.1
  httpx==0.27.0
 #  python-dotenv==1.0.1

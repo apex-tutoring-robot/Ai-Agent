@@ -1,6 +1,7 @@
 import os
 # Allow the OS to use its default display and QT backend, rather than hardcoding.
 
+import re
 import threading
 import time
 import queue
@@ -8,9 +9,14 @@ from queue import Queue
 from typing import Optional
 from difflib import SequenceMatcher
 from dotenv import load_dotenv
-from visuals.faces.face_animator import FaceAnimator
 import numpy as np
 
+# audio.wake_word (openwakeword -> onnxruntime) MUST be imported before any
+# PyQt5 import (visuals.ui.*, below) - onnxruntime and PyQt5 each bundle
+# their own native runtime DLLs, and loading PyQt5 first causes a hard
+# segfault on Windows when onnxruntime is imported afterward. Importing
+# onnxruntime's DLLs into the process first avoids the conflict. Verified:
+# swapping this order reliably segfaults; this order doesn't.
 from audio.wake_word import WakeWordDetector
 from audio.continuous_vad import ContinuousVADCapture
 from audio.playback import AudioPlayer
@@ -20,6 +26,9 @@ from azure_services.tts_client import TextToSpeechClient
 from privacy.privacy_manager import PrivacyManager
 from profiles.profile_manager import ProfileManager
 from profiles.camera_capture import capture_avatar_photo
+
+from visuals.ui.ui_signals import UISignals
+from visuals.ui.main_window import MainWindow
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -34,20 +43,22 @@ class JarvisBot:
         "What's your favorite subject to learn about?",
     ]
 
-    def __init__(self, face: Optional['FaceAnimator'] = None):
+    def __init__(self, ui_signals: Optional['UISignals'] = None):
         """Initialize Jarvis with all components."""
         logger.info("Initializing Jarvis...")
-        self.face = face
-        
+        self.ui_signals = ui_signals
+
         # Initialize shared PyAudio instance
         import pyaudio
         self.pa = pyaudio.PyAudio()
-        
+
         # Initialize components with shared PyAudio
         self.wake_word_detector = WakeWordDetector(pa=self.pa)
         self.audio_player = AudioPlayer(
             pa=self.pa,
-            on_level=self.face.push_mouth_level if self.face else None
+            # Qt signal emission is thread-safe (queued to the GUI thread)
+            # unlike calling a widget method directly from this audio thread.
+            on_level=self.ui_signals.mouth_level.emit if self.ui_signals else None
         )
         self.stt_client = SpeechToTextClient()
         self.llm_client = LLMClient()
@@ -139,8 +150,8 @@ class JarvisBot:
         logger.info(f"🗣️  {phrase}")
         try:
             self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
-            if self.face:
-                self.face.start_talking()
+            if self.ui_signals:
+                self.ui_signals.start_talking.emit()
             self.audio_player.start_streaming(output_device_index=output_device_index)
             self._bot_is_speaking = True
             continuous_vad.set_playback_state(True)
@@ -156,8 +167,8 @@ class JarvisBot:
         except Exception as e:
             logger.error(f"Error speaking fixed phrase: {e}")
         finally:
-            if self.face:
-                self.face.start_idle()
+            if self.ui_signals:
+                self.ui_signals.stop_talking.emit()
             self._bot_is_speaking = False
             self._playback_ended_time = time.time()
             continuous_vad.set_playback_state(False)
@@ -245,6 +256,126 @@ class JarvisBot:
             self._speak_fixed_phrase(wrap_up, continuous_vad, output_device_index)
             self.conversation_manager.add_assistant_message(wrap_up)
             self._pending_onboarding = None
+
+    def is_math_query(self, text: str) -> bool:
+        """Detect math/geometry questions that should get a teaching plan
+        (whiteboard diagram + synced speech) instead of a plain answer."""
+        t = text.lower().strip()
+
+        math_keywords = [
+            # arithmetic / algebra
+            "solve", "equation", "equations", "add", "subtract", "multiply", "divide",
+            "fraction", "algebra", "calculate", "compute", "simplify", "evaluate",
+            "factor", "expand", "expression", "variable", "coefficient",
+            # geometry - shapes
+            "area", "perimeter", "volume", "surface area",
+            "radius", "diameter", "circumference",
+            "rectangle", "square", "circle", "triangle", "polygon",
+            "pentagon", "hexagon", "heptagon", "octagon", "nonagon", "decagon",
+            "trapezoid", "trapezium", "parallelogram", "rhombus", "kite",
+            "ellipse", "oval", "sector", "segment",
+            "sided", "sides", "shape", "diagonal", "hypotenuse",
+            # geometry - measurements
+            "angle", "degree", "height", "width", "length", "base", "depth",
+            "pythagorean", "theorem", "congruent", "similar",
+            # misc math
+            "graph", "geometry", "probability", "percent", "ratio", "proportion",
+            "mean", "median", "mode", "average", "prime", "exponent", "power",
+            "square root", "cube root", "logarithm",
+        ]
+
+        if any(word in t for word in math_keywords):
+            return True
+
+        return bool(re.search(r"\d", t) and re.search(r"[\+\-\*/=]", t))
+
+    def _run_teaching_turn(self, user_text: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Handle a math/geometry question: generate a teaching plan (speech
+        steps + synchronized whiteboard draw actions) via
+        LLMClient.generate_teaching_plan(), instead of a plain LLM answer.
+        Each step's draw actions are emitted right before that step's speech
+        is synthesized/played, using the same streaming TTS pipeline as
+        normal turns (one text chunk per step, since each step's text is
+        already complete - not token-by-token like a live LLM stream).
+        """
+        self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
+        if self.ui_signals:
+            self.ui_signals.show_teaching_layout.emit()
+            self.ui_signals.clear_canvas.emit()
+            self.ui_signals.start_talking.emit()
+        self.audio_player.start_streaming(output_device_index=output_device_index)
+        self._bot_is_speaking = True
+        continuous_vad.set_playback_state(True)
+
+        response_parts = []
+        try:
+            logger.info(f"📐 Processing Teaching Turn: {user_text}")
+            anonymized_text = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized_text)
+            messages = self.conversation_manager.get_messages()
+
+            plan = self.llm_client.generate_teaching_plan(messages)
+            visuals = plan.get("visuals", [])
+
+            for step in plan.get("speech", []):
+                if self._interruption_event.is_set():
+                    break
+
+                step_text = step.get("text", "").strip()
+                if not step_text:
+                    continue
+
+                actions = [v for v in visuals if v.get("speech_id") == step.get("id")]
+                if actions and self.ui_signals:
+                    self.ui_signals.draw_actions.emit(actions)
+
+                response_parts.append(step_text)
+                for audio_chunk in self.tts_client.synthesize_stream(iter([step_text])):
+                    if self._interruption_event.is_set():
+                        break
+                    if self.audio_player._is_playing:
+                        try:
+                            self.audio_player.queue_audio(audio_chunk)
+                        except RuntimeError as e:
+                            logger.warning(f"⚠️ Playback queueing failed (likely stopped): {e}")
+                            break
+                    else:
+                        break
+
+            if not self._interruption_event.is_set():
+                self.audio_player.stop_streaming(immediate=False)
+                full_response = " ".join(response_parts)
+                if full_response:
+                    self._last_bot_response = full_response
+                    self.conversation_manager.add_assistant_message(full_response)
+                    logger.info(f"🤖 Bot (teaching): {full_response}")
+            else:
+                partial = " ".join(response_parts)
+                if partial:
+                    self._last_bot_response = partial
+
+            continuous_vad.reset_idle_timer()
+
+        except Exception as e:
+            logger.error(f"Error in teaching turn: {e}")
+            # Fall back to a spoken apology rather than leaving the student
+            # in silence if the LLM didn't return a valid teaching plan.
+            try:
+                apology = "Sorry, I had trouble working that one out. Could you try asking again?"
+                for audio_chunk in self.tts_client.synthesize_stream(iter([apology])):
+                    if self.audio_player._is_playing:
+                        self.audio_player.queue_audio(audio_chunk)
+                self._last_bot_response = apology
+            except Exception:
+                pass
+        finally:
+            if self.ui_signals:
+                self.ui_signals.stop_talking.emit()
+            self._bot_is_speaking = False
+            self._playback_ended_time = time.time()
+            continuous_vad.set_playback_state(False)
+            self.audio_player.stop_streaming(immediate=True)
 
     def _listener_loop(self, continuous_vad, request_queue):
         """Producer: Always listening, detecting interruptions in real-time.
@@ -345,21 +476,29 @@ class JarvisBot:
                     continuous_vad.reset_idle_timer()
                     continue
 
+                # Math/geometry questions get a teaching plan (speech steps +
+                # synchronized whiteboard diagram) instead of a plain answer.
+                if self.is_math_query(user_text):
+                    self._run_teaching_turn(user_text, continuous_vad, output_device_index)
+                    self._speaker_busy.clear()
+                    continue
+
                 try:
                     logger.info(f"📝 Processing Turn: {user_text}")
                     # Anonymize and prepare history
                     anonymized_text = self.privacy_manager.anonymize(user_text)
                     self.conversation_manager.add_user_message(anonymized_text)
-                    
+
                     # LLM Generation
                     messages = self.conversation_manager.get_messages()
                     llm_start = time.perf_counter()
-                    
+
                     # Start audio playback (callback mode)
                     # AEC: Provide reference audio back to VAD
                     self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
-                    if self.face:
-                        self.face.start_talking()
+                    if self.ui_signals:
+                        self.ui_signals.show_face_fullscreen.emit()
+                        self.ui_signals.start_talking.emit()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
                     
                     # ── ECHO GUARD: Signal that bot is now speaking ──
@@ -418,8 +557,8 @@ class JarvisBot:
                 except Exception as turn_err:
                     logger.error(f"Error in speaker turn: {turn_err}")
                 finally:
-                    if self.face:
-                        self.face.start_idle()
+                    if self.ui_signals:
+                        self.ui_signals.stop_talking.emit()
                     # ── ECHO GUARD: Signal playback ended + start cooldown ──
                     self._bot_is_speaking = False
                     self._playback_ended_time = time.time()
@@ -873,8 +1012,9 @@ class JarvisBot:
     
     def run(self):
         """Start Jarvis and run the main loop."""
-        if self.face:
-            self.face.start_idle()
+        # MainWindow.__init__ already puts the face in idle state on construction,
+        # and show_idle_mode() there is only reachable via signals from this
+        # thread once running - nothing to emit here at startup.
         logger.info("\n" + "🤖 "*20)
         logger.info("Jarvis TUTORING ROBOT STARTED")
         logger.info("🤖 "*20 + "\n")
@@ -938,88 +1078,64 @@ class JarvisBot:
         logger.info("Jarvis shutdown complete. Goodbye! 👋\n")
 
 def main():
-    import os
+    import sys
+
+    is_windows = sys.platform == "win32"
 
     # ── Display configuration ──────────────────────────────────────────────────
-    # FACE_ENABLED=true          → show face animation
-    # FACE_ENABLED=false         → headless, no GUI (default when DISPLAY not set)
-    #
-    # DISPLAY_BACKEND=physical   → HDMI monitor          (DISPLAY=:0)
-    # DISPLAY_BACKEND=vnc        → TigerVNC session      (DISPLAY=:1)
-    # DISPLAY_BACKEND=auto       → pick first available X11 socket (:1 then :0)
-    #
-    # You can also skip DISPLAY_BACKEND and set DISPLAY directly, e.g. DISPLAY=:0
+    # FACE_ENABLED=true   → show the face/teaching-canvas window
+    # FACE_ENABLED=false  → headless, no GUI
+    # unset               → auto: on Windows, on (normal desktop session,
+    #                       Qt opens its own native window, no DISPLAY needed);
+    #                       on Linux/Pi, on only if DISPLAY/WAYLAND_DISPLAY is
+    #                       already set (matches a headless-SSH-session default)
     # ──────────────────────────────────────────────────────────────────────────
     face_env = os.getenv("FACE_ENABLED", "").strip().lower()
     if face_env in ("true", "1", "yes"):
         face_enabled = True
     elif face_env in ("false", "0", "no"):
         face_enabled = False
+    elif is_windows:
+        face_enabled = True
     else:
-        # Auto: enable face only when DISPLAY is already set in the environment
         face_enabled = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-
-    if face_enabled:
-        # DISPLAY_BACKEND always wins when explicitly set — it overrides whatever
-        # DISPLAY was loaded from .env so that a single knob controls the display.
-        # Priority: DISPLAY_BACKEND (explicit) > DISPLAY (env/shell) > default :0
-        backend = os.getenv("DISPLAY_BACKEND", "").strip().lower()
-
-        if backend == "vnc":
-            os.environ["DISPLAY"] = ":1"
-        elif backend == "physical":
-            os.environ["DISPLAY"] = ":0"
-        elif backend == "auto":
-            # Pick the first X11 socket that actually exists
-            for candidate in (":1", ":0"):
-                if os.path.exists(f"/tmp/.X11-unix/X{candidate[1:]}"):
-                    os.environ["DISPLAY"] = candidate
-                    break
-            else:
-                os.environ["DISPLAY"] = ":0"
-        elif not os.environ.get("DISPLAY"):
-            # No DISPLAY_BACKEND and no DISPLAY — last resort default
-            os.environ["DISPLAY"] = ":0"
-
-        # Ensure X authentication is available.
-        # TigerVNC stores its cookie in the same ~/.Xauthority file as the
-        # physical display, just under a different display entry (:1 vs :0).
-        if not os.environ.get("XAUTHORITY"):
-            xauth_path = os.path.expanduser("~/.Xauthority")
-            if os.path.exists(xauth_path):
-                os.environ["XAUTHORITY"] = xauth_path
-
-        # Pre-check: verify the X11 socket actually exists before letting Qt try.
-        # Qt calls abort() on a missing display — that can't be caught by Python.
-        display = os.environ.get("DISPLAY", "")
-        display_num = display.lstrip(":").split(".")[0]
-        socket_path = f"/tmp/.X11-unix/X{display_num}"
-        if not os.path.exists(socket_path):
-            logger.warning(
-                f"X11 socket {socket_path} not found — is the display server running? "
-                f"Falling back to headless."
-            )
-            face_enabled = False
-        else:
-            logger.info(f"Face animation enabled on display {display}")
 
     if not face_enabled:
         logger.info("Face animation disabled — running headless (set FACE_ENABLED=true to enable)")
 
-    face = None
+    app = None
+    ui_signals = None
     if face_enabled:
         try:
-            face = FaceAnimator("./visuals/faces")
+            from PyQt5.QtWidgets import QApplication
+            # QApplication must exist before any other Qt object (UISignals,
+            # MainWindow) is constructed, and must live on the main thread.
+            app = QApplication(sys.argv)
+            ui_signals = UISignals()
+
+            # Resolve relative to this file's own location, not the process's
+            # CWD - same reasoning as the SYSTEM_PROMPT_PATH/face-path fixes
+            # elsewhere in this codebase (CWD depends on how you launch main.py).
+            faces_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visuals", "faces")
+            window = MainWindow(ui_signals, faces_dir, fullscreen=not is_windows)
+            window.show()
+
+            logger.info(
+                "Face animation enabled (native Windows GUI)" if is_windows
+                else f"Face animation enabled on display {os.environ.get('DISPLAY', '')}"
+            )
         except Exception as e:
             logger.warning(f"Failed to init face animation: {e}. Falling back to headless.")
+            app = None
+            ui_signals = None
 
-    jarvis = JarvisBot(face)
+    jarvis = JarvisBot(ui_signals)
 
-    if face:
+    if app:
         worker = threading.Thread(target=jarvis.run, daemon=True)
         worker.start()
-        # cv2 GUI event loop must run on the main thread
-        face.render_forever()
+        # Qt's event loop must run on the main thread
+        sys.exit(app.exec_())
     else:
         jarvis.run()
 
