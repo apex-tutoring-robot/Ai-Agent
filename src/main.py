@@ -507,7 +507,7 @@ class JarvisBot:
             "fraction", "algebra", "calculate", "compute", "simplify", "evaluate",
             "factor", "expand", "expression", "variable", "coefficient",
             # geometry - shapes
-            "area", "perimeter", "volume", "surface area",
+            "area", "perimeter", "surface area",
             "radius", "diameter", "circumference",
             "rectangle", "square", "circle", "triangle", "polygon",
             "pentagon", "hexagon", "heptagon", "octagon", "nonagon", "decagon",
@@ -524,6 +524,20 @@ class JarvisBot:
         ]
 
         if any(word in t for word in math_keywords):
+            return True
+
+        # "volume" alone is ambiguous - a real geometry term (volume of a
+        # cube) but also loudness (see the set_volume tool). A bare
+        # substring match here sent "please tell me in maximum volume"
+        # to the teaching-plan pipeline instead of set_volume, confirmed
+        # live - the JSON-only prompt got a conversational reply back and
+        # errored, ultimately just apologizing instead of changing the
+        # volume. Only treat it as math when paired with "of" or an actual
+        # 3D-shape word, not just present anywhere in the sentence.
+        if re.search(r"\bvolume\s+of\b", t) or (
+            "volume" in t
+            and re.search(r"\b(cube|sphere|cylinder|cone|prism|pyramid|box|container|tank)\b", t)
+        ):
             return True
 
         return bool(re.search(r"\d", t) and re.search(r"[\+\-\*/=]", t))
