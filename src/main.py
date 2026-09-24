@@ -6,7 +6,7 @@ import threading
 import time
 import queue
 from queue import Queue
-from typing import Optional
+from typing import Dict, Optional
 from difflib import SequenceMatcher
 from dotenv import load_dotenv
 import numpy as np
@@ -23,9 +23,12 @@ from audio.playback import AudioPlayer
 from azure_services.stt_client import SpeechToTextClient
 from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
+from azure_services.interfaces import SpeechToTextProvider, LLMProvider, TextToSpeechProvider
 from privacy.privacy_manager import PrivacyManager
 from profiles.profile_manager import ProfileManager
 from profiles.camera_capture import capture_avatar_photo
+from session import Session
+from knowledge.textbook_search import TextbookSearch, normalize_grade
 
 from visuals.ui.ui_signals import UISignals
 from visuals.ui.main_window import MainWindow
@@ -33,6 +36,33 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# OpenAI function-calling schema for the one real tool Jarvis currently
+# exposes to the LLM - see JarvisBot._tool_search_curriculum(). The model
+# decides for itself whether a question needs this, rather than a
+# keyword-routed heuristic like is_math_query().
+CURRICULUM_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_curriculum",
+        "description": (
+            "Search the official California Common Core math curriculum "
+            "standards for this student's grade level. Use this to ground "
+            "your explanation in what's actually expected at their grade, "
+            "or to check whether a topic is grade-appropriate before answering."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search for, e.g. 'fractions with unlike denominators' or 'area of shapes'"
+                }
+            },
+            "required": ["query"]
+        }
+    }
+}
 
 class JarvisBot:
     """Main orchestrator for Jarvis tutoring robot."""
@@ -63,7 +93,22 @@ class JarvisBot:
         self.stt_client = SpeechToTextClient()
         self.llm_client = LLMClient()
         self.tts_client = TextToSpeechClient()
+        # Verifies each client actually satisfies the provider-agnostic
+        # interface (see interfaces.py) - not just documentation, a real
+        # check that a future provider swap won't silently break main.py.
+        assert isinstance(self.stt_client, SpeechToTextProvider)
+        assert isinstance(self.llm_client, LLMProvider)
+        assert isinstance(self.tts_client, TextToSpeechProvider)
         self.privacy_manager = PrivacyManager()
+
+        # Grade-scoped curriculum retrieval (RAG) - the data was already
+        # extracted (preprocess_textbooks.py) but never actually connected
+        # to the LLM until now. Exposed to the LLM as a callable tool, see
+        # llm_client.py's generate_response_with_tools().
+        textbooks_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "processed_json_textbooks"
+        )
+        self.textbook_search = TextbookSearch(textbooks_dir)
 
         # Per-profile persistent history (one physical robot, multiple family
         # members) - resolved relative to this file's own location, not CWD,
@@ -99,6 +144,11 @@ class JarvisBot:
         # verification, since one "my name is X" utterance isn't enough
         # speech for a reliable voiceprint. None when no onboarding is active.
         self._pending_onboarding: Optional[dict] = None
+
+        # ── Current conversation session (see session.py) ──
+        # None outside of an active conversation; a fresh Session is created
+        # each time the wake word fires.
+        self.current_session: Optional[Session] = None
 
         logger.info("Jarvis initialized successfully!")
     
@@ -246,6 +296,19 @@ class JarvisBot:
         self.conversation_manager.add_user_message(anonymized)
 
         next_index = self._pending_onboarding["question_index"]
+
+        # question_index == 1 means this answer is responding to
+        # ONBOARDING_QUESTIONS[0] ("What grade are you in?") - parse and
+        # store it so RAG retrieval (search_curriculum tool) can scope
+        # results to this student's actual grade level.
+        if next_index == 1:
+            grade = normalize_grade(user_text)
+            if grade:
+                self.profile_manager.set_grade(self._pending_onboarding["profile_id"], grade)
+                logger.info(f"📓 Stored grade '{grade}' for profile {self._pending_onboarding['profile_id']}")
+            else:
+                logger.info(f"📓 Could not parse a grade from: '{user_text}'")
+
         if next_index < len(self.ONBOARDING_QUESTIONS):
             question = self.ONBOARDING_QUESTIONS[next_index]
             self._speak_fixed_phrase(question, continuous_vad, output_device_index)
@@ -256,6 +319,30 @@ class JarvisBot:
             self._speak_fixed_phrase(wrap_up, continuous_vad, output_device_index)
             self.conversation_manager.add_assistant_message(wrap_up)
             self._pending_onboarding = None
+
+    def _tool_search_curriculum(self, query: str) -> str:
+        """Implementation behind the search_curriculum tool the LLM can call."""
+        profile_id = self.profile_manager.get_active_profile_id()
+        grade = self.profile_manager.get_grade(profile_id) if profile_id else None
+        if not grade:
+            return "No grade level is known for this student yet, so results may not be grade-appropriate."
+
+        results = self.textbook_search.search(query, grade)
+        if not results:
+            return f"No matching curriculum content found for grade {grade} on '{query}'."
+        return "\n\n".join(results)
+
+    def _execute_tool(self, tool_name: str, args: dict) -> str:
+        """Dispatches a tool call requested by the LLM and records it in the
+        current session's audit trail (Session.tool_calls)."""
+        if tool_name == "search_curriculum":
+            result = self._tool_search_curriculum(args.get("query", ""))
+        else:
+            result = f"Unknown tool: {tool_name}"
+
+        if self.current_session:
+            self.current_session.record_tool_call(tool_name, args, result)
+        return result
 
     def is_math_query(self, text: str) -> bool:
         """Detect math/geometry questions that should get a teaching plan
@@ -485,13 +572,16 @@ class JarvisBot:
 
                 try:
                     logger.info(f"📝 Processing Turn: {user_text}")
+                    turn_start = time.perf_counter()
+                    if self.current_session:
+                        self.current_session.new_turn()
+
                     # Anonymize and prepare history
                     anonymized_text = self.privacy_manager.anonymize(user_text)
                     self.conversation_manager.add_user_message(anonymized_text)
 
                     # LLM Generation
                     messages = self.conversation_manager.get_messages()
-                    llm_start = time.perf_counter()
 
                     # Start audio playback (callback mode)
                     # AEC: Provide reference audio back to VAD
@@ -500,31 +590,45 @@ class JarvisBot:
                         self.ui_signals.show_face_fullscreen.emit()
                         self.ui_signals.start_talking.emit()
                     self.audio_player.start_streaming(output_device_index=output_device_index)
-                    
+
                     # ── ECHO GUARD: Signal that bot is now speaking ──
                     self._bot_is_speaking = True
                     continuous_vad.set_playback_state(True)
-                    
+
                     response_chunks = []
-                    
-                    # Helper to collect text while streaming
+                    latency: Dict[str, float] = {}
+
+                    # Helper to collect text while streaming, timestamping
+                    # the first chunk for the LLM-TTFT latency figure.
                     def text_collector(stream):
                         for chunk in stream:
                             if self._interruption_event.is_set():
                                 break
+                            if not response_chunks:
+                                latency["llm_ttft_ms"] = round((time.perf_counter() - turn_start) * 1000, 1)
                             response_chunks.append(chunk)
                             yield chunk
-                            
-                    # Pipeline: LLM -> TTS -> AudioPlayer
-                    llm_stream = self.llm_client.generate_response_stream(messages)
+
+                    # Helper to timestamp the first audio chunk for the
+                    # TTS-first-byte latency figure.
+                    def audio_timing(stream):
+                        for i, chunk in enumerate(stream):
+                            if i == 0:
+                                latency["tts_first_byte_ms"] = round((time.perf_counter() - turn_start) * 1000, 1)
+                            yield chunk
+
+                    # Pipeline: LLM (with tool-calling) -> TTS -> AudioPlayer
+                    llm_stream = self.llm_client.generate_response_with_tools(
+                        messages, tools=[CURRICULUM_SEARCH_TOOL], tool_executor=self._execute_tool
+                    )
                     collected_stream = text_collector(llm_stream)
-                    tts_stream = self.tts_client.synthesize_stream(collected_stream)
-                    
+                    tts_stream = audio_timing(self.tts_client.synthesize_stream(collected_stream))
+
                     for audio_chunk in tts_stream:
                         if self._interruption_event.is_set():
                             logger.warning("🛑 Speaker aborted due to interruption event")
                             break
-                        
+
                         # Defensive check: ensure streaming is still active
                         if self.audio_player._is_playing:
                             try:
@@ -534,11 +638,11 @@ class JarvisBot:
                                 break
                         else:
                             break
-                        
+
                     # Wait for playback to finish naturally (if not interrupted)
                     if not self._interruption_event.is_set():
                         self.audio_player.stop_streaming(immediate=False)
-                        
+
                         # Add full response to history only if NOT interrupted
                         full_response = "".join(response_chunks)
                         if full_response:
@@ -550,10 +654,19 @@ class JarvisBot:
                         partial = "".join(response_chunks)
                         if partial:
                             self._last_bot_response = partial
-                    
+
+                    latency["total_ms"] = round((time.perf_counter() - turn_start) * 1000, 1)
+                    logger.info(
+                        f"⏱️  LLM TTFT: {latency.get('llm_ttft_ms', '?')}ms | "
+                        f"TTS first byte: {latency.get('tts_first_byte_ms', '?')}ms | "
+                        f"Total: {latency['total_ms']}ms"
+                    )
+                    if self.current_session:
+                        self.current_session.last_latency_breakdown = latency
+
                     # Reset idle timer because we just finished a turn
                     continuous_vad.reset_idle_timer()
-                    
+
                 except Exception as turn_err:
                     logger.error(f"Error in speaker turn: {turn_err}")
                 finally:
@@ -603,6 +716,12 @@ class JarvisBot:
             
             # Stop wake word detection to free microphone
             self.wake_word_detector.stop()
+
+            # New session for this conversation - a fresh session_id, turn
+            # counter, and tool-call audit trail each time the wake word
+            # fires (long-term memory lives in ProfileManager, not here).
+            self.current_session = Session(profile_id=self.profile_manager.get_active_profile_id())
+            logger.info(f"🆕 Session {self.current_session.session_id} started")
 
             # Flush any stale items (e.g. a leftover None sentinel from the previous
             # conversation's idle-timeout cleanup) so the new speaker thread starts clean.

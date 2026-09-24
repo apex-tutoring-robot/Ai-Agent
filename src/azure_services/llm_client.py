@@ -7,7 +7,7 @@ import os
 import json
 import re
 import logging
-from typing import Iterator, List, Dict, Optional
+from typing import Callable, Iterator, List, Dict, Optional
 from openai import AzureOpenAI
 from dotenv import load_dotenv
 
@@ -113,6 +113,95 @@ class LLMClient:
         
         except Exception as e:
             logger.error(f"Error generating response: {e}")
+            raise
+
+    def generate_response_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict],
+        tool_executor: Callable[[str, dict], str],
+        temperature: float = 0.7,
+        max_tokens: int = 500
+    ) -> Iterator[str]:
+        """
+        Real agentic tool-use loop (Decision -> Tool Call -> Observe ->
+        Respond), not a keyword-routed heuristic like is_math_query(). The
+        model decides for itself whether it needs to call a tool before
+        answering.
+
+        Step 1 is necessarily non-streaming - we need to see whether a
+        tool_call came back before committing to stream a response. If the
+        model calls tool(s), `tool_executor(name, arguments)` runs them and
+        results are fed back for a second, streamed call. If no tool call,
+        the first call's content is the (already complete) answer.
+
+        This means every turn pays for one non-streaming round-trip before
+        anything can be spoken, even turns that don't end up needing a tool
+        - a real latency trade-off inherent to tool-calling in general, not
+        specific to this implementation. `tool_executor` is a plain
+        callable rather than this class knowing about any specific tool, so
+        this stays a generic Azure OpenAI wrapper - Jarvis-specific tool
+        definitions and execution live in main.py.
+        """
+        full_messages = [{"role": "system", "content": self.system_prompt}] + messages
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=full_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                tool_choice="auto",
+            )
+        except Exception as e:
+            logger.error(f"Error in tool-decision call: {e}")
+            raise
+
+        message = response.choices[0].message
+
+        if not message.tool_calls:
+            if message.content:
+                yield message.content
+            return
+
+        full_messages.append({
+            "role": "assistant",
+            "content": message.content,
+            "tool_calls": [tc.model_dump() for tc in message.tool_calls],
+        })
+
+        for tool_call in message.tool_calls:
+            try:
+                args = json.loads(tool_call.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            try:
+                result = tool_executor(tool_call.function.name, args)
+            except Exception as e:
+                result = f"Error running tool: {e}"
+            logger.info(f"🔧 Tool call: {tool_call.function.name}({args}) -> {str(result)[:150]}")
+            full_messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(result),
+            })
+
+        try:
+            final_stream = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=full_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            for chunk in final_stream:
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+                    if hasattr(delta, 'content') and delta.content:
+                        yield delta.content
+        except Exception as e:
+            logger.error(f"Error in post-tool-call response: {e}")
             raise
 
     def generate_teaching_plan(

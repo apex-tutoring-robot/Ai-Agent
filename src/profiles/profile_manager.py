@@ -69,6 +69,7 @@ class ProfileManager:
                     name TEXT NOT NULL UNIQUE,
                     avatar_path TEXT,
                     voiceprint_id TEXT,
+                    grade TEXT,
                     created_at TEXT NOT NULL,
                     last_active_at TEXT
                 );
@@ -183,6 +184,23 @@ class ProfileManager:
                 "SELECT name FROM profiles WHERE id = ?", (profile_id,)
             ).fetchone()
         return row["name"] if row else None
+
+    def set_grade(self, profile_id: int, grade: str) -> None:
+        """`grade` should already be normalized (e.g. 'K', '1'..'8') - see
+        knowledge.textbook_search.normalize_grade() for parsing a spoken answer."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE profiles SET grade = ? WHERE id = ?",
+                (grade, profile_id)
+            )
+            self._conn.commit()
+
+    def get_grade(self, profile_id: int) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT grade FROM profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+        return row["grade"] if row else None
 
     # --------------------------------------------------
     # Switching
