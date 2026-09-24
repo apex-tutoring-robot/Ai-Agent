@@ -34,7 +34,7 @@ azure-cognitiveservices-speech==1.40.0
 openai>=1.12.0
 
 # NeMo Guardrails for topic control
-# nemoguardrails>=0.9.0
+nemoguardrails>=0.9.0
 
 # LangChain integration
 langchain-openai>=0.1.0

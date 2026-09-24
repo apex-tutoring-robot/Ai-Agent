@@ -29,6 +29,7 @@ from profiles.profile_manager import ProfileManager
 from profiles.camera_capture import capture_avatar_photo
 from session import Session
 from knowledge.textbook_search import TextbookSearch, normalize_grade
+from guardrails.guardrails_manager import GuardrailsManager
 
 from visuals.ui.ui_signals import UISignals
 from visuals.ui.main_window import MainWindow
@@ -188,6 +189,24 @@ class JarvisBot:
         # each time the wake word fires.
         self.current_session: Optional[Session] = None
 
+        # Output-only safety check (NeMo Guardrails) - checks what the LLM
+        # actually said, run in the background in parallel with TTS already
+        # speaking it (see _run_output_safety_check). Input-side checking
+        # was evaluated and deliberately left disabled: it roughly doubled
+        # per-turn latency and showed non-deterministic false-positive
+        # blocks on trivial input like "hello" in live testing. Fails open
+        # (GuardrailsManager.is_enabled is False) if NeMo/the config/the
+        # env vars aren't available, so a guardrails outage never silences
+        # Jarvis - it just runs without this safety net.
+        self.guardrails_manager = GuardrailsManager(
+            config_path=os.getenv('GUARDRAILS_CONFIG_PATH', 'config/guardrails')
+        )
+        # Identifies which turn's audio a background safety check belongs
+        # to (by object identity) - lets a check that resolves after the
+        # conversation has already moved to a newer turn recognize it's
+        # stale and skip interrupting unrelated, already-playing audio.
+        self._active_turn_token = None
+
         logger.info("Jarvis initialized successfully!")
     
     def _recreate_audio_system(self):
@@ -261,6 +280,41 @@ class JarvisBot:
             self._playback_ended_time = time.time()
             continuous_vad.set_playback_state(False)
             self.audio_player.stop_streaming(immediate=True)
+
+    def _run_output_safety_check(self, full_response: str, turn_token: object, continuous_vad, output_device_index: int) -> None:
+        """
+        Runs in a background thread, kicked off right after a turn's full
+        response text is known - which by then is already synthesized and
+        queued/playing through the speaker (see _speaker_loop). A real LLM
+        round-trip (~8s live), too slow to gate speech-start on without
+        badly hurting time-to-first-audio, so it acts as a safety net
+        instead: if the response gets flagged, cut off playback immediately
+        (same mechanism as barge-in interruption) and speak a kid-friendly
+        refusal in its place.
+
+        turn_token is compared by identity against self._active_turn_token
+        so a check that resolves after the conversation has already moved
+        on to a newer turn recognizes it's stale and doesn't interrupt
+        unrelated, already-playing audio.
+        """
+        try:
+            safe, refusal_text = self.guardrails_manager.check_output(full_response)
+        except Exception as exc:
+            logger.error(f"Output safety check crashed (failing open): {exc}")
+            return
+
+        if safe:
+            return
+        if self._active_turn_token is not turn_token:
+            logger.warning(
+                "Guardrails flagged a response, but the conversation already "
+                "moved on to a newer turn - not interrupting."
+            )
+            return
+
+        logger.warning(f"🚨 Guardrails BLOCKED output after it started playing: '{full_response[:80]}'")
+        self.audio_player.stop_streaming(immediate=True)
+        self._speak_fixed_phrase(refusal_text, continuous_vad, output_device_index)
 
     def _try_handle_profile_command(self, user_text: str, continuous_vad, output_device_index: int) -> bool:
         """
@@ -760,6 +814,22 @@ class JarvisBot:
 
                     # Wait for playback to finish naturally (if not interrupted)
                     if not self._interruption_event.is_set():
+                        # Kick off the output safety check now, before the
+                        # blocking wait below - the response is already
+                        # synthesized and queued/playing, so this runs
+                        # concurrently with the actual speech instead of
+                        # delaying it. See _run_output_safety_check.
+                        if self.guardrails_manager.is_enabled:
+                            full_response_so_far = "".join(response_chunks)
+                            if full_response_so_far:
+                                turn_token = object()
+                                self._active_turn_token = turn_token
+                                threading.Thread(
+                                    target=self._run_output_safety_check,
+                                    args=(full_response_so_far, turn_token, continuous_vad, output_device_index),
+                                    daemon=True,
+                                ).start()
+
                         self.audio_player.stop_streaming(immediate=False)
 
                         # Add full response to history only if NOT interrupted
