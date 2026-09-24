@@ -87,6 +87,17 @@ class ProfileManager:
                     key TEXT PRIMARY KEY,
                     value TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS concept_mastery (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER NOT NULL REFERENCES profiles(id),
+                    concept TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    correct_attempts INTEGER NOT NULL DEFAULT 0,
+                    hints_used INTEGER NOT NULL DEFAULT 0,
+                    last_practiced_at TEXT,
+                    UNIQUE(profile_id, concept)
+                );
             """)
             self._conn.commit()
 
@@ -224,6 +235,48 @@ class ProfileManager:
                 "SELECT grade FROM profiles WHERE id = ?", (profile_id,)
             ).fetchone()
         return row["grade"] if row else None
+
+    # --------------------------------------------------
+    # Concept mastery (per-student tutoring progress)
+    # --------------------------------------------------
+
+    def record_attempt(self, profile_id: int, concept: str, correct: bool, used_hint: bool = False) -> None:
+        """
+        Record one comprehension-check attempt for `concept` (a short
+        identifier like "equivalent_fractions", provided by the teaching
+        plan itself - see JarvisBot._handle_teaching_answer). Upserts: a
+        student's first attempt at a concept creates the row, later
+        attempts accumulate onto it.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO concept_mastery
+                    (profile_id, concept, attempts, correct_attempts, hints_used, last_practiced_at)
+                VALUES (?, ?, 1, ?, ?, ?)
+                ON CONFLICT(profile_id, concept) DO UPDATE SET
+                    attempts = attempts + 1,
+                    correct_attempts = correct_attempts + excluded.correct_attempts,
+                    hints_used = hints_used + excluded.hints_used,
+                    last_practiced_at = excluded.last_practiced_at
+                """,
+                (profile_id, concept, 1 if correct else 0, 1 if used_hint else 0, now),
+            )
+            self._conn.commit()
+
+    def get_mastery(self, profile_id: int, concept: str) -> dict:
+        """Returns {attempts, correct_attempts, hints_used} - all zero if
+        the student has never attempted this concept before."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT attempts, correct_attempts, hints_used FROM concept_mastery "
+                "WHERE profile_id = ? AND concept = ?",
+                (profile_id, concept),
+            ).fetchone()
+        if row is None:
+            return {"attempts": 0, "correct_attempts": 0, "hints_used": 0}
+        return {"attempts": row["attempts"], "correct_attempts": row["correct_attempts"], "hints_used": row["hints_used"]}
 
     # --------------------------------------------------
     # Switching

@@ -27,9 +27,11 @@ Do NOT include explanation outside JSON.
 
 Schema:
 {
+  "concept": "short_snake_case_identifier",
   "speech": [
     {"id": 1, "text": "string"}
   ],
+  "check_question": "string or null",
   "visuals": [
     {"speech_id": 1, "action": "clear"},
     {"speech_id": 1, "action": "draw_text", "text": "string", "x": 100, "y": 120}
@@ -37,6 +39,12 @@ Schema:
 }
 
 Rules:
+- "concept": a short snake_case identifier for the specific skill being taught
+  (e.g. "equivalent_fractions", "area_rectangle") - always include it.
+- "check_question": ONE short comprehension-check question to ask after
+  explaining, or null for a simple already-answered question. Not part of speech.
+  MUST use DIFFERENT numbers/values than the worked example - test whether the
+  student can apply the idea to a new case, never repeat the same numbers.
 - Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon
 - Use 2–5 speech steps
 - Keep explanations short and teacher-like

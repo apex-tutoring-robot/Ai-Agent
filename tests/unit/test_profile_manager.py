@@ -100,6 +100,57 @@ class TestGrade:
         assert manager.get_grade(profile_id) is None
 
 
+class TestConceptMastery:
+    """Per-student tutoring progress, added for the Jarvis-scaled tutoring
+    loop (see JarvisBot._handle_teaching_answer) - tracks per-concept
+    attempts/correctness/hints across sessions in the existing SQLite DB,
+    deliberately not a separate curriculum-graph service."""
+
+    def test_mastery_defaults_to_all_zero_for_a_new_concept(self, manager):
+        profile_id, _ = manager.find_or_create_profile("Brian")
+        assert manager.get_mastery(profile_id, "equivalent_fractions") == {
+            "attempts": 0, "correct_attempts": 0, "hints_used": 0,
+        }
+
+    def test_record_attempt_creates_a_row_on_first_attempt(self, manager):
+        profile_id, _ = manager.find_or_create_profile("Brian")
+        manager.record_attempt(profile_id, "equivalent_fractions", correct=True, used_hint=False)
+        assert manager.get_mastery(profile_id, "equivalent_fractions") == {
+            "attempts": 1, "correct_attempts": 1, "hints_used": 0,
+        }
+
+    def test_record_attempt_accumulates_across_multiple_calls(self, manager):
+        profile_id, _ = manager.find_or_create_profile("Brian")
+        manager.record_attempt(profile_id, "equivalent_fractions", correct=False, used_hint=False)
+        manager.record_attempt(profile_id, "equivalent_fractions", correct=False, used_hint=True)
+        manager.record_attempt(profile_id, "equivalent_fractions", correct=True, used_hint=False)
+
+        assert manager.get_mastery(profile_id, "equivalent_fractions") == {
+            "attempts": 3, "correct_attempts": 1, "hints_used": 1,
+        }
+
+    def test_different_concepts_are_tracked_independently(self, manager):
+        profile_id, _ = manager.find_or_create_profile("Brian")
+        manager.record_attempt(profile_id, "equivalent_fractions", correct=True, used_hint=False)
+        manager.record_attempt(profile_id, "area_rectangle", correct=False, used_hint=True)
+
+        assert manager.get_mastery(profile_id, "equivalent_fractions") == {
+            "attempts": 1, "correct_attempts": 1, "hints_used": 0,
+        }
+        assert manager.get_mastery(profile_id, "area_rectangle") == {
+            "attempts": 1, "correct_attempts": 0, "hints_used": 1,
+        }
+
+    def test_different_profiles_are_tracked_independently(self, manager):
+        brian_id, _ = manager.find_or_create_profile("Brian")
+        maya_id, _ = manager.find_or_create_profile("Maya")
+
+        manager.record_attempt(brian_id, "equivalent_fractions", correct=True, used_hint=False)
+
+        assert manager.get_mastery(brian_id, "equivalent_fractions")["attempts"] == 1
+        assert manager.get_mastery(maya_id, "equivalent_fractions")["attempts"] == 0
+
+
 class TestSchemaMigration:
     def test_migrating_a_pre_grade_column_database_does_not_lose_data(self, db_path):
         """
