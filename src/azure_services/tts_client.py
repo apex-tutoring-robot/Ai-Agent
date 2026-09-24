@@ -6,6 +6,7 @@ Converts text to speech with sentence-based streaming for minimal latency.
 import os
 import logging
 import re
+import xml.sax.saxutils as saxutils
 from typing import Iterator, Optional
 import azure.cognitiveservices.speech as speechsdk
 from dotenv import load_dotenv
@@ -50,17 +51,14 @@ class TextToSpeechClient:
         )
         logger.info(f"TTS client configured for region: {self.speech_region}")
         self.speech_config.speech_synthesis_voice_name = self.voice
-        
-        # Set speech rate if not default
-        if self.speech_rate != 1.0:
-            rate_percent = int((self.speech_rate - 1.0) * 100)
-            self.speech_config.set_speech_synthesis_output_format(
-                speechsdk.SpeechSynthesisOutputFormat.Raw16Khz16BitMonoPcm
-            )
-        else:
-            self.speech_config.set_speech_synthesis_output_format(
-                speechsdk.SpeechSynthesisOutputFormat.Raw16Khz16BitMonoPcm
-            )
+        self.speech_config.set_speech_synthesis_output_format(
+            speechsdk.SpeechSynthesisOutputFormat.Raw16Khz16BitMonoPcm
+        )
+        # speech_rate itself is applied per-call via SSML <prosody> in
+        # synthesize_to_audio() - speak_text()/speak_text_async() only
+        # accept plain text, there's no rate parameter on those calls.
+        # (Previously this computed rate_percent here and never used it -
+        # TTS_SPEECH_RATE silently had zero effect on anything.)
         
         logger.info(f"TTS client initialized with voice: {self.voice}")
         
@@ -105,21 +103,42 @@ class TextToSpeechClient:
         except Exception as e:
             logger.warning(f"TTS warm-up failed (non-critical): {e}")
     
+    def _build_rate_ssml(self, text: str) -> str:
+        """
+        Wrap text in SSML with a <prosody rate="..."> adjustment.
+        speak_text()/speak_text_async() only accept plain text - there's no
+        rate parameter on those calls, so honoring TTS_SPEECH_RATE requires
+        the SSML synthesis path instead. text is XML-escaped since it's
+        LLM-generated and may contain '&', '<', '>', etc.
+        """
+        rate_percent = int(round((self.speech_rate - 1.0) * 100))
+        sign = "+" if rate_percent >= 0 else ""
+        escaped = saxutils.escape(text)
+        return (
+            '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">'
+            f'<voice name="{self.voice}">'
+            f'<prosody rate="{sign}{rate_percent}%">{escaped}</prosody>'
+            '</voice></speak>'
+        )
+
     def synthesize_to_audio(self, text: str) -> bytes:
         """
         Synthesize text to audio (non-streaming).
-        
+
         Args:
             text: Text to synthesize
-        
+
         Returns:
             Raw audio bytes (PCM 16-bit, 16kHz, mono)
         """
         try:
             # Reuse persistent synthesizer instance (no initialization overhead)
             logger.info(f"Synthesizing: {text[:50]}...")
-            result = self.synthesizer.speak_text(text)
-            
+            if self.speech_rate != 1.0:
+                result = self.synthesizer.speak_ssml(self._build_rate_ssml(text))
+            else:
+                result = self.synthesizer.speak_text(text)
+
             if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
                 logger.info("Speech synthesis completed")
                 return result.audio_data
