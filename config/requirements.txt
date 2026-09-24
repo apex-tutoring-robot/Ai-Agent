@@ -30,7 +30,7 @@
 # ==============================================================================
 
 # Azure AI Services
-azure-cognitiveservices-speech==1.40.0
+azure-cognitiveservices-speech==1.51.2
 openai>=1.12.0
 
 # NeMo Guardrails for topic control
@@ -41,14 +41,18 @@ langchain-openai>=0.1.0
 langchain-core>=0.1.0
 
 # Wake Word Detection (open-source, no API key required)
-# openwakeword>=0.6.0
-# Note: For Speex noise suppression on Raspberry Pi, install the wheel after :
+# For Speex noise suppression on Raspberry Pi, install the wheel after:
 #  https://github.com/dscripka/openWakeWord/releases/download/v0.1.1/speexdsp_ns-0.1.2-cp313-cp313-linux_aarch64.whl
+openwakeword
 
 # Audio Processing
 # IMPORTANT: Requires portaudio19-dev and libasound2-dev to be installed via apt-get (see top of file)
 pyaudio==0.2.14
 webrtcvad-wheels>=2.0.11  # Drop-in replacement for webrtcvad, Python 3.13 compatible
+sounddevice==0.4.6
+
+# Noise Cancellation (Requires libspeexdsp-dev)
+speexdsp
 
 # Configuration & Utilities
 python-dotenv==1.0.1
@@ -58,10 +62,6 @@ aiofiles==24.1.0
 
 # Testing (dev only) - run with `pytest` from the repo root, see pytest.ini
 pytest>=7.0.0
-
-# Noise Cancellation (Requires libspeexdsp-dev)
-# speexdsp
-# openai
 
 # Camera (Arducam 5MP / OV5647, CSI ribbon cable) - avatar photo capture
 # IMPORTANT: install via apt, NOT pip - picamera2 depends on system libcamera
@@ -75,15 +75,11 @@ pytest>=7.0.0
 # architecture, whereas `pip install PyQt5` often has to compile from source
 # there and can be very slow/fail. Works fine via pip on Windows dev machines.
 PyQt5==5.15.11
- build
- cython
- pyaudio
- numpy==1.26.4  
- sounddevice==0.4.6  
- opencv-python-headless==4.8.1.78  # headless, NOT opencv-python - the GUI variant bundles its own Qt and segfaults when PyQt5 (Teaching Canvas) is also loaded
-#  azure-cognitiveservices-speech==1.48.1
- httpx==0.27.0
-#  python-dotenv==1.0.1
- typing-extensions==4.15.0
- openwakeword
- speexdsp
+build
+cython
+# 1.26.4 (the previous pin here) predates Python 3.13 entirely - no wheel
+# for it exists on any platform, not just this Windows dev machine.
+numpy>=2.0
+opencv-python-headless==4.8.1.78  # headless, NOT opencv-python - the GUI variant bundles its own Qt and segfaults when PyQt5 (Teaching Canvas) is also loaded
+httpx==0.27.0
+typing-extensions==4.15.0

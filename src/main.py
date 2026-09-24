@@ -225,8 +225,19 @@ class JarvisBot:
             
             # 2. Settle period
             time.sleep(1.0)
-            
+
             # 3. Re-initialize everything to Ensure consistency
+            # Release the old PyAudio/PortAudio host handle before replacing
+            # it - every other shutdown path in this codebase (AudioPlayer.
+            # shutdown(), WakeWordDetector's cleanup, JarvisBot.stop()) does
+            # this; skipping it here leaked the old handle on every ALSA
+            # crash-recovery cycle, which matters on a device meant to run
+            # continuously.
+            if hasattr(self, 'pa') and self.pa:
+                try:
+                    self.pa.terminate()
+                except Exception:
+                    pass
             self.pa = pyaudio.PyAudio()
             
             # Re-init components with shared callbacks
@@ -318,7 +329,21 @@ class JarvisBot:
             return
 
         logger.warning(f"🚨 Guardrails BLOCKED output after it started playing: '{full_response[:80]}'")
-        self.audio_player.stop_streaming(immediate=True)
+        # request_immediate_stop() (not stop_streaming(), which this thread
+        # doesn't own) only touches primitives that are already safe to use
+        # cross-thread - see its docstring in playback.py for why calling
+        # the full stop_streaming(immediate=True) here raced with the
+        # speaker thread's own in-flight stop_streaming(immediate=False)
+        # call and could reach PortAudio's stream.stop_stream() from two
+        # threads at once.
+        self.audio_player.request_immediate_stop()
+        # Brief margin before opening a new stream for the refusal:
+        # start_streaming() closes any stale stream under its own
+        # "no worker thread is running yet" assumption - this gives the
+        # speaker thread's own stop_streaming() call time to notice the
+        # abort (one ~20ms callback cycle) and finish that cleanup itself
+        # first, so this thread isn't racing it to touch the same stream.
+        time.sleep(0.2)
         self._speak_fixed_phrase(refusal_text, continuous_vad, output_device_index)
 
     def _try_handle_profile_command(self, user_text: str, continuous_vad, output_device_index: int) -> bool:
@@ -597,6 +622,23 @@ class JarvisBot:
                         break
 
             if not self._interruption_event.is_set():
+                # Same output-safety net as the normal conversational path
+                # (see _speaker_loop) - teaching-turn speech is still
+                # LLM-generated text and was previously not checked at all,
+                # a real gap since any math question routes here via
+                # is_math_query(). Launched before the blocking wait below
+                # for the same reason: doesn't delay time-to-first-audio.
+                if self.guardrails_manager.is_enabled:
+                    full_response_so_far = " ".join(response_parts)
+                    if full_response_so_far:
+                        turn_token = object()
+                        self._active_turn_token = turn_token
+                        threading.Thread(
+                            target=self._run_output_safety_check,
+                            args=(full_response_so_far, turn_token, continuous_vad, output_device_index),
+                            daemon=True,
+                        ).start()
+
                 self.audio_player.stop_streaming(immediate=False)
                 full_response = " ".join(response_parts)
                 if full_response:

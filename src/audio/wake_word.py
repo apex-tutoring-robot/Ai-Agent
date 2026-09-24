@@ -269,15 +269,25 @@ class WakeWordDetector:
             self.audio_stream = None
         
         if self.pa:
-            try:
-                if self._owns_pa:
+            if self._owns_pa:
+                try:
                     self.pa.terminate()
                     logger.info("PyAudio terminated (owned by WakeWordDetector)")
-                else:
-                    logger.info("♻️  Keeping shared PyAudio instance alive")
-            except:
-                pass
-            self.pa = None
+                except:
+                    pass
+                self.pa = None
+            else:
+                # Don't null out a shared instance - this same
+                # WakeWordDetector gets stop()/start() cycled repeatedly
+                # across the app's lifetime (see JarvisBot._restart_wake_word,
+                # which reuses this same object rather than recreating it).
+                # Nulling self.pa here made start()'s "not self.pa" check
+                # create a brand-new PyAudio instance on every cycle after
+                # the first - each one silently diverging from the
+                # instance actually shared with AudioPlayer/
+                # ContinuousVADCapture, real resource churn on every single
+                # wake-word cycle, confirmed via code trace.
+                logger.info("♻️  Keeping shared PyAudio instance alive")
         
         if self.model:
             # openWakeWord doesn't have explicit cleanup, but we can release the reference
