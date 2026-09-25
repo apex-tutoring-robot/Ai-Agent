@@ -37,6 +37,10 @@ from identity.identity_resolver import IdentityResolver
 from identity.name_identity_provider import NameIdentityProvider
 from tutor.decision_engine import TutorAction, TutorDecisionEngine
 from tutor.review_scheduler import ReviewScheduler
+from tutor.question_engine import ProactiveQuestionEngine
+from curriculum.graph import CurriculumGraph
+from affect.interaction_signals import InteractionSignalEngine
+from expression.controller import ExpressionController
 
 from visuals.ui.ui_signals import UISignals
 from visuals.ui.main_window import MainWindow
@@ -184,6 +188,19 @@ class JarvisBot:
         # Picks and freshens a retrieval-practice question - see tutor/review_scheduler.py.
         self.review_scheduler = ReviewScheduler(self.profile_manager, self.llm_client)
 
+        # Concept prerequisite graph (starter scaffold, see curriculum/graph.py)
+        # and the proactive suggestion engine built on top of it - lets
+        # Jarvis offer something to work on instead of only ever reacting
+        # to a question the student thought to ask.
+        self.curriculum_graph = CurriculumGraph()
+        self.proactive_question_engine = ProactiveQuestionEngine(self.profile_manager, self.curriculum_graph)
+
+        # Text-heuristic signals (hesitation, repeated struggle) and the
+        # voice-delivery mapping built on top of them - see
+        # affect/interaction_signals.py and expression/controller.py.
+        self.interaction_signal_engine = InteractionSignalEngine()
+        self.expression_controller = ExpressionController()
+
         self._avatars_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "data", "avatars"
         )
@@ -319,11 +336,16 @@ class JarvisBot:
         overlap = words_a & words_b
         return len(overlap) / min(len(words_a), len(words_b))
 
-    def _speak_fixed_phrase(self, phrase: str, continuous_vad, output_device_index: int) -> None:
+    def _speak_fixed_phrase(self, phrase: str, continuous_vad, output_device_index: int, delivery=None) -> None:
         """
         Speak a fixed, non-LLM-generated phrase (profile switch/creation
         confirmations). Same TTS/playback/echo-guard pattern as a normal
         turn in _speaker_loop, just with fixed text.
+
+        delivery: optional expression.controller.DeliveryStyle - a
+        per-utterance rate/pitch nudge (see ExpressionController), passed
+        straight through to TextToSpeechClient.synthesize_stream(). None
+        (the default) plays at the normal, unadjusted delivery.
         """
         logger.info(f"🗣️  {phrase}")
         try:
@@ -334,7 +356,7 @@ class JarvisBot:
             self._bot_is_speaking = True
             continuous_vad.set_playback_state(True)
 
-            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase]), delivery=delivery):
                 if self.audio_player._is_playing:
                     self.audio_player.queue_audio(audio_chunk)
                 else:
@@ -457,6 +479,13 @@ class JarvisBot:
     # would add real latency to identity resolution specifically.
     _YES_PATTERN = re.compile(r"\b(yes|yeah|yep|yup|correct|that'?s me|right|sure|uh[\s-]?huh)\b", re.IGNORECASE)
     _NO_PATTERN = re.compile(r"\b(no|nope|nah|not me|wrong|incorrect)\b", re.IGNORECASE)
+
+    # Matches a discovery-step reply that already states a specific
+    # request, as opposed to open-ended small talk - see
+    # _handle_warmup_step's discovery branch.
+    _EXPLICIT_INTENT_PATTERN = re.compile(
+        r"\b(help|learn|teach|practice|work on|curious about|homework|question)\b", re.IGNORECASE
+    )
 
     def _classify_yes_no(self, text: str) -> Optional[bool]:
         """
@@ -816,12 +845,30 @@ class JarvisBot:
             return
 
         # step == "discovery" - interlude is done. Mark it so nothing
-        # later this conversation re-triggers it, then hand this reply to
-        # the normal dispatch chain unconsumed (see docstring above).
+        # later this conversation re-triggers it.
         self._pending_warmup_checkin = None
         if self.current_session:
             self.current_session.warmup_done = True
-        self._request_queue.put(user_text)
+
+        # A reply that already looks like a specific request ("help me
+        # with fractions", or a math question outright) goes to the
+        # normal dispatch chain unconsumed (see docstring above) rather
+        # than being treated as throwaway small talk. Only a genuinely
+        # open-ended reply ("not really", "I don't know") triggers a
+        # proactive suggestion - see tutor/question_engine.py - instead of
+        # falling through to a generic chat response with nothing to go on.
+        if self.is_math_query(user_text) or self._EXPLICIT_INTENT_PATTERN.search(user_text):
+            self._request_queue.put(user_text)
+            return
+
+        profile_id = self.profile_manager.get_active_profile_id()
+        suggestion = self.proactive_question_engine.suggest(profile_id) if profile_id else None
+        if suggestion:
+            self._speak_fixed_phrase(suggestion["prompt"], continuous_vad, output_device_index)
+            self.conversation_manager.add_assistant_message(suggestion["prompt"])
+            continuous_vad.reset_idle_timer()
+        else:
+            self._request_queue.put(user_text)
 
     def _run_teaching_turn(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
@@ -1061,7 +1108,10 @@ class JarvisBot:
                 logger.warning(f"🚨 Fast content filter blocked an answer-evaluation response: '{response_text[:80]}'")
                 response_text = fast_refusal
 
-            self._speak_fixed_phrase(response_text, continuous_vad, output_device_index)
+            signals = self.interaction_signal_engine.analyze(user_text, attempts_so_far)
+            delivery = self.expression_controller.for_action(decision.action, repeated_struggle=signals.repeated_struggle)
+
+            self._speak_fixed_phrase(response_text, continuous_vad, output_device_index, delivery=delivery)
             self.conversation_manager.add_assistant_message(response_text)
             self._last_bot_response = response_text
 

@@ -103,30 +103,42 @@ class TextToSpeechClient:
         except Exception as e:
             logger.warning(f"TTS warm-up failed (non-critical): {e}")
     
-    def _build_rate_ssml(self, text: str) -> str:
+    def _build_rate_ssml(self, text: str, rate_percent: Optional[int] = None, pitch_percent: Optional[int] = None) -> str:
         """
-        Wrap text in SSML with a <prosody rate="..."> adjustment.
+        Wrap text in SSML with <prosody rate="..." pitch="..."> adjustments.
         speak_text()/speak_text_async() only accept plain text - there's no
-        rate parameter on those calls, so honoring TTS_SPEECH_RATE requires
-        the SSML synthesis path instead. text is XML-escaped since it's
-        LLM-generated and may contain '&', '<', '>', etc.
+        rate/pitch parameter on those calls, so honoring TTS_SPEECH_RATE (or
+        a per-utterance ExpressionController DeliveryStyle - see
+        expression/controller.py) requires the SSML synthesis path instead.
+        text is XML-escaped since it's LLM-generated and may contain '&',
+        '<', '>', etc.
+
+        rate_percent/pitch_percent, when given, override the instance's
+        global self.speech_rate for this one call - see synthesize_to_audio's
+        `delivery` parameter.
         """
-        rate_percent = int(round((self.speech_rate - 1.0) * 100))
-        sign = "+" if rate_percent >= 0 else ""
+        if rate_percent is None:
+            rate_percent = int(round((self.speech_rate - 1.0) * 100))
+        rate_sign = "+" if rate_percent >= 0 else ""
+        pitch_percent = pitch_percent or 0
+        pitch_sign = "+" if pitch_percent >= 0 else ""
         escaped = saxutils.escape(text)
         return (
             '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">'
             f'<voice name="{self.voice}">'
-            f'<prosody rate="{sign}{rate_percent}%">{escaped}</prosody>'
+            f'<prosody rate="{rate_sign}{rate_percent}%" pitch="{pitch_sign}{pitch_percent}%">{escaped}</prosody>'
             '</voice></speak>'
         )
 
-    def synthesize_to_audio(self, text: str) -> bytes:
+    def synthesize_to_audio(self, text: str, delivery: Optional["DeliveryStyle"] = None) -> bytes:
         """
         Synthesize text to audio (non-streaming).
 
         Args:
             text: Text to synthesize
+            delivery: Optional per-utterance ExpressionController DeliveryStyle
+                (rate/pitch nudge) - overrides the instance's global
+                speech_rate for this call only. See expression/controller.py.
 
         Returns:
             Raw audio bytes (PCM 16-bit, 16kHz, mono)
@@ -134,7 +146,11 @@ class TextToSpeechClient:
         try:
             # Reuse persistent synthesizer instance (no initialization overhead)
             logger.info(f"Synthesizing: {text[:50]}...")
-            if self.speech_rate != 1.0:
+            if delivery is not None:
+                result = self.synthesizer.speak_ssml(
+                    self._build_rate_ssml(text, rate_percent=delivery.rate_percent, pitch_percent=delivery.pitch_percent)
+                )
+            elif self.speech_rate != 1.0:
                 result = self.synthesizer.speak_ssml(self._build_rate_ssml(text))
             else:
                 result = self.synthesizer.speak_text(text)
@@ -155,14 +171,17 @@ class TextToSpeechClient:
             logger.error(f"Error in speech synthesis: {e}")
             raise
 
-    def synthesize_stream(self, text_stream: Iterator[str]) -> Iterator[bytes]:
+    def synthesize_stream(self, text_stream: Iterator[str], delivery: Optional["DeliveryStyle"] = None) -> Iterator[bytes]:
         """
         Synthesize streaming text to audio chunks.
         Buffers text until sentence boundaries are detected for natural speech.
-        
+
         Args:
             text_stream: Iterator yielding text chunks
-        
+            delivery: Optional per-utterance ExpressionController DeliveryStyle,
+                forwarded to every synthesize_to_audio() call below - see that
+                method's docstring.
+
         Yields:
             Audio data chunks
         """
@@ -186,14 +205,14 @@ class TextToSpeechClient:
                     
                     if complete_text:
                         # Synthesize the complete sentence(s)
-                        audio_data = self.synthesize_to_audio(complete_text)
+                        audio_data = self.synthesize_to_audio(complete_text, delivery=delivery)
                         if audio_data:
                             yield audio_data
             
             # Synthesize any remaining text
             if sentence_buffer.strip():
                 logger.info(f"📝 Synthesizing remaining text buffer ({len(sentence_buffer)} chars): '{sentence_buffer.strip()[:100]}...'")
-                audio_data = self.synthesize_to_audio(sentence_buffer.strip())
+                audio_data = self.synthesize_to_audio(sentence_buffer.strip(), delivery=delivery)
                 if audio_data:
                     logger.info(f"✓ Final buffer synthesized: {len(audio_data)} bytes")
                     yield audio_data
