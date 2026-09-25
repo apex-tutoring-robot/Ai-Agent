@@ -68,6 +68,19 @@ class TestProfileCreationAndMatching:
         manager.find_or_create_profile("Ryan Lewis")
         assert manager.find_profile_by_name("Completely Different Person") is None
 
+    def test_first_name_alone_matches_a_longer_stored_name(self, manager):
+        """
+        Regression test for a real bug found via an automated end-to-end
+        run: "Brian" scored only ~0.59 against stored "Brian Leiss." under
+        plain whole-string SequenceMatcher.ratio() - below the 0.75
+        threshold - which meant answering the identity check-in's "what's
+        your name?" with just a first name created a silent duplicate
+        profile instead of recognizing the same person.
+        """
+        profile_id, _ = manager.find_or_create_profile("Brian Leiss.")
+        matched_id = manager.find_profile_by_name("Brian")
+        assert matched_id == profile_id
+
 
 class TestSwitching:
     def test_switch_to_updates_active_profile(self, manager):

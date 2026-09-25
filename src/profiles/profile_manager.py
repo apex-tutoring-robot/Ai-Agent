@@ -210,7 +210,20 @@ class ProfileManager:
         return profile_id
 
     def find_profile_by_name(self, spoken_name: str) -> Optional[int]:
-        """Fuzzy-match a spoken name against existing profile names."""
+        """
+        Fuzzy-match a spoken name against existing profile names.
+
+        Also checks the spoken name against just the FIRST WORD of each
+        stored name, not only the whole string - found live (via an
+        automated end-to-end test): a stored name like "Brian Leiss."
+        (STT sometimes captures a surname/trailing word during
+        onboarding) scores only ~0.59 against a bare "Brian" under plain
+        SequenceMatcher.ratio(), well under the 0.75 threshold, even
+        though a kid asked "what's your name?" will almost always answer
+        with just a first name. Without this, that mismatch silently
+        creates a duplicate profile instead of recognizing the same
+        person - confirmed reproducible with this exact name pair.
+        """
         normalized = spoken_name.strip().lower()
         if not normalized:
             return None
@@ -220,7 +233,12 @@ class ProfileManager:
 
         best_id, best_ratio = None, 0.0
         for row in rows:
-            ratio = SequenceMatcher(None, normalized, row["name"].strip().lower()).ratio()
+            stored = row["name"].strip().lower()
+            first_word = stored.split()[0] if stored.split() else stored
+            ratio = max(
+                SequenceMatcher(None, normalized, stored).ratio(),
+                SequenceMatcher(None, normalized, first_word).ratio(),
+            )
             if ratio > best_ratio:
                 best_id, best_ratio = row["id"], ratio
 
