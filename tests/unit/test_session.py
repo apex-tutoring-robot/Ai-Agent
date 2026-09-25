@@ -14,6 +14,8 @@ class TestSessionDefaults:
         assert s.turn_count == 0
         assert s.tool_calls == []
         assert s.active_task is None
+        assert s.retrieval_practice_offered is False
+        assert s.warmup_done is False
 
 
 class TestNewTurn:

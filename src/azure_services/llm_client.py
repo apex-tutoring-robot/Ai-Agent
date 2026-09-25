@@ -72,6 +72,25 @@ class LLMClient:
 
         logger.info("Azure OpenAI client initialized")
     
+    @staticmethod
+    def _with_student_context(base_prompt: str, student_context: Optional[str]) -> str:
+        """
+        Appends a short per-student blurb (interests, learning challenges -
+        see ProfileManager.get_interests/get_learning_challenges) onto a
+        system prompt, so word-problem examples can be framed around
+        things this specific student actually cares about instead of
+        generic apples-and-buses. A no-op when there's nothing on file yet
+        (e.g. this profile hasn't finished onboarding).
+        """
+        if not student_context:
+            return base_prompt
+        return (
+            f"{base_prompt}\n\n"
+            "STUDENT CONTEXT (use this to make examples feel relevant to THIS "
+            "student when it fits naturally - don't force it into every "
+            f"response):\n{student_context}"
+        )
+
     def _load_system_prompt(self) -> str:
         """Load system prompt from file."""
         try:
@@ -141,7 +160,8 @@ class LLMClient:
         tools: List[Dict],
         tool_executor: Callable[[str, dict], str],
         temperature: float = 0.7,
-        max_tokens: int = 500
+        max_tokens: int = 500,
+        student_context: Optional[str] = None,
     ) -> Iterator[str]:
         """
         Real agentic tool-use loop (Decision -> Tool Call -> Observe ->
@@ -163,7 +183,8 @@ class LLMClient:
         this stays a generic Azure OpenAI wrapper - Jarvis-specific tool
         definitions and execution live in main.py.
         """
-        full_messages = [{"role": "system", "content": self.system_prompt}] + messages
+        system_content = self._with_student_context(self.system_prompt, student_context)
+        full_messages = [{"role": "system", "content": system_content}] + messages
 
         try:
             response = self.client.chat.completions.create(
@@ -244,7 +265,8 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.2,
-        max_tokens: int = 800
+        max_tokens: int = 800,
+        student_context: Optional[str] = None,
     ) -> Dict:
         """
         Generate a structured teaching plan (speech steps + synchronized
@@ -262,10 +284,7 @@ class LLMClient:
             # live: combining them makes the model follow the conversational
             # persona and ignore the JSON requirement entirely, returning
             # plain chat text instead of a parseable plan.
-            full_messages = [
-                {
-                    "role": "system",
-                    "content": """
+            plan_system_prompt = """
     You are an AI math tutor.
 
     Return ONLY valid JSON.
@@ -413,7 +432,8 @@ class LLMClient:
     - space equation rows at least 55 pixels apart
     - never place text labels on top of other text
     """
-                }
+            full_messages = [
+                {"role": "system", "content": self._with_student_context(plan_system_prompt, student_context)}
             ] + messages
 
             response = self.client.chat.completions.create(
@@ -551,6 +571,52 @@ Rules for "response":
                 "recommended_action": "hint",
                 "response": "Let's think about that one a bit more - want to try again?",
             }
+
+    def generate_review_question(
+        self,
+        concept: str,
+        previous_question: str,
+        temperature: float = 0.5,
+        max_tokens: int = 80,
+    ) -> str:
+        """
+        A fresh comprehension-check question for retrieval practice (see
+        ProfileManager.get_weak_concept_for_review / tutor/review_scheduler.py),
+        instead of literally replaying the stored last_question. Reusing
+        the exact same question tests whether the student memorized THAT
+        question's answer, not whether they still understand the concept -
+        this is a real one-call cost paid specifically to make retrieval
+        practice measure the right thing. Falls back to the original
+        stored question on any failure, so a review still happens even if
+        this call breaks.
+        """
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": f"""
+You write short spoken comprehension-check questions for a K-8 math tutor robot.
+
+Concept: {concept}
+A question this student was previously asked on this exact concept: "{previous_question}"
+
+Write ONE new question testing the SAME concept, with different specific
+numbers/values than the example above - the point is checking whether the
+student still understands the concept, not whether they remember that
+exact question. Keep it short and natural, spoken out loud - no
+formatting, no markdown, no explanation. Return ONLY the question text
+itself.
+""",
+                }
+            ]
+            response = self.client.chat.completions.create(
+                model=self.deployment, messages=messages, temperature=temperature, max_tokens=max_tokens,
+            )
+            text = (response.choices[0].message.content or "").strip().strip('"')
+            return text or previous_question
+        except Exception as e:
+            logger.error(f"Error generating review question ({type(e).__name__}: {e}) - reusing stored question")
+            return previous_question
 
     def generate_session_wrapup(
         self,
