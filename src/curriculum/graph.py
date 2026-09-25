@@ -24,12 +24,22 @@ class ConceptNode:
 
 
 _CONCEPTS: Dict[str, ConceptNode] = {
-    "perimeter_rectangle": ConceptNode("perimeter_rectangle", grade="3"),
+    # K-2: was entirely missing before this pass - a real content gap,
+    # not just thin coverage. Still only a starter scaffold (see module
+    # docstring), but every grade band now has at least a foothold.
+    "counting_to_20": ConceptNode("counting_to_20", grade="K"),
+    "addition_within_20": ConceptNode("addition_within_20", grade="1", prerequisites=["counting_to_20"]),
+    "place_value_tens_ones": ConceptNode("place_value_tens_ones", grade="2", prerequisites=["addition_within_20"]),
+    "perimeter_rectangle": ConceptNode("perimeter_rectangle", grade="3", prerequisites=["place_value_tens_ones"]),
     "area_rectangle": ConceptNode("area_rectangle", grade="3", prerequisites=["perimeter_rectangle"]),
     "area_triangle": ConceptNode("area_triangle", grade="4", prerequisites=["area_rectangle"]),
     "area_circle": ConceptNode("area_circle", grade="5", prerequisites=["area_rectangle"]),
     "equivalent_fractions": ConceptNode("equivalent_fractions", grade="4"),
     "fraction_addition": ConceptNode("fraction_addition", grade="5", prerequisites=["equivalent_fractions"]),
+    "ratios_and_proportions": ConceptNode("ratios_and_proportions", grade="6", prerequisites=["fraction_addition"]),
+    "solving_two_step_equations": ConceptNode(
+        "solving_two_step_equations", grade="7", prerequisites=["ratios_and_proportions"]
+    ),
     "pythagorean_theorem": ConceptNode("pythagorean_theorem", grade="8", prerequisites=["area_triangle"]),
 }
 

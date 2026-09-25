@@ -15,7 +15,7 @@ class TestPrerequisites:
 
     def test_concept_with_no_prerequisites_returns_empty_list(self):
         graph = CurriculumGraph()
-        assert graph.get_prerequisites("perimeter_rectangle") == []
+        assert graph.get_prerequisites("counting_to_20") == []
 
     def test_unknown_concept_returns_empty_list(self):
         graph = CurriculumGraph()
@@ -44,7 +44,8 @@ class TestSuggestNext:
 
     def test_does_not_suggest_an_already_mastered_concept(self):
         graph = CurriculumGraph()
-        mastered = {"perimeter_rectangle", "area_rectangle", "area_triangle", "area_circle",
+        mastered = {"counting_to_20", "addition_within_20", "place_value_tens_ones",
+                    "perimeter_rectangle", "area_rectangle", "area_triangle", "area_circle",
                     "equivalent_fractions", "fraction_addition"}
         suggestion = graph.suggest_next(grade=None, mastered=mastered)
         assert suggestion not in mastered
@@ -56,12 +57,16 @@ class TestSuggestNext:
 
     def test_returns_none_when_everything_is_mastered(self):
         graph = CurriculumGraph()
-        all_concepts = {"perimeter_rectangle", "area_rectangle", "area_triangle", "area_circle",
-                         "equivalent_fractions", "fraction_addition", "pythagorean_theorem"}
+        all_concepts = {
+            "counting_to_20", "addition_within_20", "place_value_tens_ones",
+            "perimeter_rectangle", "area_rectangle", "area_triangle", "area_circle",
+            "equivalent_fractions", "fraction_addition", "ratios_and_proportions",
+            "solving_two_step_equations", "pythagorean_theorem",
+        }
         assert graph.suggest_next(grade=None, mastered=all_concepts) is None
 
     def test_prefers_a_concept_at_or_below_the_students_grade(self):
         graph = CurriculumGraph()
         suggestion = graph.suggest_next(grade="3", mastered=set())
         node = graph.get_node(suggestion)
-        assert node.grade <= "3"
+        assert node.grade == "K" or node.grade <= "3"

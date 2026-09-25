@@ -414,6 +414,27 @@ class ProfileManager:
             return {"attempts": 0, "correct_attempts": 0, "hints_used": 0}
         return {"attempts": row["attempts"], "correct_attempts": row["correct_attempts"], "hints_used": row["hints_used"]}
 
+    def get_mastered_concepts(self, profile_id: int, min_attempts: int = 2, min_accuracy: float = 0.7) -> "set[str]":
+        """
+        Concepts this student has practiced enough times with high enough
+        accuracy to be considered mastered - used by CurriculumGraph.
+        suggest_next() (see tutor/question_engine.py's ProactiveQuestionEngine)
+        so it doesn't keep suggesting a concept the student already has a
+        handle on. Deliberately simple fixed thresholds, not a real
+        StudentModel's mastery_estimate (not built - see the architecture
+        review) - good enough to avoid the obviously wrong case of
+        re-suggesting an already-mastered concept.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT concept, attempts, correct_attempts FROM concept_mastery WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchall()
+        return {
+            r["concept"] for r in rows
+            if r["attempts"] >= min_attempts and (r["correct_attempts"] / r["attempts"]) >= min_accuracy
+        }
+
     def get_weak_concept_for_review(self, profile_id: int, exclude: "set[str]" = frozenset()) -> Optional[dict]:
         """
         The single best retrieval-practice candidate from this student's

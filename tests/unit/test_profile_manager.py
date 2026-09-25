@@ -178,6 +178,42 @@ class TestConceptMastery:
         assert manager.get_mastery(maya_id, "equivalent_fractions")["attempts"] == 0
 
 
+class TestGetMasteredConcepts:
+    """Feeds CurriculumGraph.suggest_next() via ProactiveQuestionEngine -
+    see tutor/question_engine.py. Deliberately simple fixed thresholds,
+    not a real mastery_estimate."""
+
+    def test_empty_for_a_student_with_no_history(self, manager):
+        profile_id, _ = manager.find_or_create_profile("Brian")
+        assert manager.get_mastered_concepts(profile_id) == set()
+
+    def test_includes_a_concept_meeting_both_thresholds(self, manager):
+        profile_id, _ = manager.find_or_create_profile("Brian")
+        manager.record_attempt(profile_id, "area_rectangle", correct=True)
+        manager.record_attempt(profile_id, "area_rectangle", correct=True)
+        assert manager.get_mastered_concepts(profile_id) == {"area_rectangle"}
+
+    def test_excludes_a_concept_below_the_attempt_count_threshold(self, manager):
+        profile_id, _ = manager.find_or_create_profile("Brian")
+        manager.record_attempt(profile_id, "area_rectangle", correct=True)  # only 1 attempt
+        assert manager.get_mastered_concepts(profile_id) == set()
+
+    def test_excludes_a_concept_below_the_accuracy_threshold(self, manager):
+        profile_id, _ = manager.find_or_create_profile("Brian")
+        manager.record_attempt(profile_id, "area_rectangle", correct=True)
+        manager.record_attempt(profile_id, "area_rectangle", correct=False)
+        manager.record_attempt(profile_id, "area_rectangle", correct=False)
+        assert manager.get_mastered_concepts(profile_id) == set()
+
+    def test_tracks_multiple_mastered_concepts(self, manager):
+        profile_id, _ = manager.find_or_create_profile("Brian")
+        manager.record_attempt(profile_id, "area_rectangle", correct=True)
+        manager.record_attempt(profile_id, "area_rectangle", correct=True)
+        manager.record_attempt(profile_id, "equivalent_fractions", correct=True)
+        manager.record_attempt(profile_id, "equivalent_fractions", correct=True)
+        assert manager.get_mastered_concepts(profile_id) == {"area_rectangle", "equivalent_fractions"}
+
+
 class TestGetWeakConceptForReview:
     """Retrieval-practice candidate selection - see
     JarvisBot._handle_teaching_answer's retrieval-practice trigger."""

@@ -62,6 +62,9 @@ class FaceAnimator:
         self.emotion = "thinking"
         self.is_talking = False
 
+    def start_happy(self):
+        self.emotion = "happy"
+
     def start_talking(self):
         self.is_talking = True
 

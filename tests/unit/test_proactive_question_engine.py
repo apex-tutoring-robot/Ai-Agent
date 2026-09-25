@@ -9,15 +9,19 @@ from tutor.question_engine import ProactiveQuestionEngine
 
 
 class FakeProfileManager:
-    def __init__(self, weak_concept=None, grade=None):
+    def __init__(self, weak_concept=None, grade=None, mastered=None):
         self._weak_concept = weak_concept
         self._grade = grade
+        self._mastered = mastered or set()
 
     def get_weak_concept_for_review(self, profile_id):
         return self._weak_concept
 
     def get_grade(self, profile_id):
         return self._grade
+
+    def get_mastered_concepts(self, profile_id):
+        return self._mastered
 
 
 class TestSuggest:
@@ -45,3 +49,11 @@ class TestSuggest:
 
         engine = ProactiveQuestionEngine(FakeProfileManager(weak_concept=None, grade="8"), ExhaustedGraph())
         assert engine.suggest(profile_id=1) is None
+
+    def test_does_not_suggest_an_already_mastered_concept(self):
+        engine = ProactiveQuestionEngine(
+            FakeProfileManager(weak_concept=None, grade="3", mastered={"perimeter_rectangle"}),
+            CurriculumGraph(),
+        )
+        suggestion = engine.suggest(profile_id=1)
+        assert suggestion["concept"] != "perimeter_rectangle"

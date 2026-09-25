@@ -252,6 +252,13 @@ class JarvisBot:
         # check-in is pending. See _handle_warmup_step.
         self._pending_warmup_checkin: Optional[dict] = None
 
+        # Set right after Jarvis proactively offers a concept to work on
+        # (see _handle_warmup_step's discovery branch / tutor/question_engine.py)
+        # - {"concept"}. The next utterance is a yes/no answer to that
+        # offer, not a fresh turn. None when no offer is pending. See
+        # _handle_proactive_suggestion_reply.
+        self._pending_proactive_suggestion: Optional[dict] = None
+
         # ── Current conversation session (see session.py) ──
         # None outside of an active conversation; a fresh Session is created
         # each time the wake word fires.
@@ -442,6 +449,7 @@ class JarvisBot:
                 self._pending_name_capture = False
                 self._pending_warmup_checkin = None
                 self._pending_identity_checkin = None
+                self._pending_proactive_suggestion = None
                 name = self.profile_manager.get_profile_name(self.profile_manager.get_active_profile_id())
                 self._speak_fixed_phrase(f"Okay, switching back to {name}'s session.", continuous_vad, output_device_index)
                 self._start_warmup_checkin(continuous_vad, output_device_index)
@@ -586,6 +594,7 @@ class JarvisBot:
         self._pending_name_capture = False
         self._pending_warmup_checkin = None
         self._pending_identity_checkin = None
+        self._pending_proactive_suggestion = None
 
         if created:
             self._speak_fixed_phrase(
@@ -690,12 +699,20 @@ class JarvisBot:
 
         interests = self.profile_manager.get_interests(profile_id)
         challenges = self.profile_manager.get_learning_challenges(profile_id)
+        # Recent misconceptions were being captured (see record_learning_event)
+        # but never read back anywhere until now - surfacing them here so
+        # the LLM can actually watch for a misunderstanding recurring
+        # instead of re-discovering it from scratch each time.
+        misconceptions = self.profile_manager.get_recent_misconceptions(profile_id, limit=3)
 
         parts = []
         if interests:
             parts.append(interests.strip())
         if challenges:
             parts.append(f"Finds this hard/frustrating: {challenges}")
+        if misconceptions:
+            summary = "; ".join(f"{m['concept']}: {m['misconception']}" for m in misconceptions)
+            parts.append(f"Past misconceptions to watch for: {summary}")
         return " ".join(parts) if parts else None
 
     # Step size per "louder"/"quieter" call, and the hard ceiling/floor -
@@ -866,7 +883,27 @@ class JarvisBot:
         if suggestion:
             self._speak_fixed_phrase(suggestion["prompt"], continuous_vad, output_device_index)
             self.conversation_manager.add_assistant_message(suggestion["prompt"])
+            self._pending_proactive_suggestion = {"concept": suggestion["concept"]}
             continuous_vad.reset_idle_timer()
+        else:
+            self._request_queue.put(user_text)
+
+    def _handle_proactive_suggestion_reply(self, user_text: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Handles the yes/no reply to a proactive concept suggestion (see
+        _handle_warmup_step's discovery branch). A clear yes turns the
+        offer into an actual teaching turn on that concept - without this,
+        the offer was a dead end: Jarvis would ask "want to work on
+        fractions?" and then do nothing with a "yes" beyond letting it hit
+        generic chat. A no (or anything unclear) just lets the reply flow
+        through normal dispatch instead of forcing the suggestion on them.
+        """
+        pending = self._pending_proactive_suggestion
+        self._pending_proactive_suggestion = None
+
+        if self._YES_PATTERN.search(user_text):
+            concept_readable = pending["concept"].replace("_", " ")
+            self._run_teaching_turn(f"Can you help me with {concept_readable}?", continuous_vad, output_device_index)
         else:
             self._request_queue.put(user_text)
 
@@ -1109,7 +1146,11 @@ class JarvisBot:
                 response_text = fast_refusal
 
             signals = self.interaction_signal_engine.analyze(user_text, attempts_so_far)
-            delivery = self.expression_controller.for_action(decision.action, repeated_struggle=signals.repeated_struggle)
+            delivery = self.expression_controller.for_action(
+                decision.action, repeated_struggle=signals.repeated_struggle, hesitation=signals.hesitation
+            )
+            if self.ui_signals:
+                self.ui_signals.set_expression.emit(delivery.expression.value)
 
             self._speak_fixed_phrase(response_text, continuous_vad, output_device_index, delivery=delivery)
             self.conversation_manager.add_assistant_message(response_text)
@@ -1131,9 +1172,14 @@ class JarvisBot:
             # this exact same pending-check/_handle_teaching_answer
             # machinery, so a wrong answer here still gets a hint/reteach
             # normally. Excludes concepts already covered this session so
-            # it never re-asks about what was just taught.
+            # it never re-asks about what was just taught. Skipped when
+            # the student sounded low-confidence about THIS answer even
+            # though it was right ("um, maybe 20?") - piling a second,
+            # unrelated question onto genuine uncertainty doesn't serve
+            # them; let them consolidate this one first.
             if (
                 decision.is_correct
+                and not signals.low_confidence
                 and profile_id
                 and self.current_session
                 and not self.current_session.retrieval_practice_offered
@@ -1308,6 +1354,13 @@ class JarvisBot:
                     # warm-up check-in - see _start_warmup_checkin/_handle_warmup_step.
                     if self._pending_warmup_checkin is not None:
                         self._handle_warmup_step(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continue
+
+                    # This turn is a yes/no reply to a proactive concept
+                    # suggestion - see _handle_proactive_suggestion_reply.
+                    if self._pending_proactive_suggestion is not None:
+                        self._handle_proactive_suggestion_reply(user_text, continuous_vad, output_device_index)
                         self._speaker_busy.clear()
                         continue
 

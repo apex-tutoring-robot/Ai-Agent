@@ -34,7 +34,8 @@ class ProactiveQuestionEngine:
             }
 
         grade = self._profile_manager.get_grade(profile_id)
-        next_concept = self._curriculum_graph.suggest_next(grade, mastered=set())
+        mastered = self._profile_manager.get_mastered_concepts(profile_id)
+        next_concept = self._curriculum_graph.suggest_next(grade, mastered=mastered)
         if not next_concept:
             return None
         readable = next_concept.replace("_", " ")

@@ -52,17 +52,26 @@ _ACTION_EXPRESSION = {
 
 
 class ExpressionController:
-    def for_action(self, action: TutorAction, repeated_struggle: bool = False) -> DeliveryStyle:
+    def for_action(self, action: TutorAction, repeated_struggle: bool = False, hesitation: bool = False) -> DeliveryStyle:
         """
-        Picks a DeliveryStyle for a tutor action. repeated_struggle (see
-        affect/interaction_signals.py) nudges HINT toward the calmer
-        delivery instead of the default encouraging-but-upbeat one - a
-        student on their second-plus attempt needs more patience, not the
-        same energy as the first hint.
+        Picks a DeliveryStyle for a tutor action.
+
+        repeated_struggle (see affect/interaction_signals.py) nudges HINT
+        toward the calmer delivery instead of the default
+        encouraging-but-upbeat one - a student on their second-plus
+        attempt needs more patience, not the same energy as the first hint.
+
+        hesitation nudges an otherwise upbeat delivery (FRIENDLY/EXCITED -
+        i.e. the student was actually right) toward ENCOURAGING instead: a
+        hedging "um, maybe 20?" that turns out correct still deserves a
+        gentler "yes, see, you knew it!" rather than big excited energy
+        that would feel mismatched with how unsure they sounded.
         """
         expression = _ACTION_EXPRESSION.get(action, Expression.NEUTRAL)
         if repeated_struggle and expression == Expression.ENCOURAGING:
             expression = Expression.CALM
+        elif hesitation and expression in (Expression.FRIENDLY, Expression.EXCITED):
+            expression = Expression.ENCOURAGING
         return _STYLES[expression]
 
     def neutral(self) -> DeliveryStyle:

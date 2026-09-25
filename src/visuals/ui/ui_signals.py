@@ -18,6 +18,13 @@ class UISignals(QObject):
     stop_talking = pyqtSignal()
     mouth_level = pyqtSignal(float)
 
+    # Emitted with an expression.controller.Expression's value ("friendly",
+    # "encouraging", "calm", "excited", "neutral") right before speaking a
+    # comprehension-check response - see JarvisBot._handle_teaching_answer.
+    # Mapped down to FaceWidget's existing 3 emotion images (see
+    # main_window.show_expression), not a 1:1 new asset per expression.
+    set_expression = pyqtSignal(str)
+
     # Teaching canvas
     draw_actions = pyqtSignal(object)   # list[dict] - see teaching_canvas.handle_draw_actions
     clear_canvas = pyqtSignal()

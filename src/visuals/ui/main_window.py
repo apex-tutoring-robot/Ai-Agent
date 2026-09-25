@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
             return
         self.signals.listening.connect(self.show_listening_mode)
         self.signals.thinking.connect(self.show_thinking_mode)
+        self.signals.set_expression.connect(self.show_expression)
         self.signals.start_talking.connect(self.face_widget.start_talking)
         self.signals.stop_talking.connect(self.face_widget.stop_talking)
         self.signals.mouth_level.connect(self.face_widget.push_mouth_level)
@@ -95,6 +96,22 @@ class MainWindow(QMainWindow):
 
     def show_thinking_mode(self):
         self.face_widget.start_thinking()
+
+    def show_expression(self, expression: str):
+        """
+        Maps an expression.controller.Expression value down to
+        FaceWidget's existing 3 emotion images - see ui_signals.py's
+        set_expression. "friendly"/"excited" read as upbeat -> happy;
+        "calm"/"neutral" stay on the plain idle face; "encouraging" uses
+        the thinking face, which reads as attentive/considered rather
+        than flatly neutral, closer to how a hint is actually delivered.
+        """
+        if expression in ("friendly", "excited"):
+            self.face_widget.start_happy()
+        elif expression == "encouraging":
+            self.face_widget.start_thinking()
+        else:
+            self.face_widget.start_idle()
 
     def show_sleep_mode(self):
         self._position_sleep_overlay()
