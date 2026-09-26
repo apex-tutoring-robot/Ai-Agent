@@ -161,50 +161,21 @@ class FaceWidget(QWidget):
         if self.mouth_open < 0.01:
             self.mouth_open = 0.0
 
-    def _blend_mouth_frames(self, mouth_open: float) -> np.ndarray:
-        """
-        Cross-fades between the two nearest talk frames instead of hard-
-        selecting one. mouth_open is already smoothly interpolated every
-        frame (see _update_mouth) - the old code threw that away by
-        truncating it to a single one-of-5 frame index, which is exactly
-        what made mouth movement look like discrete image swaps instead
-        of motion. Needs no new art - just blending what already exists.
-        """
-        position = float(np.clip(mouth_open, 0.0, 1.0)) * (len(self.talk_frames) - 1)
-        low = int(np.floor(position))
-        high = min(low + 1, len(self.talk_frames) - 1)
-        blend = position - low
-        if low == high or blend < 1e-3:
-            return self.talk_frames[low].copy()
-        return cv2.addWeighted(self.talk_frames[low], 1.0 - blend, self.talk_frames[high], blend, 0)
-
-    def _blend_blink(self, frame: np.ndarray, blink: float) -> np.ndarray:
-        """
-        Blends the blinking image into `frame` proportionally to `blink`
-        (already smoothly decaying - see _blink_update) instead of an
-        instant on/off switch at a threshold, so the eyes visibly close
-        and reopen instead of flashing. Blending onto whatever `frame`
-        already is (rather than replacing it outright, as the old code
-        did) also means a blink no longer freezes/resets the mouth
-        mid-word - a real glitch in the previous version.
-        """
-        if blink <= 0.02:
-            return frame
-        blend = float(np.clip(blink, 0.0, 1.0))
-        return cv2.addWeighted(frame, 1.0 - blend, self.faces["blinking"], blend, 0)
-
     def _frame(self):
         self._update_mouth()
 
         talking_now = self.is_talking or (self.mouth_open > 0.02)
 
         if talking_now and self.mouth_open > 0.05:
-            frame = self._blend_mouth_frames(self.mouth_open)
+            idx = int(self.mouth_open * (len(self.talk_frames) - 1))
+            idx = np.clip(idx, 0, len(self.talk_frames) - 1)
+            frame = self.talk_frames[idx].copy()
         else:
             frame = self.faces[self.emotion].copy()
 
         self._blink_update()
-        frame = self._blend_blink(frame, self.blink)
+        if self.blink > 0.7:
+            frame = self.faces["blinking"].copy()
 
         return frame
 
