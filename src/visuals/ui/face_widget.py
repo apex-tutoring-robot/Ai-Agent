@@ -17,7 +17,7 @@ import random
 import numpy as np
 import cv2
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QImage, QPixmap, QRegion
 from PyQt5.QtWidgets import QWidget, QLabel, QVBoxLayout
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,13 @@ class FaceWidget(QWidget):
         # Blink state
         self.blink = 0.0
 
+        # Whether to clip this widget to a circle inscribed in its current
+        # bounds - the small "webcam bubble" look used for teaching layout
+        # (see TutorScene.show_teaching_layout), as opposed to the
+        # full-screen square face shown during normal chat. Applied/cleared
+        # via set_circular_mask(), kept in sync across resizes.
+        self._circular_mask = False
+
         # Load images - the 4 originals must exist (a missing one here is a
         # real setup error), the expansion set degrades gracefully instead
         # (see _EXPANSION_FALLBACKS/_load_optional).
@@ -73,6 +80,22 @@ class FaceWidget(QWidget):
         self._timer.start(1000 // 60)
 
         print("[FACE] Ready")
+
+    def set_circular_mask(self, enabled: bool) -> None:
+        """Clips this widget to a circle inscribed in its current bounds
+        (a square widget -> a perfect circle) - see _circular_mask."""
+        self._circular_mask = enabled
+        self._update_mask()
+
+    def _update_mask(self) -> None:
+        if self._circular_mask:
+            self.setMask(QRegion(self.rect(), QRegion.Ellipse))
+        else:
+            self.clearMask()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_mask()
 
     # --------------------------------------------------
     # Asset loading
