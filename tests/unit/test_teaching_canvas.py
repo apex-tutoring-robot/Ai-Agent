@@ -144,3 +144,52 @@ class TestHandleDrawActions:
         canvas = TeachingCanvas()
         canvas.handle_draw_actions([{"action": "levitate"}])
         assert canvas.lines == canvas.text_items == canvas.rect_items == []
+
+    def test_highlight_circle_action_adds_a_highlight_item(self):
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([{"action": "highlight_circle", "x": 400, "y": 300, "r": 60}])
+        item = canvas.highlight_items[0]
+        assert (item.x, item.y, item.rx, item.ry) == (400, 300, 60, 60)
+
+    def test_clear_action_also_clears_highlights(self):
+        canvas = TeachingCanvas()
+        canvas.add_highlight(100, 100, 50)
+        canvas.handle_draw_actions([{"action": "clear"}])
+        assert canvas.highlight_items == []
+
+
+class TestPointerRetargeting:
+    def test_pointer_is_hidden_before_any_visuals_arrive(self):
+        canvas = TeachingCanvas()
+        assert canvas._pointer_visible is False
+
+    def test_a_shape_action_makes_the_pointer_visible_and_targets_it(self):
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([{"action": "draw_rect", "x": 100, "y": 100, "w": 200, "h": 100}])
+        assert canvas._pointer_visible is True
+        assert canvas._pointer_target == (200.0, 150.0)  # center of the rect
+
+    def test_a_highlight_takes_priority_over_other_shapes_in_the_same_batch(self):
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([
+            {"action": "draw_text", "text": "far away", "x": 50, "y": 50},
+            {"action": "highlight_circle", "x": 900, "y": 500, "r": 40},
+        ])
+        assert canvas._pointer_target == (900, 500)
+
+    def test_clear_hides_the_pointer(self):
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([{"action": "draw_text", "text": "hi", "x": 10, "y": 10}])
+        canvas.handle_draw_actions([{"action": "clear"}])
+        assert canvas._pointer_visible is False
+
+    def test_a_batch_with_no_visual_content_does_not_move_the_pointer(self):
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([{"action": "draw_text", "text": "hi", "x": 10, "y": 10}])
+        first_target = canvas._pointer_target
+        canvas.handle_draw_actions([{"action": "levitate"}])
+        assert canvas._pointer_target == first_target
+
+    def test_pointer_tip_starts_at_the_anchor(self):
+        canvas = TeachingCanvas()
+        assert canvas._current_pointer_tip(now=time.monotonic()) == canvas._pointer_from

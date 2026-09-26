@@ -307,7 +307,8 @@ class LLMClient:
         {"speech_id": 1, "action": "draw_circle", "x": 620, "y": 270, "rx": 110, "ry": 75},
         {"speech_id": 1, "action": "draw_polygon", "points": [[580,160],[780,160],[780,360],[580,360]]},
         {"speech_id": 1, "action": "draw_regular_polygon", "sides": 6, "cx": 620, "cy": 270, "radius": 110},
-        {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360}
+        {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360},
+        {"speech_id": 1, "action": "highlight_circle", "x": 200, "y": 350, "r": 40}
       ]
     }
 
@@ -317,6 +318,11 @@ class LLMClient:
     - draw_regular_polygon: sides=number of sides, cx/cy=center, radius=circumscribed radius.
     - draw_polygon: points = list of [x,y] pairs (minimum 3 points).
     - draw_arc: x,y = top-left of bounding box, w/h = bounding box size, start_angle/span_angle in degrees.
+    - highlight_circle: draws a red circle AROUND something already on the board to call it
+      out, like a teacher circling the answer with a marker. x,y = center of the thing being
+      circled (e.g. the center of the final-answer text), r = radius (big enough to clearly
+      surround it, e.g. r=40 for a short number/word). Never used alone - it always circles
+      something that was already drawn by an earlier action.
 
     Rules:
     - "concept": a short snake_case identifier for the specific skill being taught
@@ -333,7 +339,7 @@ class LLMClient:
       simple, already fully-answered question where a follow-up check would feel
       repetitive. Do NOT put the check question in speech - it is spoken separately,
       after the explanation.
-    - Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc
+    - Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, highlight_circle
     - Use 2-5 speech steps
     - Keep explanations short and teacher-like
     - Every visual must map to a valid speech_id
@@ -423,6 +429,32 @@ class LLMClient:
     Always include BOTH:
       1. The visual diagram with labeled dimensions
       2. The full calculation steps as draw_text on the left (x: 60-420)
+
+    WHITEBOARD CONTENT - write like a real teacher's board, not a caption
+    underneath one. A single vague line is NOT enough:
+    - Do NOT write descriptions of what you're doing (e.g. "Finding the area") -
+      that belongs in speech, not on the board.
+    - Write the actual solving progress as SEPARATE draw_text lines, one below
+      the other (55px apart, per the spacing rule below), in this order:
+        1. The formula itself, e.g. "Area = width x height"
+        2. The substituted values, e.g. "Area = 6 x 4"
+        3. The simplified/calculated result, e.g. "Area = 24"
+      Each of these is its own draw_text action - never combine them into one line.
+    - Before the worked example, write ONE short "key idea" line naming the
+      underlying principle in plain words, e.g. "Area = space inside a shape" or
+      "Equivalent fractions = same amount, different numbers" - the one thing the
+      student should remember even if they forget the specific numbers.
+    - If the concept has a specific vocabulary term (e.g. "numerator",
+      "circumference", "hypotenuse"), write it as its own short label near the
+      diagram, not only spoken - seeing the word paired with the picture is part
+      of how it's learned, not decoration.
+    - Use "highlight_circle" to circle the FINAL ANSWER LINE in red once it's
+      calculated, like a teacher circling the answer with a marker - do this
+      every time. Use the EXACT SAME x,y as the draw_text action for that
+      final-answer line itself (so the circle centers on that specific text,
+      not the diagram), with r=55 (wide enough to surround a short line of
+      text). Optionally circle one key formula or term too if there's a
+      specific thing the student should notice.
 
     Canvas layout:
     - equations on the left: x between 60 and 420

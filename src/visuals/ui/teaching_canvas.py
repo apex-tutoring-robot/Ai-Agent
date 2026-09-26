@@ -14,6 +14,13 @@ everything popping into existence instantly. Runs its own 60fps QTimer
 (same idea as FaceWidget's) to drive that animation, which is why this is
 a QGraphicsObject (a QObject-based QGraphicsItem) rather than a plain
 QGraphicsItem - it needs somewhere to own that timer.
+
+Also animates a teacher's pointer stick toward whatever's being drawn:
+each handle_draw_actions() call is one speech step's worth of visuals
+(see JarvisBot._run_teaching_turn), so the pointer retargets once per
+step to that step's content, not once per individual line/shape - it
+should read as "pointing at this part while explaining it," not jitter
+between every primitive that makes up one diagram.
 """
 
 import math
@@ -41,6 +48,25 @@ _MARKER_COLOR = QColor(255, 140, 0)
 _SHAPE_ANIM_SECONDS = 0.55
 _GRID_SPACING = 40
 _MARKER_RADIUS = 7
+
+# Teacher's pointer stick - a wooden-brown shaft with a red tip, animated
+# from wherever it currently is toward the new target each time a speech
+# step's visuals arrive. Anchored just below the visible board, as if
+# held by someone standing in front of it - clear of the face bubble,
+# which lives in the bottom-right corner (see tutor_scene.py).
+_POINTER_ANCHOR = (640.0, 760.0)
+_POINTER_ANIM_SECONDS = 0.45
+_POINTER_COLOR = QColor(150, 100, 60)
+_POINTER_WIDTH = 8
+_POINTER_TIP_COLOR = QColor(230, 60, 40)
+_POINTER_TIP_RADIUS = 9
+
+# Red "circle the important part" annotation - like a teacher circling a
+# key number/term with a marker, drawn faster than a regular shape since
+# it's a quick emphasis gesture, not something being constructed.
+_HIGHLIGHT_COLOR = QColor(225, 30, 30)
+_HIGHLIGHT_WIDTH = 5
+_HIGHLIGHT_ANIM_SECONDS = 0.35
 
 
 @dataclass
@@ -80,6 +106,12 @@ class _Arc:
     start_time: float
 
 
+@dataclass
+class _Highlight:
+    x: float; y: float; rx: float; ry: float  # center + radii
+    start_time: float
+
+
 class TeachingCanvas(QGraphicsObject):
     def __init__(self):
         super().__init__()
@@ -89,6 +121,13 @@ class TeachingCanvas(QGraphicsObject):
         self.circle_items: List[_Circle] = []
         self.polygon_items: List[_Polygon] = []
         self.arc_items: List[_Arc] = []
+        self.highlight_items: List[_Highlight] = []
+
+        # Pointer stick state - see module docstring and _retarget_pointer.
+        self._pointer_visible = False
+        self._pointer_from: Tuple[float, float] = _POINTER_ANCHOR
+        self._pointer_target: Tuple[float, float] = _POINTER_ANCHOR
+        self._pointer_start_time = 0.0
 
         # Drives the draw-in animations - see module docstring.
         self._timer = QTimer(self)
@@ -123,6 +162,46 @@ class TeachingCanvas(QGraphicsObject):
             self._paint_arc(painter, item, now)
         for item in self.text_items:
             self._paint_text(painter, item, now)
+        for item in self.highlight_items:
+            self._paint_highlight(painter, item, now)
+
+        # Drawn last so it reads as pointing AT the diagram from in front
+        # of it, not underneath it.
+        self._paint_pointer(painter, now)
+
+    def _current_pointer_tip(self, now: float) -> Tuple[float, float]:
+        p = self._progress(self._pointer_start_time, now, duration=_POINTER_ANIM_SECONDS)
+        fx, fy = self._pointer_from
+        tx, ty = self._pointer_target
+        return (fx + (tx - fx) * p, fy + (ty - fy) * p)
+
+    def _retarget_pointer(self, target: Tuple[float, float], now: float) -> None:
+        """Moves the pointer toward a new focus point, animating from
+        wherever its tip currently is (not snapping back to the anchor
+        each time) - see module docstring for why this is called once per
+        speech step's batch of visuals, not once per primitive."""
+        self._pointer_from = self._current_pointer_tip(now)
+        self._pointer_target = target
+        self._pointer_start_time = now
+        self._pointer_visible = True
+
+    def _hide_pointer(self) -> None:
+        self._pointer_visible = False
+
+    def _paint_pointer(self, painter: QPainter, now: float) -> None:
+        if not self._pointer_visible:
+            return
+        tip_x, tip_y = self._current_pointer_tip(now)
+        anchor_x, anchor_y = _POINTER_ANCHOR
+
+        shaft_pen = QPen(_POINTER_COLOR, _POINTER_WIDTH)
+        shaft_pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(shaft_pen)
+        painter.drawLine(QPointF(anchor_x, anchor_y), QPointF(tip_x, tip_y))
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(_POINTER_TIP_COLOR))
+        painter.drawEllipse(QPointF(tip_x, tip_y), _POINTER_TIP_RADIUS, _POINTER_TIP_RADIUS)
 
     def _paint_grid(self, painter: QPainter, rect: QRectF) -> None:
         painter.setPen(QPen(_GRID_COLOR, 1))
@@ -237,6 +316,16 @@ class TeachingCanvas(QGraphicsObject):
             my = cy - ry * math.sin(angle_rad)
             self._draw_marker(painter, mx, my)
 
+    def _paint_highlight(self, painter: QPainter, item: _Highlight, now: float) -> None:
+        p = self._progress(item.start_time, now, duration=_HIGHLIGHT_ANIM_SECONDS)
+        rect = QRectF(item.x - item.rx, item.y - item.ry, item.rx * 2, item.ry * 2)
+        pen = QPen(_HIGHLIGHT_COLOR, _HIGHLIGHT_WIDTH)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        span = int(360 * 16 * p)
+        painter.drawArc(rect, 90 * 16, -span)
+
     def _paint_text(self, painter: QPainter, item: _Text, now: float) -> None:
         # Typewriter reveal - duration scales with length so a short
         # label and a long equation both feel like they're being written
@@ -261,6 +350,8 @@ class TeachingCanvas(QGraphicsObject):
         self.circle_items = []
         self.polygon_items = []
         self.arc_items = []
+        self.highlight_items = []
+        self._hide_pointer()
         self.update()
 
     def add_line(self, x1, y1, x2, y2):
@@ -291,8 +382,26 @@ class TeachingCanvas(QGraphicsObject):
         self.arc_items.append(_Arc(x, y, w, h, start_angle, span_angle, time.monotonic()))
         self.update()
 
+    def add_highlight(self, x, y, rx, ry=None):
+        """x, y = center of whatever's being called out. rx/ry = radii of
+        the red circle drawn around it (defaults to a circle, not an ellipse)."""
+        if ry is None:
+            ry = rx
+        self.highlight_items.append(_Highlight(x, y, rx, ry, time.monotonic()))
+        self.update()
+
     def handle_draw_actions(self, actions):
-        """Entry point for UISignals.draw_actions - a list of action dicts."""
+        """
+        Entry point for UISignals.draw_actions - a list of action dicts,
+        one call per speech step (see JarvisBot._run_teaching_turn). Also
+        retargets the pointer stick once for the whole batch, toward
+        whatever's highlighted if anything is, otherwise the average
+        position of everything drawn this step - see module docstring for
+        why this is per-batch, not per-primitive.
+        """
+        points = []
+        highlight_points = []
+
         for action in actions:
             action_type = action.get("action")
 
@@ -300,46 +409,68 @@ class TeachingCanvas(QGraphicsObject):
                 self.clear_canvas()
 
             elif action_type == "draw_text":
-                self.add_text(action.get("text", ""), action.get("x", 100), action.get("y", 100))
+                x, y = action.get("x", 100), action.get("y", 100)
+                self.add_text(action.get("text", ""), x, y)
+                points.append((x, y))
 
             elif action_type == "draw_line":
-                self.add_line(
-                    action.get("x1", 0), action.get("y1", 0),
-                    action.get("x2", 100), action.get("y2", 100)
-                )
+                x1, y1 = action.get("x1", 0), action.get("y1", 0)
+                x2, y2 = action.get("x2", 100), action.get("y2", 100)
+                self.add_line(x1, y1, x2, y2)
+                points.append(((x1 + x2) / 2, (y1 + y2) / 2))
 
             elif action_type == "draw_rect":
-                self.add_rect(
-                    action.get("x", 100), action.get("y", 100),
-                    action.get("w", 200), action.get("h", 150)
-                )
+                x, y = action.get("x", 100), action.get("y", 100)
+                w, h = action.get("w", 200), action.get("h", 150)
+                self.add_rect(x, y, w, h)
+                points.append((x + w / 2, y + h / 2))
 
             elif action_type == "draw_circle":
                 # Support both r (circle) and rx/ry (ellipse)
+                x, y = action.get("x", 700), action.get("y", 270)
                 rx = action.get("rx", action.get("r", 80))
                 ry = action.get("ry", rx)
-                self.add_circle(action.get("x", 700), action.get("y", 270), rx, ry)
+                self.add_circle(x, y, rx, ry)
+                points.append((x, y))
 
             elif action_type == "draw_polygon":
-                points = action.get("points", [])
-                if len(points) >= 3:
-                    self.add_polygon([(p[0], p[1]) for p in points])
+                poly_points = action.get("points", [])
+                if len(poly_points) >= 3:
+                    self.add_polygon([(p[0], p[1]) for p in poly_points])
+                    points.append((
+                        sum(p[0] for p in poly_points) / len(poly_points),
+                        sum(p[1] for p in poly_points) / len(poly_points),
+                    ))
 
             elif action_type == "draw_regular_polygon":
                 sides = max(3, min(12, int(action.get("sides", 5))))
                 cx = action.get("cx", 700)
                 cy = action.get("cy", 270)
                 radius = action.get("radius", 120)
-                points = []
+                poly_points = []
                 for i in range(sides):
                     angle = 2 * math.pi * i / sides - math.pi / 2
-                    points.append((int(cx + radius * math.cos(angle)), int(cy + radius * math.sin(angle))))
-                self.add_polygon(points)
+                    poly_points.append((int(cx + radius * math.cos(angle)), int(cy + radius * math.sin(angle))))
+                self.add_polygon(poly_points)
+                points.append((cx, cy))
 
             elif action_type == "draw_arc":
-                self.add_arc(
-                    action.get("x", 600), action.get("y", 160),
-                    action.get("w", 200), action.get("h", 200),
-                    int(action.get("start_angle", 0) * 16),
-                    int(action.get("span_angle", 360) * 16)
-                )
+                x, y = action.get("x", 600), action.get("y", 160)
+                w, h = action.get("w", 200), action.get("h", 200)
+                self.add_arc(x, y, w, h, int(action.get("start_angle", 0) * 16), int(action.get("span_angle", 360) * 16))
+                points.append((x + w / 2, y + h / 2))
+
+            elif action_type == "highlight_circle":
+                x, y = action.get("x", 400), action.get("y", 300)
+                rx = action.get("rx", action.get("r", 60))
+                ry = action.get("ry", rx)
+                self.add_highlight(x, y, rx, ry)
+                highlight_points.append((x, y))
+
+        # A highlight is an explicit "look here" - point at it directly
+        # rather than diluting it into this step's overall average.
+        focus_points = highlight_points or points
+        if focus_points:
+            avg_x = sum(p[0] for p in focus_points) / len(focus_points)
+            avg_y = sum(p[1] for p in focus_points) / len(focus_points)
+            self._retarget_pointer((avg_x, avg_y), time.monotonic())
