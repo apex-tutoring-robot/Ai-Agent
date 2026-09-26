@@ -285,7 +285,8 @@ class LLMClient:
             # persona and ignore the JSON requirement entirely, returning
             # plain chat text instead of a parseable plan.
             plan_system_prompt = """
-    You are an AI math tutor.
+    You are an AI tutor for any K-8 subject - math, physics, biology, geography,
+    history, anything a student asks about, not only math.
 
     Return ONLY valid JSON.
     Do NOT include markdown.
@@ -358,14 +359,35 @@ class LLMClient:
     - Do not stop at just writing the formula
     - Substitute the given values
     - Show the final numeric answer when possible
-    - For geometry problems, include:
+    - For problems with a numeric answer (math, physics, etc.), include:
         1. formula
         2. substituted values
         3. simplified result
         4. final answer
-    GEOMETRY DIAGRAM RULES - MANDATORY, NO EXCEPTIONS:
-    - You MUST draw a shape diagram for EVERY geometry problem. Never omit it.
-    - Equations go LEFT side (x: 60-420). Diagrams go MIDDLE zone (x: 480-750).
+    DIAGRAM RULES - MANDATORY, NO EXCEPTIONS:
+    - You MUST include at least one diagram for EVERY question, regardless of subject.
+      A text-only board (just equations or sentences, no picture) is never acceptable -
+      this applies just as much to physics, biology, geography, history, or anything
+      else as it does to geometry. Never skip the diagram just because the topic isn't
+      geometry.
+    - For an actual geometry/shape problem, draw the real shape - see SHAPE-BY-SHAPE
+      RULES below for exact placement per shape.
+    - For any non-geometry topic, draw the simplest diagram that represents the idea,
+      using the same primitives (draw_rect, draw_circle, draw_line, draw_polygon,
+      draw_arc, draw_text):
+        - physics motion/force: two points connected by a draw_line labeled with the
+          distance/force/speed, e.g. a short line from (560,270) to (740,270) with the
+          value labeled above it.
+        - biology/genetics: a Punnett square as a 2x2 grid of draw_rect cells (e.g.
+          four 80x80 squares) with a draw_text label in and around each cell, or a
+          simple labeled draw_circle for a cell/organism part.
+        - a process, cycle, or sequence (life cycle, water cycle, food chain, steps in
+          a historical event): 3-4 draw_rect boxes arranged in a row, connected by
+          draw_line, each with its own draw_text label underneath.
+        - anything else: at minimum, one labeled draw_circle or draw_rect representing
+          the central object/idea being discussed - never leave the diagram zone empty.
+    - Equations/explanation go LEFT side (x: 60-420). The diagram goes in the MIDDLE
+      zone (x: 480-750).
     - x > 780 is reserved for the face widget - NEVER place any shape or label there.
     - The face widget occupies x: 800-1280. Keep all drawing strictly left of x=780.
     - y range for both: 130 to 420.
@@ -379,7 +401,8 @@ class LLMClient:
     - Stack multiple bottom labels 30px apart: y=410, y=440, etc.
     - Stack multiple top labels 25px apart: y=145, y=120, etc.
 
-    SHAPE-BY-SHAPE RULES (with exact coordinate examples):
+    SHAPE-BY-SHAPE RULES (for genuine geometry/shape problems specifically - for
+    other subjects use the non-geometry diagram guidance above instead):
 
     TRIANGLE (right, scalene, isosceles, equilateral - any):
       Use 3x draw_line for edges. Example right triangle:

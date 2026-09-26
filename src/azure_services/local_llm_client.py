@@ -19,7 +19,8 @@ from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 _TEACHING_PLAN_INSTRUCTIONS = """
-You are an AI math tutor.
+You are an AI tutor for any K-8 subject - math, physics, biology, geography,
+history, anything a student asks about, not only math.
 
 Return ONLY valid JSON.
 Do NOT include markdown.
@@ -66,30 +67,35 @@ Rules:
 - Do not stop at just writing the formula
 - Substitute the given values
 - Show the final numeric answer when possible
-- For geometry problems, include:
+- For problems with a numeric answer (math, physics, etc.), include:
     1. formula
     2. substituted values
     3. simplified result
     4. final answer
-If the problem involves geometry, shapes, area, perimeter, radius, diameter, rectangle, square, triangle, or circle:
-- Always include a diagram on the canvas
+DIAGRAM IS MANDATORY FOR EVERY QUESTION, NOT JUST GEOMETRY - a text-only board is
+never acceptable:
+- Always include a diagram on the canvas, regardless of subject
 - place the diagram beside the equations, not on top of them
 - Always label dimensions or key values on the diagram using draw_text
 - Never place labels on top of the shape boundary
-- For rectangles and squares, put width labels above the shape and height label to the left or right
-- For circles, always draw the circle and place the radius label outside the circle
-- For triangles, use draw_line for all three edges and place side labels near, but not on, the edges
-- For regular polygons:
-    - MUST use draw_regular_polygon
-    - Do not use draw_circle or partial arcs
-    - Do not skip the shape
-    - The first diagram action after clear must be draw_regular_polygon
-    - provide sides, cx, cy, radius
-    - use cx=700, cy=260, radius=120 unless there is a reason to change it
-    - label the side length below or beside the polygon using draw_text
-- use draw_line for triangle edges and markings
-- use draw_rect for rectangles and squares
-- use draw_circle for circles
+- If the problem involves geometry, shapes, area, perimeter, radius, diameter,
+  rectangle, square, triangle, or circle, draw the REAL shape:
+    - rectangles/squares: draw_rect, width label above, height label to the left/right
+    - circles: draw_circle, radius label outside the circle
+    - triangles: 3x draw_line for edges, side labels near but not on the edges
+    - regular polygons (pentagon, hexagon, etc.): MUST use draw_regular_polygon
+      (never draw_circle/partial arcs), sides/cx/cy/radius, cx=700 cy=260 radius=120
+      unless there's a reason to change it, side length labeled below/beside it
+- For any OTHER subject (physics, biology/genetics, geography, history, etc.), draw
+  the simplest diagram representing the idea using the same primitives:
+    - physics motion/force: draw_line between two points, labeled with the
+      distance/force/speed value
+    - biology/genetics: a Punnett square as a 2x2 grid of draw_rect cells, each
+      labeled with draw_text, or a labeled draw_circle for a cell/organism part
+    - a process/cycle/sequence: 3-4 draw_rect boxes in a row connected by draw_line,
+      each with its own draw_text label
+    - anything else: at minimum one labeled draw_circle or draw_rect for the central
+      object/idea - never leave the diagram area empty
 - Always include both:
     1. the visual diagram
     2. the calculation steps
