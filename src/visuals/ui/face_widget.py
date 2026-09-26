@@ -11,6 +11,7 @@ about the animation behavior itself changes - only how it's driven and
 rendered.
 """
 
+import logging
 import os
 import random
 import numpy as np
@@ -18,6 +19,19 @@ import cv2
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import QWidget, QLabel, QVBoxLayout
+
+logger = logging.getLogger(__name__)
+
+# Expressions the product spec (AGENT Face Animation doc) calls for beyond
+# the art that actually exists today (neutral/thinking/happy/blinking) -
+# see _load_optional(). Each falls back to the closest existing face
+# until real art is provided, rather than crashing on a missing file.
+_EXPANSION_FALLBACKS = {
+    "excited": "happy",
+    "sad": "neutral",
+    "confused": "neutral",
+    "listening": "neutral",
+}
 
 
 class FaceWidget(QWidget):
@@ -35,10 +49,14 @@ class FaceWidget(QWidget):
         # Blink state
         self.blink = 0.0
 
-        # Load images
+        # Load images - the 4 originals must exist (a missing one here is a
+        # real setup error), the expansion set degrades gracefully instead
+        # (see _EXPANSION_FALLBACKS/_load_optional).
         self.faces = {}
         for name in ["neutral", "thinking", "happy", "blinking"]:
             self.faces[name] = self._load(name + ".png")
+        for name, fallback in _EXPANSION_FALLBACKS.items():
+            self.faces[name] = self._load_optional(name + ".png", fallback)
 
         self.talk_frames = [self._load(f"talk{i}.png") for i in range(1, 6)]
 
@@ -67,6 +85,17 @@ class FaceWidget(QWidget):
             raise RuntimeError(f"Failed to load {path}")
         return cv2.resize(img, (600, 600))
 
+    def _load_optional(self, name, fallback_emotion):
+        """Like _load(), but returns the fallback emotion's already-loaded
+        image instead of raising when `name` doesn't exist yet - see
+        _EXPANSION_FALLBACKS."""
+        path = os.path.join(self.face_dir, name)
+        img = cv2.imread(path)
+        if img is None:
+            logger.warning(f"No art for {name} yet - using '{fallback_emotion}' face instead")
+            return self.faces[fallback_emotion]
+        return cv2.resize(img, (600, 600))
+
     # --------------------------------------------------
     # Public API (same as FaceAnimator)
     # --------------------------------------------------
@@ -81,6 +110,21 @@ class FaceWidget(QWidget):
 
     def start_happy(self):
         self.emotion = "happy"
+
+    def start_excited(self):
+        self.emotion = "excited"
+
+    def start_confused(self):
+        self.emotion = "confused"
+        self.is_talking = False
+
+    def start_sad(self):
+        self.emotion = "sad"
+        self.is_talking = False
+
+    def start_listening(self):
+        self.emotion = "listening"
+        self.is_talking = False
 
     def start_talking(self):
         self.is_talking = True

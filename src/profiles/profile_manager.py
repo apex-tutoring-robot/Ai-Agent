@@ -73,6 +73,7 @@ class ProfileManager:
                     grade TEXT,
                     interests TEXT,
                     learning_challenges TEXT,
+                    face_signature TEXT,
                     created_at TEXT NOT NULL,
                     last_active_at TEXT
                 );
@@ -144,6 +145,10 @@ class ProfileManager:
             if "learning_challenges" not in existing_columns:
                 self._conn.execute("ALTER TABLE profiles ADD COLUMN learning_challenges TEXT")
                 logger.info("🔧 Migrated profiles table: added 'learning_challenges' column")
+
+            if "face_signature" not in existing_columns:
+                self._conn.execute("ALTER TABLE profiles ADD COLUMN face_signature TEXT")
+                logger.info("🔧 Migrated profiles table: added 'face_signature' column")
 
             mastery_columns = {
                 row["name"] for row in self._conn.execute("PRAGMA table_info(concept_mastery)")
@@ -260,6 +265,35 @@ class ProfileManager:
                 (avatar_path, profile_id)
             )
             self._conn.commit()
+
+    def set_face_signature(self, profile_id: int, signature: str) -> None:
+        """See identity/face_matcher.py for what `signature` actually is -
+        a deliberately basic similarity fingerprint, not a real face
+        embedding. Set once at enrollment, from the same avatar photo
+        capture_avatar_photo() already takes with consent."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE profiles SET face_signature = ? WHERE id = ?",
+                (signature, profile_id)
+            )
+            self._conn.commit()
+
+    def get_face_signature(self, profile_id: int) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT face_signature FROM profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+        return row["face_signature"] if row else None
+
+    def get_all_face_signatures(self) -> "list[tuple[int, str, str]]":
+        """(profile_id, name, face_signature) for every profile with one
+        enrolled - used by FaceIdentityProvider to compare a freshly
+        captured photo against everyone on file."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, name, face_signature FROM profiles WHERE face_signature IS NOT NULL"
+            ).fetchall()
+        return [(r["id"], r["name"], r["face_signature"]) for r in rows]
 
     def get_profile_name(self, profile_id: int) -> Optional[str]:
         with self._lock:

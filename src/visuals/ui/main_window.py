@@ -92,22 +92,27 @@ class MainWindow(QMainWindow):
 
     def show_listening_mode(self):
         self.face_widget.stop_talking()
-        self.face_widget.start_idle()
+        self.face_widget.start_listening()
 
     def show_thinking_mode(self):
         self.face_widget.start_thinking()
 
     def show_expression(self, expression: str):
         """
-        Maps an expression.controller.Expression value down to
-        FaceWidget's existing 3 emotion images - see ui_signals.py's
-        set_expression. "friendly"/"excited" read as upbeat -> happy;
-        "calm"/"neutral" stay on the plain idle face; "encouraging" uses
-        the thinking face, which reads as attentive/considered rather
-        than flatly neutral, closer to how a hint is actually delivered.
+        Maps an expression.controller.Expression value onto a FaceWidget
+        emotion - see ui_signals.py's set_expression. "excited" and
+        "confused" are their own named states now (see FaceWidget's
+        _EXPANSION_FALLBACKS) - they currently render as the happy/neutral
+        art respectively until dedicated art exists, but the semantic
+        state is correct today so nothing else needs to change once art
+        is added. "encouraging" uses the thinking face, which reads as
+        attentive/considered rather than flatly neutral, closer to how a
+        hint is actually delivered.
         """
-        if expression in ("friendly", "excited"):
+        if expression == "friendly":
             self.face_widget.start_happy()
+        elif expression == "excited":
+            self.face_widget.start_excited()
         elif expression == "encouraging":
             self.face_widget.start_thinking()
         else:

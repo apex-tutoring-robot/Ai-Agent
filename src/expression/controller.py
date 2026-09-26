@@ -2,12 +2,14 @@
 ExpressionController - maps a tutoring moment to one of a small
 vocabulary of delivery states, then to concrete TTS SSML prosody
 (rate/pitch) - see azure_services/tts_client.py's synthesize_stream()
-`delivery` parameter.
+`delivery` parameter. Each Expression also drives FaceWidget via
+UISignals.set_expression - see visuals/ui/main_window.py's show_expression().
 
-Deliberately small (5 states) and voice-only today: the FaceWidget side
-of the architecture review's ExpressionController (EXCITED -> brighter
-avatar, etc.) isn't wired up here - this only changes how Jarvis SOUNDS,
-not the face animation, which would be a separate UI-side change.
+SAD exists in the enum (the product spec's Face Animation doc calls for
+it) but isn't wired to a specific trigger yet - nothing in the current
+tutoring flow has an obviously "sad" moment, and forcing one in would be
+guessing at UX rather than reflecting a real decision. It's available for
+whoever decides where it belongs.
 """
 
 from dataclasses import dataclass
@@ -22,6 +24,8 @@ class Expression(Enum):
     ENCOURAGING = "encouraging"
     CALM = "calm"
     EXCITED = "excited"
+    CONFUSED = "confused"
+    SAD = "sad"
     NEUTRAL = "neutral"
 
 
@@ -37,6 +41,8 @@ _STYLES = {
     Expression.ENCOURAGING: DeliveryStyle(Expression.ENCOURAGING, rate_percent=-10, pitch_percent=0),
     Expression.CALM: DeliveryStyle(Expression.CALM, rate_percent=-15, pitch_percent=-3),
     Expression.EXCITED: DeliveryStyle(Expression.EXCITED, rate_percent=8, pitch_percent=5),
+    Expression.CONFUSED: DeliveryStyle(Expression.CONFUSED, rate_percent=-8, pitch_percent=-2),
+    Expression.SAD: DeliveryStyle(Expression.SAD, rate_percent=-12, pitch_percent=-4),
     Expression.NEUTRAL: DeliveryStyle(Expression.NEUTRAL, rate_percent=0, pitch_percent=0),
 }
 
@@ -76,3 +82,12 @@ class ExpressionController:
 
     def neutral(self) -> DeliveryStyle:
         return _STYLES[Expression.NEUTRAL]
+
+    def refusal(self) -> DeliveryStyle:
+        """
+        For a guardrails/fast-filter safety refusal (see main.py's
+        _run_output_safety_check and the FastContentFilter block paths) -
+        CONFUSED reads as "I'm not sure how to answer that", which is a
+        more honest expression for the moment than a flat neutral face.
+        """
+        return _STYLES[Expression.CONFUSED]

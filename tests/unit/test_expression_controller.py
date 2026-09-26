@@ -39,3 +39,7 @@ class TestForAction:
         style = ExpressionController().neutral()
         assert style.rate_percent == 0
         assert style.pitch_percent == 0
+
+    def test_refusal_style_is_confused(self):
+        style = ExpressionController().refusal()
+        assert style.expression == Expression.CONFUSED

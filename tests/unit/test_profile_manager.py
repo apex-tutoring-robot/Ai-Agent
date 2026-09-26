@@ -113,6 +113,30 @@ class TestGrade:
         assert manager.get_grade(profile_id) is None
 
 
+class TestFaceSignature:
+    def test_set_and_get_face_signature(self, manager):
+        profile_id, _ = manager.find_or_create_profile("Brian")
+        manager.set_face_signature(profile_id, "fake-base64-signature")
+        assert manager.get_face_signature(profile_id) == "fake-base64-signature"
+
+    def test_face_signature_defaults_to_none(self, manager):
+        profile_id, _ = manager.find_or_create_profile("Brian")
+        assert manager.get_face_signature(profile_id) is None
+
+    def test_get_all_face_signatures_excludes_unenrolled_profiles(self, manager):
+        brian_id, _ = manager.find_or_create_profile("Brian")
+        manager.find_or_create_profile("Maya")  # never enrolled
+        manager.set_face_signature(brian_id, "brians-signature")
+
+        all_signatures = manager.get_all_face_signatures()
+
+        assert all_signatures == [(brian_id, "Brian", "brians-signature")]
+
+    def test_get_all_face_signatures_empty_when_nobody_enrolled(self, manager):
+        manager.find_or_create_profile("Brian")
+        assert manager.get_all_face_signatures() == []
+
+
 class TestInterestsAndLearningChallenges:
     def test_set_and_get_interests(self, manager):
         profile_id, _ = manager.find_or_create_profile("Brian")
@@ -435,6 +459,10 @@ class TestSchemaMigration:
             pm.set_learning_challenges(existing_id, "Finds fractions hard.")
             assert pm.get_interests(existing_id) == "Likes dinosaurs."
             assert pm.get_learning_challenges(existing_id) == "Finds fractions hard."
+            # face_signature was added in this same migration pass -
+            # covering it here too rather than duplicating the whole setup.
+            pm.set_face_signature(existing_id, "some-signature")
+            assert pm.get_face_signature(existing_id) == "some-signature"
         finally:
             pm.close()
 

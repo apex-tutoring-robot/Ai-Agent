@@ -35,12 +35,14 @@ from guardrails.fast_content_filter import FastContentFilter
 from identity.identity_provider import IdentityObservation
 from identity.identity_resolver import IdentityResolver
 from identity.name_identity_provider import NameIdentityProvider
+from identity.face_identity_provider import FaceIdentityProvider
+from identity.face_matcher import compute_signature as compute_face_signature
 from tutor.decision_engine import TutorAction, TutorDecisionEngine
 from tutor.review_scheduler import ReviewScheduler
 from tutor.question_engine import ProactiveQuestionEngine
 from curriculum.graph import CurriculumGraph
 from affect.interaction_signals import InteractionSignalEngine
-from expression.controller import ExpressionController
+from expression.controller import Expression, ExpressionController
 
 from visuals.ui.ui_signals import UISignals
 from visuals.ui.main_window import MainWindow
@@ -179,7 +181,16 @@ class JarvisBot:
         # for why voice biometrics aren't in scope yet) - a list of one
         # provider so a future SpeakerIdentityProvider can be appended
         # here without JarvisBot needing to change anywhere else.
-        self.identity_resolver = IdentityResolver([NameIdentityProvider(self.profile_manager)])
+        # FaceIdentityProvider is wired in but currently a no-op in
+        # practice - nothing anywhere supplies IdentityObservation.
+        # photo_path yet, since doing that would mean automatically
+        # capturing a photo (most likely at wake-word time), a real
+        # privacy/consent decision for a device aimed at children that
+        # hasn't been made explicitly. See identity/face_identity_provider.py.
+        self.identity_resolver = IdentityResolver([
+            NameIdentityProvider(self.profile_manager),
+            FaceIdentityProvider(self.profile_manager),
+        ])
 
         # Centralizes the hint/reteach/continue/challenge policy applied
         # after each comprehension-check answer - see tutor/decision_engine.py.
@@ -428,7 +439,11 @@ class JarvisBot:
         # abort (one ~20ms callback cycle) and finish that cleanup itself
         # first, so this thread isn't racing it to touch the same stream.
         time.sleep(0.2)
-        self._speak_fixed_phrase(refusal_text, continuous_vad, output_device_index)
+        if self.ui_signals:
+            self.ui_signals.set_expression.emit(Expression.CONFUSED.value)
+        self._speak_fixed_phrase(
+            refusal_text, continuous_vad, output_device_index, delivery=self.expression_controller.refusal()
+        )
 
     def _try_handle_profile_command(self, user_text: str, continuous_vad, output_device_index: int) -> bool:
         """
@@ -606,6 +621,15 @@ class JarvisBot:
             avatar_path = os.path.join(self._avatars_dir, f"{profile_id}.jpg")
             if capture_avatar_photo(avatar_path):
                 self.profile_manager.set_avatar(profile_id, avatar_path)
+                # Enroll for face-based identification from the same
+                # consented photo - see identity/face_matcher.py for how
+                # basic this actually is, and how unverified against a
+                # real camera. None here just means no face was detected
+                # in the avatar shot; not fatal, matches an unenrolled
+                # profile that only ever matches by name.
+                signature = compute_face_signature(avatar_path)
+                if signature:
+                    self.profile_manager.set_face_signature(profile_id, signature)
             # If capture fails (no camera, wrong platform, etc.) we just
             # skip the avatar - not fatal to profile creation.
 
@@ -983,7 +1007,11 @@ class JarvisBot:
                 # the refusal (see that method's docstring for why).
                 self.audio_player.request_immediate_stop()
                 time.sleep(0.2)
-                self._speak_fixed_phrase(fast_refusal, continuous_vad, output_device_index)
+                if self.ui_signals:
+                    self.ui_signals.set_expression.emit(Expression.CONFUSED.value)
+                self._speak_fixed_phrase(
+                    fast_refusal, continuous_vad, output_device_index, delivery=self.expression_controller.refusal()
+                )
                 self._last_bot_response = fast_refusal
                 continuous_vad.reset_idle_timer()
                 return
@@ -1137,6 +1165,8 @@ class JarvisBot:
                 f"📊 Answer evaluation for '{concept}': {evaluation.get('correctness')} -> {decision.action.value}"
             )
 
+            signals = self.interaction_signal_engine.analyze(user_text, attempts_so_far)
+
             # Fast synchronous pre-check (see guardrails/fast_content_filter.py) -
             # same reasoning as _run_teaching_turn's per-step check.
             response_text = decision.response_text
@@ -1144,11 +1174,11 @@ class JarvisBot:
             if not fast_safe:
                 logger.warning(f"🚨 Fast content filter blocked an answer-evaluation response: '{response_text[:80]}'")
                 response_text = fast_refusal
-
-            signals = self.interaction_signal_engine.analyze(user_text, attempts_so_far)
-            delivery = self.expression_controller.for_action(
-                decision.action, repeated_struggle=signals.repeated_struggle, hesitation=signals.hesitation
-            )
+                delivery = self.expression_controller.refusal()
+            else:
+                delivery = self.expression_controller.for_action(
+                    decision.action, repeated_struggle=signals.repeated_struggle, hesitation=signals.hesitation
+                )
             if self.ui_signals:
                 self.ui_signals.set_expression.emit(delivery.expression.value)
 

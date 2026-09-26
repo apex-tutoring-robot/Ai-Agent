@@ -28,11 +28,15 @@ IdentityStatus = Literal["known", "uncertain", "unknown"]
 class IdentityObservation:
     """
     What's available to identify a speaker from, at a given moment.
-    spoken_name is the only field populated today - a future
-    SpeakerIdentityProvider would add an audio/embedding field here
-    without changing this shape for existing providers.
+    spoken_name is used by NameIdentityProvider; photo_path (a path to a
+    freshly captured still) is used by FaceIdentityProvider (see
+    face_matcher.py) - a future SpeakerIdentityProvider would add a voice/
+    embedding field the same way, without changing this shape for
+    existing providers. Any field can be None if that kind of observation
+    isn't available at this moment.
     """
     spoken_name: Optional[str] = None
+    photo_path: Optional[str] = None
 
 
 @dataclass
