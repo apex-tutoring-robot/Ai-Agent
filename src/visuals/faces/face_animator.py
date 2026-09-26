@@ -174,6 +174,24 @@ class FaceAnimator:
     # Frame Generation
     # --------------------------------------------------
 
+    def _blend_mouth_frames(self, mouth_open: float) -> np.ndarray:
+        """See face_widget.py's identical method - cross-fades between the
+        two nearest talk frames instead of hard-selecting one."""
+        position = float(np.clip(mouth_open, 0.0, 1.0)) * (len(self.talk_frames) - 1)
+        low = int(np.floor(position))
+        high = min(low + 1, len(self.talk_frames) - 1)
+        blend = position - low
+        if low == high or blend < 1e-3:
+            return self.talk_frames[low].copy()
+        return cv2.addWeighted(self.talk_frames[low], 1.0 - blend, self.talk_frames[high], blend, 0)
+
+    def _blend_blink(self, frame: np.ndarray, blink: float) -> np.ndarray:
+        """See face_widget.py's identical method."""
+        if blink <= 0.02:
+            return frame
+        blend = float(np.clip(blink, 0.0, 1.0))
+        return cv2.addWeighted(frame, 1.0 - blend, self.faces["blinking"], blend, 0)
+
     def _frame(self):
         if self.sleeping:
             return np.zeros((720, 1280, 3), dtype=np.uint8)
@@ -183,17 +201,12 @@ class FaceAnimator:
         talking_now = self.is_talking or (self.mouth_open > 0.02)
 
         if talking_now and self.mouth_open > 0.05:
-            idx = int(self.mouth_open * (len(self.talk_frames) - 1))
-            idx = np.clip(idx, 0, len(self.talk_frames) - 1)
-            frame = self.talk_frames[idx].copy()
+            frame = self._blend_mouth_frames(self.mouth_open)
         else:
             frame = self.faces[self.emotion].copy()
 
         self._blink_update()
-
-        if self.blink > 0.7:
-            frame = self.faces["blinking"].copy()
-
+        frame = self._blend_blink(frame, self.blink)
 
         return cv2.resize(frame, (1280, 720))
 
