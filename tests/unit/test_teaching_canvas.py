@@ -145,51 +145,58 @@ class TestHandleDrawActions:
         canvas.handle_draw_actions([{"action": "levitate"}])
         assert canvas.lines == canvas.text_items == canvas.rect_items == []
 
-    def test_highlight_circle_action_adds_a_highlight_item(self):
+    def test_squiggly_underline_action_adds_an_underline_item(self):
         canvas = TeachingCanvas()
-        canvas.handle_draw_actions([{"action": "highlight_circle", "x": 400, "y": 300, "r": 60}])
-        item = canvas.highlight_items[0]
-        assert (item.x, item.y, item.rx, item.ry) == (400, 300, 60, 60)
+        canvas.handle_draw_actions([{"action": "squiggly_underline", "x": 400, "y": 300, "width": 90}])
+        item = canvas.underline_items[0]
+        assert (item.x, item.y, item.width) == (400, 300, 90)
 
-    def test_clear_action_also_clears_highlights(self):
+    def test_clear_action_also_clears_underlines(self):
         canvas = TeachingCanvas()
-        canvas.add_highlight(100, 100, 50)
+        canvas.add_underline(100, 100, 50)
         canvas.handle_draw_actions([{"action": "clear"}])
-        assert canvas.highlight_items == []
+        assert canvas.underline_items == []
 
 
-class TestPointerRetargeting:
-    def test_pointer_is_hidden_before_any_visuals_arrive(self):
+class TestLaserPointerRetargeting:
+    def test_laser_is_hidden_before_any_visuals_arrive(self):
         canvas = TeachingCanvas()
-        assert canvas._pointer_visible is False
+        assert canvas._laser_visible is False
 
-    def test_a_shape_action_makes_the_pointer_visible_and_targets_it(self):
+    def test_a_text_line_makes_the_laser_visible_and_targets_its_left_side(self):
         canvas = TeachingCanvas()
-        canvas.handle_draw_actions([{"action": "draw_rect", "x": 100, "y": 100, "w": 200, "h": 100}])
-        assert canvas._pointer_visible is True
-        assert canvas._pointer_target == (200.0, 150.0)  # center of the rect
+        canvas.handle_draw_actions([{"action": "draw_text", "text": "Area = 24", "x": 100, "y": 200}])
+        assert canvas._laser_visible is True
+        assert canvas._laser_target == (100 - 18, 200)
 
-    def test_a_highlight_takes_priority_over_other_shapes_in_the_same_batch(self):
+    def test_a_later_line_in_the_same_batch_wins_the_target(self):
         canvas = TeachingCanvas()
         canvas.handle_draw_actions([
-            {"action": "draw_text", "text": "far away", "x": 50, "y": 50},
-            {"action": "highlight_circle", "x": 900, "y": 500, "r": 40},
+            {"action": "draw_text", "text": "first line", "x": 60, "y": 150},
+            {"action": "draw_text", "text": "second line", "x": 60, "y": 210},
         ])
-        assert canvas._pointer_target == (900, 500)
+        assert canvas._laser_target == (60 - 18, 210)
 
-    def test_clear_hides_the_pointer(self):
+    def test_a_shape_with_no_text_does_not_move_the_laser(self):
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([{"action": "draw_text", "text": "hi", "x": 10, "y": 10}])
+        first_target = canvas._laser_target
+        canvas.handle_draw_actions([{"action": "draw_rect", "x": 100, "y": 100, "w": 200, "h": 100}])
+        assert canvas._laser_target == first_target
+
+    def test_clear_hides_the_laser(self):
         canvas = TeachingCanvas()
         canvas.handle_draw_actions([{"action": "draw_text", "text": "hi", "x": 10, "y": 10}])
         canvas.handle_draw_actions([{"action": "clear"}])
-        assert canvas._pointer_visible is False
+        assert canvas._laser_visible is False
 
-    def test_a_batch_with_no_visual_content_does_not_move_the_pointer(self):
+    def test_a_batch_with_no_visual_content_does_not_move_the_laser(self):
         canvas = TeachingCanvas()
         canvas.handle_draw_actions([{"action": "draw_text", "text": "hi", "x": 10, "y": 10}])
-        first_target = canvas._pointer_target
+        first_target = canvas._laser_target
         canvas.handle_draw_actions([{"action": "levitate"}])
-        assert canvas._pointer_target == first_target
+        assert canvas._laser_target == first_target
 
-    def test_pointer_tip_starts_at_the_anchor(self):
+    def test_laser_position_starts_at_its_from_point(self):
         canvas = TeachingCanvas()
-        assert canvas._current_pointer_tip(now=time.monotonic()) == canvas._pointer_from
+        assert canvas._current_laser_pos(now=time.monotonic()) == canvas._laser_from

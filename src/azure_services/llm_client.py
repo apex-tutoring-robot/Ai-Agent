@@ -308,7 +308,7 @@ class LLMClient:
         {"speech_id": 1, "action": "draw_polygon", "points": [[580,160],[780,160],[780,360],[580,360]]},
         {"speech_id": 1, "action": "draw_regular_polygon", "sides": 6, "cx": 620, "cy": 270, "radius": 110},
         {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360},
-        {"speech_id": 1, "action": "highlight_circle", "x": 200, "y": 350, "r": 40}
+        {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90}
       ]
     }
 
@@ -318,11 +318,13 @@ class LLMClient:
     - draw_regular_polygon: sides=number of sides, cx/cy=center, radius=circumscribed radius.
     - draw_polygon: points = list of [x,y] pairs (minimum 3 points).
     - draw_arc: x,y = top-left of bounding box, w/h = bounding box size, start_angle/span_angle in degrees.
-    - highlight_circle: draws a red circle AROUND something already on the board to call it
-      out, like a teacher circling the answer with a marker. x,y = center of the thing being
-      circled (e.g. the center of the final-answer text), r = radius (big enough to clearly
-      surround it, e.g. r=40 for a short number/word). Never used alone - it always circles
-      something that was already drawn by an earlier action.
+    - squiggly_underline: draws a red squiggly underline BELOW something already on the
+      board to call it out, like a teacher underlining the answer with a marker. x,y =
+      LEFT edge of the text/value being underlined, at/just below its baseline (e.g. same
+      x as the draw_text action for that line, y a few pixels below it). width = how far
+      right the underline spans (roughly the width of the text above it, e.g. width=90
+      for a short number/word). Never used alone - it always underlines something that
+      was already drawn by an earlier action.
 
     Rules:
     - "concept": a short snake_case identifier for the specific skill being taught
@@ -339,7 +341,7 @@ class LLMClient:
       simple, already fully-answered question where a follow-up check would feel
       repetitive. Do NOT put the check question in speech - it is spoken separately,
       after the explanation.
-    - Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, highlight_circle
+    - Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
     - Use 2-5 speech steps
     - Keep explanations short and teacher-like
     - Every visual must map to a valid speech_id
@@ -448,13 +450,14 @@ class LLMClient:
       "circumference", "hypotenuse"), write it as its own short label near the
       diagram, not only spoken - seeing the word paired with the picture is part
       of how it's learned, not decoration.
-    - Use "highlight_circle" to circle the FINAL ANSWER LINE in red once it's
-      calculated, like a teacher circling the answer with a marker - do this
-      every time. Use the EXACT SAME x,y as the draw_text action for that
-      final-answer line itself (so the circle centers on that specific text,
-      not the diagram), with r=55 (wide enough to surround a short line of
-      text). Optionally circle one key formula or term too if there's a
-      specific thing the student should notice.
+    - Use "squiggly_underline" to underline the FINAL ANSWER LINE in red once
+      it's calculated, like a teacher underlining the answer with a marker -
+      do this every time. Use the EXACT SAME x as the draw_text action for
+      that final-answer line itself, y about 14 pixels below that line's y
+      (so it sits just under that specific text, not the diagram), with
+      width=90 (wide enough to span a short line of text). Optionally
+      underline one key formula or term too if there's a specific thing the
+      student should notice.
 
     Canvas layout:
     - equations on the left: x between 60 and 420

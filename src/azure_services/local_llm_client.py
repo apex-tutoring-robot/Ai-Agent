@@ -45,10 +45,11 @@ Rules:
   explaining, or null for a simple already-answered question. Not part of speech.
   MUST use DIFFERENT numbers/values than the worked example - test whether the
   student can apply the idea to a new case, never repeat the same numbers.
-- Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, highlight_circle
-- highlight_circle draws a red circle around something already on the board to call it
-  out (x,y = center of what's being circled, r = radius) - always use it to circle the
-  final answer once calculated, like a teacher circling it with a marker.
+- Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+- squiggly_underline draws a red squiggly line under something already on the board to
+  call it out (x,y = left edge/baseline of what's being underlined, width = span) -
+  always use it to underline the final answer once calculated, like a teacher
+  underlining it with a marker.
 - Write the actual solving steps as SEPARATE draw_text lines (formula, then substituted
   values, then simplified result), not one vague summary line - a real board shows the
   work, not a caption describing it.
