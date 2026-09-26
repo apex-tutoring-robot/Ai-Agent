@@ -24,6 +24,12 @@ currently being explained, and glides to the next line's position each
 time a new speech step draws a new line of text - like a presenter
 tracking their own explanation with a laser pointer, rather than a
 wooden stick (tried first, then dropped) pointing at whole diagrams.
+
+A title naming what's being taught sits centered at the top of the
+board (e.g. "Area of a Rectangle") - set via a "set_title" draw action
+the LLM emits alongside "clear" at the start of each new question, so
+it flows through the same visuals pipeline as everything else on the
+board rather than needing its own wiring.
 """
 
 import math
@@ -54,14 +60,23 @@ _SHAPE_ANIM_SECONDS = 0.55
 _GRID_SPACING = 40
 _MARKER_RADIUS = 7
 
+# Title naming the current topic, centered at the top of the board.
+_TITLE_COLOR = QColor(60, 130, 200)
+_TITLE_FONT_SIZE = 28
+_TITLE_TOP_MARGIN = 15
+_TITLE_BAND_HEIGHT = 50
+
 # Squiggly "underline the important part" annotation - like a teacher
-# underlining the answer with a red marker, drawn left to right.
+# underlining the answer with a thin red marker, drawn left to right at
+# roughly the pace of speech, not a quick flash - it should read as
+# being drawn WHILE Jarvis explains that part, not before/after it.
 _UNDERLINE_COLOR = QColor(225, 30, 30)
-_UNDERLINE_STROKE_WIDTH = 4
-_UNDERLINE_AMPLITUDE = 5
+_UNDERLINE_STROKE_WIDTH = 2
+_UNDERLINE_AMPLITUDE = 4
 _UNDERLINE_WAVELENGTH = 18
 _UNDERLINE_STEP = 4  # px between sampled points along the wave
-_UNDERLINE_ANIM_SECONDS = 0.4
+_UNDERLINE_ANIM_MIN_SECONDS = 1.4
+_UNDERLINE_SECONDS_PER_PX = 0.02
 
 # Laser-pointer dot that tracks the line currently being explained - see
 # module docstring. Sits to the LEFT of the line's own x so it never
@@ -72,19 +87,6 @@ _LASER_GLOW_RADIUS = 20
 _LASER_OFFSET_X = 18
 _LASER_ANIM_SECONDS = 0.3
 _LASER_PULSE_HZ = 6.0
-
-# Decorative marker tray, bottom-left corner - static board chrome (like
-# the frame/grid), not part of the animated lesson content, so it's
-# painted every frame regardless of clear_canvas().
-_TRAY_COLORS = [QColor(215, 35, 35), QColor(35, 95, 200), QColor(30, 30, 35)]  # red, blue, black
-_TRAY_BARREL_COLOR = QColor(245, 245, 240)
-_TRAY_BARREL_OUTLINE = QColor(120, 120, 120)
-_TRAY_PEN_LENGTH = 78
-_TRAY_PEN_WIDTH = 15
-_TRAY_TIP_LENGTH = 16
-_TRAY_PEN_SPACING = 26
-_TRAY_X = 26
-_TRAY_Y = 655
 
 
 @dataclass
@@ -140,6 +142,7 @@ class TeachingCanvas(QGraphicsObject):
         self.polygon_items: List[_Polygon] = []
         self.arc_items: List[_Arc] = []
         self.underline_items: List[_Underline] = []
+        self.title_text: str = ""
 
         # Laser-pointer dot state - see module docstring and _retarget_laser.
         self._laser_visible = False
@@ -167,7 +170,7 @@ class TeachingCanvas(QGraphicsObject):
         painter.fillRect(rect, _BG_COLOR)
         self._paint_grid(painter, rect)
         self._paint_frame(painter, rect)
-        self._paint_marker_tray(painter)
+        self._paint_title(painter, rect)
 
         for line in self.lines:
             self._paint_line(painter, line, now)
@@ -204,23 +207,15 @@ class TeachingCanvas(QGraphicsObject):
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(rect.adjusted(3, 3, -3, -3), 18, 18)
 
-    def _paint_marker_tray(self, painter: QPainter) -> None:
-        """Three resting markers (red/blue/black) in the bottom-left corner -
-        decorative chrome, same idea as the grid/frame, always drawn."""
-        for i, color in enumerate(_TRAY_COLORS):
-            y = _TRAY_Y + i * _TRAY_PEN_SPACING
-            barrel = QRectF(_TRAY_X, y, _TRAY_PEN_LENGTH, _TRAY_PEN_WIDTH)
-            painter.setPen(QPen(_TRAY_BARREL_OUTLINE, 1.5))
-            painter.setBrush(QBrush(_TRAY_BARREL_COLOR))
-            painter.drawRoundedRect(barrel, _TRAY_PEN_WIDTH / 2, _TRAY_PEN_WIDTH / 2)
-
-            tip = QRectF(
-                _TRAY_X + _TRAY_PEN_LENGTH - _TRAY_TIP_LENGTH, y,
-                _TRAY_TIP_LENGTH, _TRAY_PEN_WIDTH
-            )
-            painter.setPen(QPen(color.darker(130), 1.5))
-            painter.setBrush(QBrush(color))
-            painter.drawRoundedRect(tip, _TRAY_PEN_WIDTH / 2, _TRAY_PEN_WIDTH / 2)
+    def _paint_title(self, painter: QPainter, rect: QRectF) -> None:
+        if not self.title_text:
+            return
+        font = QFont("Comic Sans MS", _TITLE_FONT_SIZE)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QPen(_TITLE_COLOR))
+        title_rect = QRectF(rect.left(), rect.top() + _TITLE_TOP_MARGIN, rect.width(), _TITLE_BAND_HEIGHT)
+        painter.drawText(title_rect, Qt.AlignHCenter | Qt.AlignTop, self.title_text)
 
     @staticmethod
     def _progress(start_time: float, now: float, duration: float = _SHAPE_ANIM_SECONDS) -> float:
@@ -333,7 +328,12 @@ class TeachingCanvas(QGraphicsObject):
         painter.drawText(QPointF(item.x, item.y), visible)
 
     def _paint_underline(self, painter: QPainter, item: _Underline, now: float) -> None:
-        p = self._progress(item.start_time, now, duration=_UNDERLINE_ANIM_SECONDS)
+        # Scales with span so a longer underline takes proportionally
+        # longer, same idea as _paint_text's typewriter pacing - this is
+        # what makes it read as being drawn WHILE the line is explained
+        # rather than flashing in before the explanation even starts.
+        duration = max(_UNDERLINE_ANIM_MIN_SECONDS, item.width * _UNDERLINE_SECONDS_PER_PX)
+        p = self._progress(item.start_time, now, duration=duration)
         visible_width = item.width * p
         if visible_width <= 0:
             return
@@ -435,6 +435,10 @@ class TeachingCanvas(QGraphicsObject):
         self.underline_items.append(_Underline(x, y, width, time.monotonic()))
         self.update()
 
+    def set_title(self, text):
+        self.title_text = text
+        self.update()
+
     def handle_draw_actions(self, actions):
         """Entry point for UISignals.draw_actions - a list of action dicts."""
         # Tracks each draw_text line drawn in this batch so the laser
@@ -500,6 +504,9 @@ class TeachingCanvas(QGraphicsObject):
                 self.add_underline(
                     action.get("x", 100), action.get("y", 100), action.get("width", 100)
                 )
+
+            elif action_type == "set_title":
+                self.set_title(action.get("text", ""))
 
         if text_positions:
             x, y = text_positions[-1]

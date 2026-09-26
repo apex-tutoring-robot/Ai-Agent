@@ -300,6 +300,7 @@ class LLMClient:
       "check_question": "string or null",
       "visuals": [
         {"speech_id": 1, "action": "clear"},
+        {"speech_id": 1, "action": "set_title", "text": "Area of a Rectangle"},
         {"speech_id": 1, "action": "draw_text", "text": "string", "x": 100, "y": 120},
         {"speech_id": 1, "action": "draw_line", "x1": 0, "y1": 0, "x2": 100, "y2": 100},
         {"speech_id": 1, "action": "draw_rect", "x": 580, "y": 160, "w": 220, "h": 160},
@@ -313,6 +314,10 @@ class LLMClient:
     }
 
     Action field reference:
+    - set_title: shows a short title at the top of the whiteboard naming what's being
+      taught (e.g. "Area of a Rectangle", "Equivalent Fractions") - written in Title
+      Case, not snake_case. Always emit this once, with speech_id 1, right alongside
+      the initial "clear" action for every new question.
     - draw_circle: x,y = CENTER of circle. r = radius (for circles). rx,ry = separate radii (for ellipses).
     - draw_rect: x,y = top-left corner. w,h = width and height.
     - draw_regular_polygon: sides=number of sides, cx/cy=center, radius=circumscribed radius.
@@ -341,7 +346,9 @@ class LLMClient:
       simple, already fully-answered question where a follow-up check would feel
       repetitive. Do NOT put the check question in speech - it is spoken separately,
       after the explanation.
-    - Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+    - Always include exactly one "set_title" action, speech_id 1, right after the
+      initial "clear" - every question gets a title naming the topic.
     - Use 2-5 speech steps
     - Keep explanations short and teacher-like
     - Every visual must map to a valid speech_id

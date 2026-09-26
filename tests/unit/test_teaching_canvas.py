@@ -157,6 +157,17 @@ class TestHandleDrawActions:
         canvas.handle_draw_actions([{"action": "clear"}])
         assert canvas.underline_items == []
 
+    def test_set_title_action_sets_the_title(self):
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([{"action": "set_title", "text": "Area of a Rectangle"}])
+        assert canvas.title_text == "Area of a Rectangle"
+
+    def test_clear_action_does_not_clear_the_title(self):
+        canvas = TeachingCanvas()
+        canvas.set_title("Area of a Rectangle")
+        canvas.handle_draw_actions([{"action": "clear"}])
+        assert canvas.title_text == "Area of a Rectangle"
+
 
 class TestLaserPointerRetargeting:
     def test_laser_is_hidden_before_any_visuals_arrive(self):

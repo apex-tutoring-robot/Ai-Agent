@@ -34,6 +34,7 @@ Schema:
   "check_question": "string or null",
   "visuals": [
     {"speech_id": 1, "action": "clear"},
+    {"speech_id": 1, "action": "set_title", "text": "Area of a Rectangle"},
     {"speech_id": 1, "action": "draw_text", "text": "string", "x": 100, "y": 120}
   ]
 }
@@ -45,7 +46,10 @@ Rules:
   explaining, or null for a simple already-answered question. Not part of speech.
   MUST use DIFFERENT numbers/values than the worked example - test whether the
   student can apply the idea to a new case, never repeat the same numbers.
-- Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+- Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+- set_title shows a short Title Case title at the top of the board naming the topic
+  (e.g. "Area of a Rectangle") - always include exactly one, speech_id 1, right after
+  the initial "clear".
 - squiggly_underline draws a red squiggly line under something already on the board to
   call it out (x,y = left edge/baseline of what's being underlined, width = span) -
   always use it to underline the final answer once calculated, like a teacher
