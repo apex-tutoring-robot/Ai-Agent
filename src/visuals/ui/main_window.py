@@ -100,14 +100,19 @@ class MainWindow(QMainWindow):
     def show_expression(self, expression: str):
         """
         Maps an expression.controller.Expression value onto a FaceWidget
-        emotion - see ui_signals.py's set_expression. "excited" and
-        "confused" are their own named states now (see FaceWidget's
-        _EXPANSION_FALLBACKS) - they currently render as the happy/neutral
-        art respectively until dedicated art exists, but the semantic
-        state is correct today so nothing else needs to change once art
-        is added. "encouraging" uses the thinking face, which reads as
-        attentive/considered rather than flatly neutral, closer to how a
-        hint is actually delivered.
+        emotion - see ui_signals.py's set_expression. "encouraging" uses
+        the thinking face, which reads as attentive/considered rather
+        than flatly neutral, closer to how a hint is actually delivered.
+        "calm" isn't one of the Face Animation doc's 6 required
+        expressions, so it falls through to idle/neutral like it always
+        has - "friendly"/"excited"/"encouraging"/"confused"/"sad" are.
+
+        Bug found live: "confused" and "sad" were both being correctly
+        DECIDED by ExpressionController (confused on a safety refusal,
+        see refusal()) but never actually displayed - this function had
+        no branch for them at all, so they silently fell through to
+        idle/neutral despite FaceWidget.start_confused()/start_sad()
+        (and their art) already existing.
         """
         if expression == "friendly":
             self.face_widget.start_happy()
@@ -115,6 +120,10 @@ class MainWindow(QMainWindow):
             self.face_widget.start_excited()
         elif expression == "encouraging":
             self.face_widget.start_thinking()
+        elif expression == "confused":
+            self.face_widget.start_confused()
+        elif expression == "sad":
+            self.face_widget.start_sad()
         else:
             self.face_widget.start_idle()
 

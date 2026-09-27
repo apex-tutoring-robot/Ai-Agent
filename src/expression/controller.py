@@ -5,11 +5,12 @@ vocabulary of delivery states, then to concrete TTS SSML prosody
 `delivery` parameter. Each Expression also drives FaceWidget via
 UISignals.set_expression - see visuals/ui/main_window.py's show_expression().
 
-SAD exists in the enum (the product spec's Face Animation doc calls for
-it) but isn't wired to a specific trigger yet - nothing in the current
-tutoring flow has an obviously "sad" moment, and forcing one in would be
-guessing at UX rather than reflecting a real decision. It's available for
-whoever decides where it belongs.
+SAD is wired to TutorAction.RETEACH - the moment a student gets the same
+question wrong twice, teaching stops re-testing it and explains the
+concept a different way instead. That's the one point in the current
+tutoring flow with a genuinely "this isn't landing" quality to it, as
+opposed to HINT's first-attempt "close, try again" (still upbeat/
+patient, stays ENCOURAGING/CALM).
 """
 
 from dataclasses import dataclass
@@ -53,7 +54,7 @@ _ACTION_EXPRESSION = {
     TutorAction.CONTINUE: Expression.FRIENDLY,
     TutorAction.CHALLENGE: Expression.EXCITED,
     TutorAction.HINT: Expression.ENCOURAGING,
-    TutorAction.RETEACH: Expression.CALM,
+    TutorAction.RETEACH: Expression.SAD,
 }
 
 

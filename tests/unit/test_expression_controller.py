@@ -27,9 +27,9 @@ class TestForAction:
         style = ExpressionController().for_action(TutorAction.HINT, repeated_struggle=True)
         assert style.expression == Expression.CALM
 
-    def test_reteach_is_calm(self):
+    def test_reteach_is_sad(self):
         style = ExpressionController().for_action(TutorAction.RETEACH)
-        assert style.expression == Expression.CALM
+        assert style.expression == Expression.SAD
 
     def test_repeated_struggle_does_not_affect_non_hint_actions(self):
         style = ExpressionController().for_action(TutorAction.CONTINUE, repeated_struggle=True)
