@@ -1,9 +1,22 @@
 import cv2
+import logging
 import os
 import time
 import random
 import subprocess
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# See face_widget.py's identical constant - kept in sync since these two
+# classes deliberately share a public API.
+_EXPANSION_FALLBACKS = {
+    "excited": "happy",
+    "sad": "neutral",
+    "confused": "neutral",
+    "listening": "neutral",
+}
+
 
 class FaceAnimator:
     def __init__(self, face_dir, fullscreen: bool = True):
@@ -21,10 +34,12 @@ class FaceAnimator:
         # Blink state
         self.blink = 0.0
 
-        # Load images
+        # Load images - see face_widget.py's identical comment
         self.faces = {}
         for name in ["neutral", "thinking", "happy", "blinking"]:
             self.faces[name] = self._load(name + ".png")
+        for name, fallback in _EXPANSION_FALLBACKS.items():
+            self.faces[name] = self._load_optional(name + ".png", fallback)
 
         self.talk_frames = [self._load(f"talk{i}.png") for i in range(1, 6)]
 
@@ -50,6 +65,14 @@ class FaceAnimator:
             raise RuntimeError(f"Failed to load {path}")
         return cv2.resize(img, (600, 600))
 
+    def _load_optional(self, name, fallback_emotion):
+        path = os.path.join(self.face_dir, name)
+        img = cv2.imread(path)
+        if img is None:
+            logger.warning(f"No art for {name} yet - using '{fallback_emotion}' face instead")
+            return self.faces[fallback_emotion]
+        return cv2.resize(img, (600, 600))
+
     # --------------------------------------------------
     # Public API
     # --------------------------------------------------
@@ -60,6 +83,24 @@ class FaceAnimator:
 
     def start_thinking(self):
         self.emotion = "thinking"
+        self.is_talking = False
+
+    def start_happy(self):
+        self.emotion = "happy"
+
+    def start_excited(self):
+        self.emotion = "excited"
+
+    def start_confused(self):
+        self.emotion = "confused"
+        self.is_talking = False
+
+    def start_sad(self):
+        self.emotion = "sad"
+        self.is_talking = False
+
+    def start_listening(self):
+        self.emotion = "listening"
         self.is_talking = False
 
     def start_talking(self):
@@ -152,7 +193,6 @@ class FaceAnimator:
 
         if self.blink > 0.7:
             frame = self.faces["blinking"].copy()
-
 
         return cv2.resize(frame, (1280, 720))
 

@@ -239,7 +239,15 @@ class AudioPlayer:
                     rms = np.sqrt(np.mean(a * a)) / 32768.0
                     if rms < 0.02:
                         rms = 0.0
-                    level = min(rms * 8.0, 1.0)
+                    # min() with a numpy scalar operand returns that numpy
+                    # type (float32/float64), not a native Python float -
+                    # PyQt5's strict signal-signature matching then rejects
+                    # it for mouth_level's pyqtSignal(float) slot ("does not
+                    # have a signal with the signature mouth_level(double)"),
+                    # silently dropping every lip-sync update at moderate
+                    # volume (only 0.0 and the 1.0-clamp case were plain
+                    # Python floats, so it looked intermittent).
+                    level = float(min(rms * 8.0, 1.0))
                     self.on_level(level)
                 except Exception as e:
                     logger.error(f"Error calculating RMS: {e}")

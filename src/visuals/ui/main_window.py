@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
             return
         self.signals.listening.connect(self.show_listening_mode)
         self.signals.thinking.connect(self.show_thinking_mode)
+        self.signals.set_expression.connect(self.show_expression)
         self.signals.start_talking.connect(self.face_widget.start_talking)
         self.signals.stop_talking.connect(self.face_widget.stop_talking)
         self.signals.mouth_level.connect(self.face_widget.push_mouth_level)
@@ -91,10 +92,31 @@ class MainWindow(QMainWindow):
 
     def show_listening_mode(self):
         self.face_widget.stop_talking()
-        self.face_widget.start_idle()
+        self.face_widget.start_listening()
 
     def show_thinking_mode(self):
         self.face_widget.start_thinking()
+
+    def show_expression(self, expression: str):
+        """
+        Maps an expression.controller.Expression value onto a FaceWidget
+        emotion - see ui_signals.py's set_expression. "excited" and
+        "confused" are their own named states now (see FaceWidget's
+        _EXPANSION_FALLBACKS) - they currently render as the happy/neutral
+        art respectively until dedicated art exists, but the semantic
+        state is correct today so nothing else needs to change once art
+        is added. "encouraging" uses the thinking face, which reads as
+        attentive/considered rather than flatly neutral, closer to how a
+        hint is actually delivered.
+        """
+        if expression == "friendly":
+            self.face_widget.start_happy()
+        elif expression == "excited":
+            self.face_widget.start_excited()
+        elif expression == "encouraging":
+            self.face_widget.start_thinking()
+        else:
+            self.face_widget.start_idle()
 
     def show_sleep_mode(self):
         self._position_sleep_overlay()

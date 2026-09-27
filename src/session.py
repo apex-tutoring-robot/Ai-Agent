@@ -46,6 +46,19 @@ class Session:
     # the conversation. Empty for a session that was just casual chat.
     concepts_covered: List[str] = field(default_factory=list)
 
+    # True once this session has offered a retrieval-practice review of an
+    # older concept (see JarvisBot._handle_teaching_answer) - caps it at
+    # once per conversation so a run of correct answers doesn't turn into
+    # a review quiz instead of the lesson the student actually asked for.
+    retrieval_practice_offered: bool = False
+
+    # True once this session has run its warm-up/discovery check-in (see
+    # JarvisBot._start_warmup_checkin, called right at conversation start).
+    # Guards against a stray re-entry into the check-in mid-conversation
+    # rather than gating anything else - the interlude only ever runs once,
+    # at the very beginning.
+    warmup_done: bool = False
+
     def record_tool_call(self, tool_name: str, arguments: dict, result: Any) -> None:
         self.tool_calls.append({
             "tool": tool_name,

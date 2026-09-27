@@ -71,6 +71,10 @@ class ProfileManager:
                     avatar_path TEXT,
                     voiceprint_id TEXT,
                     grade TEXT,
+                    school TEXT,
+                    interests TEXT,
+                    learning_challenges TEXT,
+                    face_signature TEXT,
                     created_at TEXT NOT NULL,
                     last_active_at TEXT
                 );
@@ -96,7 +100,20 @@ class ProfileManager:
                     correct_attempts INTEGER NOT NULL DEFAULT 0,
                     hints_used INTEGER NOT NULL DEFAULT 0,
                     last_practiced_at TEXT,
+                    last_question TEXT,
                     UNIQUE(profile_id, concept)
+                );
+
+                CREATE TABLE IF NOT EXISTS learning_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER NOT NULL REFERENCES profiles(id),
+                    session_id TEXT,
+                    concept TEXT NOT NULL,
+                    result TEXT,
+                    action TEXT,
+                    attempt_number INTEGER,
+                    misconception TEXT,
+                    created_at TEXT NOT NULL
                 );
             """)
             self._conn.commit()
@@ -121,6 +138,30 @@ class ProfileManager:
             if "grade" not in existing_columns:
                 self._conn.execute("ALTER TABLE profiles ADD COLUMN grade TEXT")
                 logger.info("🔧 Migrated profiles table: added 'grade' column")
+
+            if "interests" not in existing_columns:
+                self._conn.execute("ALTER TABLE profiles ADD COLUMN interests TEXT")
+                logger.info("🔧 Migrated profiles table: added 'interests' column")
+
+            if "learning_challenges" not in existing_columns:
+                self._conn.execute("ALTER TABLE profiles ADD COLUMN learning_challenges TEXT")
+                logger.info("🔧 Migrated profiles table: added 'learning_challenges' column")
+
+            if "face_signature" not in existing_columns:
+                self._conn.execute("ALTER TABLE profiles ADD COLUMN face_signature TEXT")
+                logger.info("🔧 Migrated profiles table: added 'face_signature' column")
+
+            if "school" not in existing_columns:
+                self._conn.execute("ALTER TABLE profiles ADD COLUMN school TEXT")
+                logger.info("🔧 Migrated profiles table: added 'school' column")
+
+            mastery_columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(concept_mastery)")
+            }
+            if "last_question" not in mastery_columns:
+                self._conn.execute("ALTER TABLE concept_mastery ADD COLUMN last_question TEXT")
+                logger.info("🔧 Migrated concept_mastery table: added 'last_question' column")
+
             self._conn.commit()
 
     # --------------------------------------------------
@@ -179,7 +220,20 @@ class ProfileManager:
         return profile_id
 
     def find_profile_by_name(self, spoken_name: str) -> Optional[int]:
-        """Fuzzy-match a spoken name against existing profile names."""
+        """
+        Fuzzy-match a spoken name against existing profile names.
+
+        Also checks the spoken name against just the FIRST WORD of each
+        stored name, not only the whole string - found live (via an
+        automated end-to-end test): a stored name like "Brian Leiss."
+        (STT sometimes captures a surname/trailing word during
+        onboarding) scores only ~0.59 against a bare "Brian" under plain
+        SequenceMatcher.ratio(), well under the 0.75 threshold, even
+        though a kid asked "what's your name?" will almost always answer
+        with just a first name. Without this, that mismatch silently
+        creates a duplicate profile instead of recognizing the same
+        person - confirmed reproducible with this exact name pair.
+        """
         normalized = spoken_name.strip().lower()
         if not normalized:
             return None
@@ -189,7 +243,12 @@ class ProfileManager:
 
         best_id, best_ratio = None, 0.0
         for row in rows:
-            ratio = SequenceMatcher(None, normalized, row["name"].strip().lower()).ratio()
+            stored = row["name"].strip().lower()
+            first_word = stored.split()[0] if stored.split() else stored
+            ratio = max(
+                SequenceMatcher(None, normalized, stored).ratio(),
+                SequenceMatcher(None, normalized, first_word).ratio(),
+            )
             if ratio > best_ratio:
                 best_id, best_ratio = row["id"], ratio
 
@@ -211,6 +270,35 @@ class ProfileManager:
                 (avatar_path, profile_id)
             )
             self._conn.commit()
+
+    def set_face_signature(self, profile_id: int, signature: str) -> None:
+        """See identity/face_matcher.py for what `signature` actually is -
+        a deliberately basic similarity fingerprint, not a real face
+        embedding. Set once at enrollment, from the same avatar photo
+        capture_avatar_photo() already takes with consent."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE profiles SET face_signature = ? WHERE id = ?",
+                (signature, profile_id)
+            )
+            self._conn.commit()
+
+    def get_face_signature(self, profile_id: int) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT face_signature FROM profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+        return row["face_signature"] if row else None
+
+    def get_all_face_signatures(self) -> "list[tuple[int, str, str]]":
+        """(profile_id, name, face_signature) for every profile with one
+        enrolled - used by FaceIdentityProvider to compare a freshly
+        captured photo against everyone on file."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, name, face_signature FROM profiles WHERE face_signature IS NOT NULL"
+            ).fetchall()
+        return [(r["id"], r["name"], r["face_signature"]) for r in rows]
 
     def get_profile_name(self, profile_id: int) -> Optional[str]:
         with self._lock:
@@ -236,34 +324,154 @@ class ProfileManager:
             ).fetchone()
         return row["grade"] if row else None
 
+    def set_school(self, profile_id: int, school: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE profiles SET school = ? WHERE id = ?",
+                (school, profile_id)
+            )
+            self._conn.commit()
+
+    def get_school(self, profile_id: int) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT school FROM profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+        return row["school"] if row else None
+
+    def set_interests(self, profile_id: int, text: str) -> None:
+        """Free-text summary of what this student likes (favorite subject,
+        hobbies) - gathered during onboarding (see JarvisBot.
+        _handle_onboarding_answer), used to personalize how examples are
+        framed (see LLMClient's student_context parameter)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE profiles SET interests = ? WHERE id = ?",
+                (text, profile_id)
+            )
+            self._conn.commit()
+
+    def get_interests(self, profile_id: int) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT interests FROM profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+        return row["interests"] if row else None
+
+    def set_learning_challenges(self, profile_id: int, text: str) -> None:
+        """Free-text summary of what this student finds hard/frustrating
+        about learning - gathered during onboarding, used to adjust pacing
+        and tone (e.g. more encouragement, smaller steps) rather than only
+        what examples are framed around."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE profiles SET learning_challenges = ? WHERE id = ?",
+                (text, profile_id)
+            )
+            self._conn.commit()
+
+    def get_learning_challenges(self, profile_id: int) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT learning_challenges FROM profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+        return row["learning_challenges"] if row else None
+
     # --------------------------------------------------
     # Concept mastery (per-student tutoring progress)
     # --------------------------------------------------
 
-    def record_attempt(self, profile_id: int, concept: str, correct: bool, used_hint: bool = False) -> None:
+    def record_attempt(
+        self, profile_id: int, concept: str, correct: bool, used_hint: bool = False, question: Optional[str] = None
+    ) -> None:
         """
         Record one comprehension-check attempt for `concept` (a short
         identifier like "equivalent_fractions", provided by the teaching
         plan itself - see JarvisBot._handle_teaching_answer). Upserts: a
         student's first attempt at a concept creates the row, later
         attempts accumulate onto it.
+
+        `question` (if given) is stored as this concept's last_question -
+        reused later for retrieval practice (see get_weak_concept_for_review)
+        instead of paying for another LLM call to generate a fresh one.
+        COALESCE keeps the existing stored question when this call doesn't
+        pass one, rather than overwriting it with NULL.
         """
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO concept_mastery
-                    (profile_id, concept, attempts, correct_attempts, hints_used, last_practiced_at)
-                VALUES (?, ?, 1, ?, ?, ?)
+                    (profile_id, concept, attempts, correct_attempts, hints_used, last_practiced_at, last_question)
+                VALUES (?, ?, 1, ?, ?, ?, ?)
                 ON CONFLICT(profile_id, concept) DO UPDATE SET
                     attempts = attempts + 1,
                     correct_attempts = correct_attempts + excluded.correct_attempts,
                     hints_used = hints_used + excluded.hints_used,
-                    last_practiced_at = excluded.last_practiced_at
+                    last_practiced_at = excluded.last_practiced_at,
+                    last_question = COALESCE(excluded.last_question, concept_mastery.last_question)
                 """,
-                (profile_id, concept, 1 if correct else 0, 1 if used_hint else 0, now),
+                (profile_id, concept, 1 if correct else 0, 1 if used_hint else 0, now, question),
             )
             self._conn.commit()
+
+    def record_learning_event(
+        self,
+        profile_id: int,
+        session_id: Optional[str],
+        concept: str,
+        result: Optional[str],
+        action: Optional[str],
+        attempt_number: int,
+        misconception: Optional[str] = None,
+    ) -> None:
+        """
+        Appends one row to the learning_events audit log - one row per
+        comprehension-check answer (see JarvisBot._handle_teaching_answer),
+        alongside (not instead of) the aggregate counters record_attempt()
+        already maintains on concept_mastery. Unlike concept_mastery's
+        upsert, this never overwrites anything - it's a plain append-only
+        log, specifically so a real misconception (e.g. "compares
+        denominator magnitude instead of finding a common one") isn't
+        just logged and discarded the way it is today, and so future work
+        (a real StudentModel, episodic "what worked last time" summaries)
+        has real history to derive from instead of only current totals.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO learning_events
+                    (profile_id, session_id, concept, result, action, attempt_number, misconception, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (profile_id, session_id, concept, result, action, attempt_number, misconception, now),
+            )
+            self._conn.commit()
+
+    def get_recent_misconceptions(self, profile_id: int, concept: Optional[str] = None, limit: int = 5) -> list[dict]:
+        """
+        Most recent non-null misconceptions for this student, newest
+        first - optionally scoped to one concept. Returns
+        {concept, misconception, created_at} dicts. Not consumed anywhere
+        yet (no ReviewScheduler/StudentModel to hand it to) - this exists
+        so that future work has something real to query instead of
+        needing its own data-access logic bolted onto ProfileManager later.
+        """
+        query = (
+            "SELECT concept, misconception, created_at FROM learning_events "
+            "WHERE profile_id = ? AND misconception IS NOT NULL"
+        )
+        params: list = [profile_id]
+        if concept:
+            query += " AND concept = ?"
+            params.append(concept)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [{"concept": r["concept"], "misconception": r["misconception"], "created_at": r["created_at"]} for r in rows]
 
     def get_mastery(self, profile_id: int, concept: str) -> dict:
         """Returns {attempts, correct_attempts, hints_used} - all zero if
@@ -277,6 +485,62 @@ class ProfileManager:
         if row is None:
             return {"attempts": 0, "correct_attempts": 0, "hints_used": 0}
         return {"attempts": row["attempts"], "correct_attempts": row["correct_attempts"], "hints_used": row["hints_used"]}
+
+    def get_mastered_concepts(self, profile_id: int, min_attempts: int = 2, min_accuracy: float = 0.7) -> "set[str]":
+        """
+        Concepts this student has practiced enough times with high enough
+        accuracy to be considered mastered - used by CurriculumGraph.
+        suggest_next() (see tutor/question_engine.py's ProactiveQuestionEngine)
+        so it doesn't keep suggesting a concept the student already has a
+        handle on. Deliberately simple fixed thresholds, not a real
+        StudentModel's mastery_estimate (not built - see the architecture
+        review) - good enough to avoid the obviously wrong case of
+        re-suggesting an already-mastered concept.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT concept, attempts, correct_attempts FROM concept_mastery WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchall()
+        return {
+            r["concept"] for r in rows
+            if r["attempts"] >= min_attempts and (r["correct_attempts"] / r["attempts"]) >= min_accuracy
+        }
+
+    def get_weak_concept_for_review(self, profile_id: int, exclude: "set[str]" = frozenset()) -> Optional[dict]:
+        """
+        The single best retrieval-practice candidate from this student's
+        history: a concept they've gotten wrong at least once, with a
+        stored question to re-ask, not already covered this session. None
+        if there's nothing to review (new student, or everything they've
+        tried they got right immediately) - the caller should treat that
+        as "no retrieval practice this turn", not an error.
+
+        Picks the lowest accuracy ratio (correct_attempts / attempts) as
+        the most valuable thing to revisit; ties broken by whichever was
+        practiced longest ago (most overdue). Deliberately reuses the
+        exact stored question rather than generating a fresh one via
+        another LLM call - a real repetition (not a paraphrase) is fine
+        for a quick spaced-review check, and this stays a cheap DB read.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT concept, attempts, correct_attempts, last_question, last_practiced_at "
+                "FROM concept_mastery "
+                "WHERE profile_id = ? AND correct_attempts < attempts AND last_question IS NOT NULL",
+                (profile_id,),
+            ).fetchall()
+
+        candidates = [r for r in rows if r["concept"] not in exclude]
+        if not candidates:
+            return None
+
+        def sort_key(r):
+            ratio = r["correct_attempts"] / r["attempts"] if r["attempts"] else 0.0
+            return (ratio, r["last_practiced_at"] or "")
+
+        best = min(candidates, key=sort_key)
+        return {"concept": best["concept"], "question": best["last_question"]}
 
     # --------------------------------------------------
     # Switching

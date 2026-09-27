@@ -3,6 +3,7 @@ import os
 
 import re
 import subprocess
+import textwrap
 import threading
 import time
 import queue
@@ -31,9 +32,22 @@ from profiles.camera_capture import capture_avatar_photo
 from session import Session
 from knowledge.textbook_search import TextbookSearch, normalize_grade
 from guardrails.guardrails_manager import GuardrailsManager
+from guardrails.fast_content_filter import FastContentFilter
+from identity.identity_provider import IdentityObservation
+from identity.identity_resolver import IdentityResolver
+from identity.name_identity_provider import NameIdentityProvider
+from identity.face_identity_provider import FaceIdentityProvider
+from identity.face_matcher import compute_signature as compute_face_signature
+from tutor.decision_engine import TutorAction, TutorDecisionEngine
+from tutor.review_scheduler import ReviewScheduler
+from tutor.question_engine import ProactiveQuestionEngine
+from curriculum.graph import CurriculumGraph
+from affect.interaction_signals import InteractionSignalEngine
+from expression.controller import Expression, ExpressionController
 
 from visuals.ui.ui_signals import UISignals
 from visuals.ui.main_window import MainWindow
+from visuals.scene_planner import ScenePlanner
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -102,10 +116,19 @@ VOLUME_CONTROL_TOOL = {
 class JarvisBot:
     """Main orchestrator for Jarvis tutoring robot."""
 
-    # Asked in order right after a brand new profile is created.
+    # Asked in order right after a brand new profile is created - this is
+    # Jarvis's only chance to learn who a student actually is before
+    # teaching them anything (see _handle_onboarding_answer for where each
+    # answer gets parsed/stored). Deliberately more than just grade level:
+    # interests and what feels hard to a student are the kind of thing a
+    # real tutor picks up on over weeks of working with a 3rd-5th grader -
+    # asking directly up front is the only way Jarvis gets it at all.
     ONBOARDING_QUESTIONS = [
         "What grade are you in?",
+        "What school do you go to?",
         "What's your favorite subject to learn about?",
+        "What do you like to do for fun, outside of school?",
+        "Is there anything about learning that feels hard or frustrating for you?",
     ]
 
     def __init__(self, ui_signals: Optional['UISignals'] = None):
@@ -156,8 +179,47 @@ class JarvisBot:
             max_history=int(os.getenv('MAX_CONVERSATION_HISTORY', 20))
         )
         self.conversation_manager = self.profile_manager.get_conversation_manager()
+
+        # Name-only identity resolution for now (see identity/identity_provider.py
+        # for why voice biometrics aren't in scope yet) - a list of one
+        # provider so a future SpeakerIdentityProvider can be appended
+        # here without JarvisBot needing to change anywhere else.
+        # FaceIdentityProvider is wired in but currently a no-op in
+        # practice - nothing anywhere supplies IdentityObservation.
+        # photo_path yet, since doing that would mean automatically
+        # capturing a photo (most likely at wake-word time), a real
+        # privacy/consent decision for a device aimed at children that
+        # hasn't been made explicitly. See identity/face_identity_provider.py.
+        self.identity_resolver = IdentityResolver([
+            NameIdentityProvider(self.profile_manager),
+            FaceIdentityProvider(self.profile_manager),
+        ])
+
+        # Centralizes the hint/reteach/continue/challenge policy applied
+        # after each comprehension-check answer - see tutor/decision_engine.py.
+        self.tutor_decision_engine = TutorDecisionEngine()
+
+        # Picks and freshens a retrieval-practice question - see tutor/review_scheduler.py.
+        self.review_scheduler = ReviewScheduler(self.profile_manager, self.llm_client)
+
+        # Concept prerequisite graph (starter scaffold, see curriculum/graph.py)
+        # and the proactive suggestion engine built on top of it - lets
+        # Jarvis offer something to work on instead of only ever reacting
+        # to a question the student thought to ask.
+        self.curriculum_graph = CurriculumGraph()
+        self.proactive_question_engine = ProactiveQuestionEngine(self.profile_manager, self.curriculum_graph)
+
+        # Text-heuristic signals (hesitation, repeated struggle) and the
+        # voice-delivery mapping built on top of them - see
+        # affect/interaction_signals.py and expression/controller.py.
+        self.interaction_signal_engine = InteractionSignalEngine()
+        self.expression_controller = ExpressionController()
+
         self._avatars_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "data", "avatars"
+        )
+        self._homework_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "data", "homework"
         )
         
         self._is_running = False
@@ -185,12 +247,34 @@ class JarvisBot:
         # not a fresh unrelated turn.
         self._pending_name_capture: bool = False
 
+        # Set right after asking "what's your name?" at the start of a
+        # conversation with no obvious active profile (see
+        # _start_identity_checkin) - {"step"} where step is "ask_name" or
+        # "confirm" (plus "candidate_id"/"candidate_name" once a fuzzy
+        # name match needs confirming). None when no check-in is pending.
+        # See _handle_identity_checkin_step.
+        self._pending_identity_checkin: Optional[dict] = None
+
         # Set right after a teaching turn asks a comprehension-check
         # question (see _run_teaching_turn) - {"concept", "question",
         # "attempts"}. The next utterance is the student's answer to that
         # question, not a fresh unrelated turn. None when no check is
         # pending. See _handle_teaching_answer.
         self._pending_teaching_check: Optional[dict] = None
+
+        # Set right at the start of a conversation, replacing the old
+        # canned greeting (see _start_warmup_checkin) - {"step"} where step
+        # is "warmup" or "discovery". The next one or two utterances are
+        # answers to this check-in, not a fresh turn. None when no
+        # check-in is pending. See _handle_warmup_step.
+        self._pending_warmup_checkin: Optional[dict] = None
+
+        # Set right after Jarvis proactively offers a concept to work on
+        # (see _handle_warmup_step's discovery branch / tutor/question_engine.py)
+        # - {"concept"}. The next utterance is a yes/no answer to that
+        # offer, not a fresh turn. None when no offer is pending. See
+        # _handle_proactive_suggestion_reply.
+        self._pending_proactive_suggestion: Optional[dict] = None
 
         # ── Current conversation session (see session.py) ──
         # None outside of an active conversation; a fresh Session is created
@@ -209,6 +293,11 @@ class JarvisBot:
         self.guardrails_manager = GuardrailsManager(
             config_path=os.getenv('GUARDRAILS_CONFIG_PATH', 'config/guardrails')
         )
+        # Synchronous keyword/pattern check layered in front of the async
+        # NeMo check above - see fast_content_filter.py's module docstring
+        # for why the async check alone leaves a real (if narrow)
+        # exposure window before it can act.
+        self.fast_content_filter = FastContentFilter()
         # Identifies which turn's audio a background safety check belongs
         # to (by object identity) - lets a check that resolves after the
         # conversation has already moved to a newer turn recognize it's
@@ -271,11 +360,16 @@ class JarvisBot:
         overlap = words_a & words_b
         return len(overlap) / min(len(words_a), len(words_b))
 
-    def _speak_fixed_phrase(self, phrase: str, continuous_vad, output_device_index: int) -> None:
+    def _speak_fixed_phrase(self, phrase: str, continuous_vad, output_device_index: int, delivery=None) -> None:
         """
         Speak a fixed, non-LLM-generated phrase (profile switch/creation
         confirmations). Same TTS/playback/echo-guard pattern as a normal
         turn in _speaker_loop, just with fixed text.
+
+        delivery: optional expression.controller.DeliveryStyle - a
+        per-utterance rate/pitch nudge (see ExpressionController), passed
+        straight through to TextToSpeechClient.synthesize_stream(). None
+        (the default) plays at the normal, unadjusted delivery.
         """
         logger.info(f"🗣️  {phrase}")
         try:
@@ -286,7 +380,7 @@ class JarvisBot:
             self._bot_is_speaking = True
             continuous_vad.set_playback_state(True)
 
-            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase]), delivery=delivery):
                 if self.audio_player._is_playing:
                     self.audio_player.queue_audio(audio_chunk)
                 else:
@@ -351,7 +445,11 @@ class JarvisBot:
         # abort (one ~20ms callback cycle) and finish that cleanup itself
         # first, so this thread isn't racing it to touch the same stream.
         time.sleep(0.2)
-        self._speak_fixed_phrase(refusal_text, continuous_vad, output_device_index)
+        if self.ui_signals:
+            self.ui_signals.set_expression.emit(Expression.CONFUSED.value)
+        self._speak_fixed_phrase(
+            refusal_text, continuous_vad, output_device_index, delivery=self.expression_controller.refusal()
+        )
 
     def _try_handle_profile_command(self, user_text: str, continuous_vad, output_device_index: int) -> bool:
         """
@@ -370,8 +468,12 @@ class JarvisBot:
                 self.conversation_manager = manager
                 self._pending_onboarding = None  # switching profiles cancels any in-progress onboarding
                 self._pending_name_capture = False
+                self._pending_warmup_checkin = None
+                self._pending_identity_checkin = None
+                self._pending_proactive_suggestion = None
                 name = self.profile_manager.get_profile_name(self.profile_manager.get_active_profile_id())
                 self._speak_fixed_phrase(f"Okay, switching back to {name}'s session.", continuous_vad, output_device_index)
+                self._start_warmup_checkin(continuous_vad, output_device_index)
             else:
                 self._speak_fixed_phrase("There's no previous session to go back to.", continuous_vad, output_device_index)
             return True
@@ -400,6 +502,106 @@ class JarvisBot:
 
         return False
 
+    # Keyword classification for the "is that you?" confirmation in
+    # _handle_identity_checkin_step - a plain regex, not an LLM call, since
+    # this only needs to gate a binary decision and the LLM round-trip
+    # would add real latency to identity resolution specifically.
+    _YES_PATTERN = re.compile(r"\b(yes|yeah|yep|yup|correct|that'?s me|right|sure|uh[\s-]?huh)\b", re.IGNORECASE)
+    _NO_PATTERN = re.compile(r"\b(no|nope|nah|not me|wrong|incorrect)\b", re.IGNORECASE)
+
+    # Matches a discovery-step reply that already states a specific
+    # request, as opposed to open-ended small talk - see
+    # _handle_warmup_step's discovery branch.
+    _EXPLICIT_INTENT_PATTERN = re.compile(
+        r"\b(help|learn|teach|practice|work on|curious about|homework|question)\b", re.IGNORECASE
+    )
+
+    def _classify_yes_no(self, text: str) -> Optional[bool]:
+        """
+        Returns True/False for a clear yes/no, None when neither pattern
+        matches. None means "ask again" (see _handle_identity_checkin_step) -
+        treating an unclear answer as confirmation would risk attaching
+        this conversation's learning history to the wrong student, which
+        is worse than asking once more.
+        """
+        if self._NO_PATTERN.search(text):
+            return False
+        if self._YES_PATTERN.search(text):
+            return True
+        return None
+
+    def _start_identity_checkin(self, continuous_vad, output_device_index: int) -> None:
+        """
+        Replaces the old "please say Voice Recognition, then your name"
+        prompt for a conversation with no obvious active profile (the
+        device's last-active profile is still the default placeholder) -
+        see _handle_wake_word. Runs the spoken name through
+        self.identity_resolver rather than creating a profile outright -
+        see _handle_identity_checkin_step for why an existing-name match
+        is always confirmed out loud instead of silently assumed (two
+        people, e.g. siblings, can share a name).
+        """
+        phrase = os.getenv('IDENTITY_CHECKIN_MESSAGE', "Hey! I don't think we've met yet. What's your name?")
+        self._speak_fixed_phrase(phrase, continuous_vad, output_device_index)
+        self.conversation_manager.add_assistant_message(phrase)
+        self._pending_identity_checkin = {"step": "ask_name"}
+        continuous_vad.reset_idle_timer()
+
+    def _handle_identity_checkin_step(self, user_text: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Handles either step of the identity check-in started by
+        _start_identity_checkin: "ask_name" resolves a freshly spoken name
+        against known profiles (unknown -> onboard as new; uncertain ->
+        confirm out loud before switching); "confirm" handles the
+        yes/no reply to that confirmation.
+        """
+        pending = self._pending_identity_checkin
+
+        if pending["step"] == "ask_name":
+            spoken_name = user_text.strip(" ,.!?")
+            result = self.identity_resolver.resolve(IdentityObservation(spoken_name=spoken_name))
+
+            if result.status == "uncertain":
+                self._pending_identity_checkin = {
+                    "step": "confirm", "candidate_id": result.profile_id, "candidate_name": result.name,
+                }
+                self._speak_fixed_phrase(
+                    f"Oh, I know a {result.name} already - is that you?", continuous_vad, output_device_index
+                )
+                continuous_vad.reset_idle_timer()
+                return
+
+            # Unknown - no existing profile has this name. Hand off to the
+            # existing create+onboarding flow rather than duplicating it.
+            self._pending_identity_checkin = None
+            self._switch_or_create_profile(spoken_name, continuous_vad, output_device_index)
+            return
+
+        # step == "confirm"
+        confirmed = self._classify_yes_no(user_text)
+        if confirmed is None:
+            self._speak_fixed_phrase("Sorry, is that you - yes or no?", continuous_vad, output_device_index)
+            continuous_vad.reset_idle_timer()
+            return
+
+        if confirmed:
+            candidate_id = pending["candidate_id"]
+            candidate_name = pending["candidate_name"]
+            self._pending_identity_checkin = None
+            self.conversation_manager = self.profile_manager.switch_to(candidate_id)
+            self._speak_fixed_phrase(f"Welcome back, {candidate_name}!", continuous_vad, output_device_index)
+            self._start_warmup_checkin(continuous_vad, output_device_index)
+        else:
+            # Not them - a name collision (two different people, same
+            # first name). Ask again rather than silently creating a
+            # profile with the exact same name, which would hit the
+            # UNIQUE constraint on profiles.name.
+            self._pending_identity_checkin = {"step": "ask_name"}
+            self._speak_fixed_phrase(
+                "Got it - what should I call you, so I don't mix you two up?", continuous_vad, output_device_index
+            )
+            continuous_vad.reset_idle_timer()
+
     def _switch_or_create_profile(self, spoken_name: str, continuous_vad, output_device_index: int) -> None:
         """
         Switch to (or create) a profile by name, speaking the appropriate
@@ -411,6 +613,9 @@ class JarvisBot:
         self.conversation_manager = self.profile_manager.switch_to(profile_id)
         self._pending_onboarding = None  # switching profiles cancels any in-progress onboarding
         self._pending_name_capture = False
+        self._pending_warmup_checkin = None
+        self._pending_identity_checkin = None
+        self._pending_proactive_suggestion = None
 
         if created:
             self._speak_fixed_phrase(
@@ -422,9 +627,26 @@ class JarvisBot:
             avatar_path = os.path.join(self._avatars_dir, f"{profile_id}.jpg")
             if capture_avatar_photo(avatar_path):
                 self.profile_manager.set_avatar(profile_id, avatar_path)
+                # Enroll for face-based identification from the same
+                # consented photo - see identity/face_matcher.py for how
+                # basic this actually is, and how unverified against a
+                # real camera. None here just means no face was detected
+                # in the avatar shot; not fatal, matches an unenrolled
+                # profile that only ever matches by name.
+                signature = compute_face_signature(avatar_path)
+                if signature:
+                    self.profile_manager.set_face_signature(profile_id, signature)
             # If capture fails (no camera, wrong platform, etc.) we just
             # skip the avatar - not fatal to profile creation.
 
+            # This 3-question interview (grade/interests/what's-hard) is the
+            # Agent Architecture doc's "REVISE - scenario A" step (first-ever
+            # conversation: ask what subjects they're learning, what school,
+            # how they're doing) - part of the in-scope "Tutoring Session
+            # with Kid" branch, NOT the separately-excluded "Out of Box"
+            # stub node. Previously gated off here on a mistaken assumption
+            # the two were the same thing - reverted after checking the
+            # actual doc.
             self._speak_fixed_phrase(
                 f"Let's get to know each other a bit - {self.ONBOARDING_QUESTIONS[0]}",
                 continuous_vad, output_device_index
@@ -432,6 +654,7 @@ class JarvisBot:
             self._pending_onboarding = {"profile_id": profile_id, "question_index": 1}
         else:
             self._speak_fixed_phrase(f"Welcome back, {spoken_name}!", continuous_vad, output_device_index)
+            self._start_warmup_checkin(continuous_vad, output_device_index)
 
     def _handle_onboarding_answer(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
@@ -444,6 +667,7 @@ class JarvisBot:
         self.conversation_manager.add_user_message(anonymized)
 
         next_index = self._pending_onboarding["question_index"]
+        profile_id = self._pending_onboarding["profile_id"]
 
         # question_index == 1 means this answer is responding to
         # ONBOARDING_QUESTIONS[0] ("What grade are you in?") - parse and
@@ -452,10 +676,33 @@ class JarvisBot:
         if next_index == 1:
             grade = normalize_grade(user_text)
             if grade:
-                self.profile_manager.set_grade(self._pending_onboarding["profile_id"], grade)
-                logger.info(f"📓 Stored grade '{grade}' for profile {self._pending_onboarding['profile_id']}")
+                self.profile_manager.set_grade(profile_id, grade)
+                logger.info(f"📓 Stored grade '{grade}' for profile {profile_id}")
             else:
                 logger.info(f"📓 Could not parse a grade from: '{user_text}'")
+
+        # question_index == 2 answers "what school do you go to" - per the
+        # Agent Architecture doc's REVISE/scenario-A step.
+        elif next_index == 2:
+            self.profile_manager.set_school(profile_id, user_text.strip())
+
+        # question_index == 3 answers "favorite subject" - the start of
+        # this student's interests, used later to frame examples around
+        # things they actually care about (see LLMClient's student_context).
+        elif next_index == 3:
+            self.profile_manager.set_interests(profile_id, f"Enjoys learning about: {user_text.strip()}.")
+
+        # question_index == 4 answers "what do you like to do for fun" -
+        # appended onto interests rather than overwriting the subject answer.
+        elif next_index == 4:
+            existing = self.profile_manager.get_interests(profile_id) or ""
+            self.profile_manager.set_interests(profile_id, f"{existing} Outside school, likes: {user_text.strip()}.".strip())
+
+        # question_index == 5 answers "what feels hard or frustrating" -
+        # stored separately from interests since it's used differently
+        # (pacing/tone/encouragement, not example framing).
+        elif next_index == 5:
+            self.profile_manager.set_learning_challenges(profile_id, user_text.strip())
 
         if next_index < len(self.ONBOARDING_QUESTIONS):
             question = self.ONBOARDING_QUESTIONS[next_index]
@@ -479,6 +726,37 @@ class JarvisBot:
         if not results:
             return f"No matching curriculum content found for grade {grade} on '{query}'."
         return "\n\n".join(results)
+
+    def _build_student_context(self) -> Optional[str]:
+        """
+        Assembles the active profile's interests/learning-challenges (see
+        ONBOARDING_QUESTIONS/_handle_onboarding_answer) into a short blurb
+        passed to the LLM as student_context - see LLMClient._with_student_
+        context. Returns None for the default/no-profile case, or a
+        profile that hasn't been through onboarding yet, so callers don't
+        need to special-case "nothing on file".
+        """
+        profile_id = self.profile_manager.get_active_profile_id()
+        if not profile_id:
+            return None
+
+        interests = self.profile_manager.get_interests(profile_id)
+        challenges = self.profile_manager.get_learning_challenges(profile_id)
+        # Recent misconceptions were being captured (see record_learning_event)
+        # but never read back anywhere until now - surfacing them here so
+        # the LLM can actually watch for a misunderstanding recurring
+        # instead of re-discovering it from scratch each time.
+        misconceptions = self.profile_manager.get_recent_misconceptions(profile_id, limit=3)
+
+        parts = []
+        if interests:
+            parts.append(interests.strip())
+        if challenges:
+            parts.append(f"Finds this hard/frustrating: {challenges}")
+        if misconceptions:
+            summary = "; ".join(f"{m['concept']}: {m['misconception']}" for m in misconceptions)
+            parts.append(f"Past misconceptions to watch for: {summary}")
+        return " ".join(parts) if parts else None
 
     # Step size per "louder"/"quieter" call, and the hard ceiling/floor -
     # matches the clamp already enforced in AudioPlayer.set_volume().
@@ -528,6 +806,19 @@ class JarvisBot:
             self.current_session.record_tool_call(tool_name, args, result)
         return result
 
+    def is_homework_help_request(self, text: str) -> bool:
+        """Detects a request for help with a PHYSICAL homework paper - see
+        the Agent Architecture doc's Homework Help branch (ask to see it,
+        capture a photo, read it via vision, then let the student try it
+        with the normal hint/guide machinery) - checked BEFORE is_math_query
+        so "help with my homework, it's about fractions" triggers the
+        photo-capture flow instead of being treated as a normal spoken
+        question that already has all its numbers in the text.
+
+        Doesn't touch `self` (like is_math_query) so it's cheaply testable
+        unbound, without constructing a full JarvisBot."""
+        return bool(re.search(r"\bhomework\b", text, re.IGNORECASE))
+
     def is_math_query(self, text: str) -> bool:
         """Detect math/geometry questions that should get a teaching plan
         (whiteboard diagram + synced speech) instead of a plain answer."""
@@ -574,6 +865,175 @@ class JarvisBot:
 
         return bool(re.search(r"\d", t) and re.search(r"[\+\-\*/=]", t))
 
+    def _start_warmup_checkin(self, continuous_vad, output_device_index: int) -> None:
+        """
+        Replaces the old canned self-introduction ("Hi! I'm Jarvis...") at
+        the very start of a conversation, for any profile that isn't the
+        default placeholder - see _handle_wake_word. A real tutor doesn't
+        open with a scripted pitch; a short, genuine check-in ("how's your
+        day going") reads as someone who's actually paying attention.
+        Two short back-and-forth exchanges, not the original spec's full
+        1-2 minutes of small talk - Jarvis is used ambiently, so the
+        check-in itself needs to stay quick.
+        """
+        profile_id = self.profile_manager.get_active_profile_id()
+        name = self.profile_manager.get_profile_name(profile_id) if profile_id else None
+
+        default_checkin = f"Hey {name}! How's your day going so far?" if name else "Hey! How's your day going so far?"
+        phrase = os.getenv('WARMUP_CHECKIN_MESSAGE', default_checkin)
+
+        self._speak_fixed_phrase(phrase, continuous_vad, output_device_index)
+        self.conversation_manager.add_assistant_message(phrase)
+        self._pending_warmup_checkin = {"step": "warmup"}
+        continuous_vad.reset_idle_timer()
+
+    def _handle_warmup_step(self, user_text: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Handles the student's reply to either half of the warm-up
+        check-in started by _start_warmup_checkin. The first reply is
+        just recorded (genuinely remembered, not analyzed yet - see the
+        review's InteractionSignals/StudentModel proposals for where that
+        would eventually plug in) and followed by a second, lighter
+        question. The second reply is deliberately NOT consumed here -
+        it's put back on the request queue so it flows through the
+        normal dispatch chain instead (see _speaker_loop): the student may
+        already be answering with their actual request ("help me with
+        fractions"), and treating that as throwaway small talk would just
+        make them repeat themselves.
+        """
+        pending = self._pending_warmup_checkin
+
+        if pending["step"] == "warmup":
+            anonymized = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized)
+
+            phrase = os.getenv(
+                'DISCOVERY_MESSAGE',
+                "Nice. Is there something you'd like help with today, or something new you're curious about?"
+            )
+            self._speak_fixed_phrase(phrase, continuous_vad, output_device_index)
+            self.conversation_manager.add_assistant_message(phrase)
+            pending["step"] = "discovery"
+            continuous_vad.reset_idle_timer()
+            return
+
+        # step == "discovery" - interlude is done. Mark it so nothing
+        # later this conversation re-triggers it.
+        self._pending_warmup_checkin = None
+        if self.current_session:
+            self.current_session.warmup_done = True
+
+        # A reply that already looks like a specific request ("help me
+        # with fractions", or a math question outright) goes to the
+        # normal dispatch chain unconsumed (see docstring above) rather
+        # than being treated as throwaway small talk. Only a genuinely
+        # open-ended reply ("not really", "I don't know") triggers a
+        # proactive suggestion - see tutor/question_engine.py - instead of
+        # falling through to a generic chat response with nothing to go on.
+        if self.is_math_query(user_text) or self._EXPLICIT_INTENT_PATTERN.search(user_text):
+            self._request_queue.put(user_text)
+            return
+
+        profile_id = self.profile_manager.get_active_profile_id()
+        suggestion = self.proactive_question_engine.suggest(profile_id) if profile_id else None
+        if suggestion:
+            self._speak_fixed_phrase(suggestion["prompt"], continuous_vad, output_device_index)
+            self.conversation_manager.add_assistant_message(suggestion["prompt"])
+            self._pending_proactive_suggestion = {"concept": suggestion["concept"]}
+            continuous_vad.reset_idle_timer()
+        else:
+            self._request_queue.put(user_text)
+
+    def _handle_proactive_suggestion_reply(self, user_text: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Handles the yes/no reply to a proactive concept suggestion (see
+        _handle_warmup_step's discovery branch). A clear yes turns the
+        offer into an actual teaching turn on that concept - without this,
+        the offer was a dead end: Jarvis would ask "want to work on
+        fractions?" and then do nothing with a "yes" beyond letting it hit
+        generic chat. A no (or anything unclear) just lets the reply flow
+        through normal dispatch instead of forcing the suggestion on them.
+        """
+        pending = self._pending_proactive_suggestion
+        self._pending_proactive_suggestion = None
+
+        if self._YES_PATTERN.search(user_text):
+            concept_readable = pending["concept"].replace("_", " ")
+            self._run_teaching_turn(f"Can you help me with {concept_readable}?", continuous_vad, output_device_index)
+        else:
+            self._request_queue.put(user_text)
+
+    def _run_homework_help_turn(self, continuous_vad, output_device_index: int) -> None:
+        """
+        Agent Architecture doc's "Homework Help" branch: greet, ask to see
+        the physical homework paper, capture + read it via camera + vision,
+        then let the student try solving it themselves - reusing the exact
+        same evaluate/hint/retry machinery as a normal teaching-turn check
+        question (_handle_teaching_answer, via _pending_teaching_check)
+        rather than building a separate "check if kid can solve it
+        themself, if not guide them" pedagogy engine from scratch.
+
+        The transcribed problem text is used as-is for both the spoken
+        "concept" label and the check question - unlike a recurring math
+        skill (e.g. "area_rectangle"), a specific homework problem isn't
+        something worth spaced-repeating later, so it doesn't need a
+        clean snake_case identifier the way generate_teaching_plan's
+        concept field does.
+
+        Also switches to the whiteboard layout and writes the transcribed
+        problem on it, same as a normal teaching turn - the Graphics
+        Animation requirement ("robot types equations... like a teacher
+        uses a whiteboard") isn't specific to _run_teaching_turn, and
+        without this the board just stayed on the fullscreen face for the
+        whole exchange.
+        """
+        if self.ui_signals:
+            self.ui_signals.show_teaching_layout.emit()
+            self.ui_signals.clear_canvas.emit()
+
+        self._speak_fixed_phrase(
+            "Sure, I'd love to help with your homework! Can you hold it up so I can take a picture of it?",
+            continuous_vad, output_device_index
+        )
+
+        os.makedirs(self._homework_dir, exist_ok=True)
+        photo_path = os.path.join(self._homework_dir, f"homework_{int(time.time())}.jpg")
+
+        if not capture_avatar_photo(photo_path):
+            self._speak_fixed_phrase(
+                "I couldn't get a picture of it - can you just tell me what the homework question says instead?",
+                continuous_vad, output_device_index
+            )
+            return
+
+        try:
+            problem_text = self.llm_client.extract_image_content(photo_path).strip()
+        except Exception as e:
+            logger.error(f"Homework photo read failed: {e}")
+            problem_text = ""
+
+        if not problem_text:
+            self._speak_fixed_phrase(
+                "Hmm, I had trouble reading that clearly - can you tell me what the question says instead?",
+                continuous_vad, output_device_index
+            )
+            return
+
+        if self.ui_signals:
+            lines = textwrap.wrap(problem_text, width=42) or [problem_text]
+            actions = [{"action": "clear"}, {"action": "set_title", "text": "Homework Help"}]
+            actions += [
+                {"action": "draw_text", "text": line, "x": 60, "y": 160 + i * 55}
+                for i, line in enumerate(lines)
+            ]
+            self.ui_signals.draw_actions.emit(actions)
+
+        intro = f"Okay, I can see it - it looks like: \"{problem_text}\". Give it a try - what do you think?"
+        self._speak_fixed_phrase(intro, continuous_vad, output_device_index)
+        self.conversation_manager.add_assistant_message(intro)
+        self._pending_teaching_check = {"concept": problem_text[:60], "question": problem_text, "attempts": 0}
+        continuous_vad.reset_idle_timer()
+
     def _run_teaching_turn(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
         Handle a math/geometry question: generate a teaching plan (speech
@@ -600,11 +1060,58 @@ class JarvisBot:
             self.conversation_manager.add_user_message(anonymized_text)
             messages = self.conversation_manager.get_messages()
 
-            plan = self.llm_client.generate_teaching_plan(messages)
+            # Decided up front (not from the LLM's own output) so a hint can
+            # be passed INTO generate_teaching_plan telling it to skip its
+            # own diagram for this problem - live testing showed the LLM
+            # drawing its own redundant "Distance = 150 meters" / "Time =
+            # 10 seconds" diagram labels directly on top of both the
+            # equation column and the sketched car, once both systems were
+            # independently trying to illustrate the same word problem.
+            scene = ScenePlanner.decide(user_text)
+            scene_hint = None
+            if scene:
+                scene_hint = (
+                    f"A hand-sketched {scene.icon} is already being drawn separately "
+                    f"on the board for this problem, animated to show the scenario - "
+                    f"do NOT also draw a diagram/shape/line for it, and do NOT add any "
+                    f"labels restating the given values (like 'Distance = 150 meters') "
+                    f"near where a diagram would normally go. Everything else stays "
+                    f"the same: still include set_title, still write out the formula/"
+                    f"substitution/result/final-answer as draw_text lines exactly as "
+                    f"you always do, and still squiggly_underline the final answer. "
+                    f"Only the diagram/shape portion is skipped - not the equations."
+                )
+
+            plan = self.llm_client.generate_teaching_plan(
+                messages, student_context=self._build_student_context(), scene_hint=scene_hint
+            )
             visuals = plan.get("visuals", [])
             concept = plan.get("concept") or "general_math"
             check_question = plan.get("check_question")
 
+            # Sketches and animates the actual object the problem describes
+            # (a car driving, a person walking, a plant growing) rather than
+            # leaving the board to only the LLM's own equations/diagram.
+            if scene and plan.get("speech"):
+                first_speech_id = plan["speech"][0].get("id", 1)
+                icon_id = "scene_icon"
+                visuals = visuals + [{
+                    "speech_id": first_speech_id, "action": "draw_icon",
+                    "id": icon_id, "icon": scene.icon, "x": 560, "y": 360,
+                    "scale": 0.3 if scene.animation == "grow" else 0.9,
+                }]
+                if scene.animation == "move":
+                    visuals.append({
+                        "speech_id": first_speech_id, "action": "animate_icon",
+                        "id": icon_id, "animation": "move", "to_x": 740, "duration": 2.2,
+                    })
+                elif scene.animation == "grow":
+                    visuals.append({
+                        "speech_id": first_speech_id, "action": "animate_icon",
+                        "id": icon_id, "animation": "grow", "to_scale": 1.0, "duration": 2.2,
+                    })
+
+            fast_blocked = False
             for step in plan.get("speech", []):
                 if self._interruption_event.is_set():
                     break
@@ -612,6 +1119,17 @@ class JarvisBot:
                 step_text = step.get("text", "").strip()
                 if not step_text:
                     continue
+
+                # Fast synchronous pre-check (see guardrails/fast_content_filter.py) -
+                # cheap enough to run inline without delaying time-to-first-audio,
+                # unlike the ~8s async NeMo check below. Aborts the whole plan
+                # rather than skipping just this one step, so a refusal never
+                # gets sandwiched in the middle of an otherwise-normal explanation.
+                fast_safe, fast_refusal = self.fast_content_filter.check(step_text)
+                if not fast_safe:
+                    logger.warning(f"🚨 Fast content filter blocked a teaching step: '{step_text[:80]}'")
+                    fast_blocked = True
+                    break
 
                 actions = [v for v in visuals if v.get("speech_id") == step.get("id")]
                 if actions and self.ui_signals:
@@ -629,6 +1147,23 @@ class JarvisBot:
                             break
                     else:
                         break
+
+            if fast_blocked:
+                # Same abort pattern as _run_output_safety_check - only
+                # touch primitives that are safe regardless of what
+                # in-flight audio state this stream is currently in, then
+                # a brief settle margin before opening a fresh stream for
+                # the refusal (see that method's docstring for why).
+                self.audio_player.request_immediate_stop()
+                time.sleep(0.2)
+                if self.ui_signals:
+                    self.ui_signals.set_expression.emit(Expression.CONFUSED.value)
+                self._speak_fixed_phrase(
+                    fast_refusal, continuous_vad, output_device_index, delivery=self.expression_controller.refusal()
+                )
+                self._last_bot_response = fast_refusal
+                continuous_vad.reset_idle_timer()
+                return
 
             # Ask the comprehension-check question, if the plan included
             # one, right after the explanation - same streaming pattern as
@@ -727,16 +1262,16 @@ class JarvisBot:
         check question (see _run_teaching_turn, which sets
         self._pending_teaching_check before returning).
 
-        A deliberately small, explicit policy - not a general tutor
-        decision engine - matching just the rules that matter for a single
-        comprehension check: a correct answer means praise and move on; a
-        first wrong attempt gets one hint and a second try at the same
-        question; a repeated wrong attempt stops re-testing and explains
-        the concept a different way instead, rather than looping forever
-        on a question the student clearly isn't getting. The actual
-        judgment AND the response text itself both come from
-        LLMClient.evaluate_answer() - this method just applies the
-        resulting action and updates persistent mastery tracking.
+        A deliberately small policy - just the rules that matter for a
+        single comprehension check: a correct answer means praise and move
+        on; a first wrong attempt gets one hint and a second try at the
+        same question; a repeated wrong attempt stops re-testing and
+        explains the concept a different way instead, rather than looping
+        forever on a question the student clearly isn't getting. The
+        actual judgment AND the response text itself both come from
+        LLMClient.evaluate_answer(); self.tutor_decision_engine turns that
+        into a concrete TutorDecision (see tutor/decision_engine.py) -
+        this method applies it and updates persistent mastery tracking.
         """
         pending = self._pending_teaching_check
 
@@ -758,22 +1293,49 @@ class JarvisBot:
             self.conversation_manager.add_user_message(anonymized_text)
 
             evaluation = self.llm_client.evaluate_answer(question, concept, user_text, attempts_so_far)
-            action = evaluation.get("recommended_action", "hint")
-            response_text = evaluation.get("response") or "Let's keep going."
+            decision = self.tutor_decision_engine.decide(evaluation)
 
             profile_id = self.profile_manager.get_active_profile_id()
             if profile_id:
-                is_correct = action in ("continue", "challenge")
-                used_hint = action in ("hint", "reteach")
-                self.profile_manager.record_attempt(profile_id, concept, correct=is_correct, used_hint=used_hint)
+                self.profile_manager.record_attempt(
+                    profile_id, concept, correct=decision.is_correct, used_hint=decision.used_hint, question=question
+                )
+                self.profile_manager.record_learning_event(
+                    profile_id,
+                    session_id=self.current_session.session_id if self.current_session else None,
+                    concept=concept,
+                    result=evaluation.get("correctness"),
+                    action=decision.action.value,
+                    attempt_number=attempts_so_far + 1,
+                    misconception=evaluation.get("misconception"),
+                )
 
-            logger.info(f"📊 Answer evaluation for '{concept}': {evaluation.get('correctness')} -> {action}")
+            logger.info(
+                f"📊 Answer evaluation for '{concept}': {evaluation.get('correctness')} -> {decision.action.value}"
+            )
 
-            self._speak_fixed_phrase(response_text, continuous_vad, output_device_index)
+            signals = self.interaction_signal_engine.analyze(user_text, attempts_so_far)
+
+            # Fast synchronous pre-check (see guardrails/fast_content_filter.py) -
+            # same reasoning as _run_teaching_turn's per-step check.
+            response_text = decision.response_text
+            fast_safe, fast_refusal = self.fast_content_filter.check(response_text)
+            if not fast_safe:
+                logger.warning(f"🚨 Fast content filter blocked an answer-evaluation response: '{response_text[:80]}'")
+                response_text = fast_refusal
+                delivery = self.expression_controller.refusal()
+            else:
+                delivery = self.expression_controller.for_action(
+                    decision.action, repeated_struggle=signals.repeated_struggle, hesitation=signals.hesitation
+                )
+            if self.ui_signals:
+                self.ui_signals.set_expression.emit(delivery.expression.value)
+
+            self._speak_fixed_phrase(response_text, continuous_vad, output_device_index, delivery=delivery)
             self.conversation_manager.add_assistant_message(response_text)
             self._last_bot_response = response_text
 
-            if action == "hint":
+            if decision.action == TutorAction.HINT:
                 # One more attempt at the SAME question.
                 self._pending_teaching_check = {
                     "concept": concept, "question": question, "attempts": attempts_so_far + 1,
@@ -781,6 +1343,38 @@ class JarvisBot:
             # "reteach"/"continue"/"challenge" all leave pending state
             # cleared (already done above): reteach stops re-testing this
             # question rather than looping on it, continue/challenge are done.
+
+            # Retrieval practice: once per conversation, right after a
+            # genuine success, briefly revisit the student's weakest older
+            # concept instead of only ever moving forward - the REMEMBER
+            # step the original tutoring loop was missing entirely. Reuses
+            # this exact same pending-check/_handle_teaching_answer
+            # machinery, so a wrong answer here still gets a hint/reteach
+            # normally. Excludes concepts already covered this session so
+            # it never re-asks about what was just taught. Skipped when
+            # the student sounded low-confidence about THIS answer even
+            # though it was right ("um, maybe 20?") - piling a second,
+            # unrelated question onto genuine uncertainty doesn't serve
+            # them; let them consolidate this one first.
+            if (
+                decision.is_correct
+                and not signals.low_confidence
+                and profile_id
+                and self.current_session
+                and not self.current_session.retrieval_practice_offered
+            ):
+                review = self.review_scheduler.get_review(
+                    profile_id, exclude=set(self.current_session.concepts_covered)
+                )
+                if review:
+                    self.current_session.retrieval_practice_offered = True
+                    self.current_session.record_concept_covered(review["concept"])
+                    bridge = f"Before we move on, let's check something from before. {review['question']}"
+                    self._speak_fixed_phrase(bridge, continuous_vad, output_device_index)
+                    self.conversation_manager.add_assistant_message(bridge)
+                    self._pending_teaching_check = {
+                        "concept": review["concept"], "question": review["question"], "attempts": 0,
+                    }
 
             continuous_vad.reset_idle_timer()
 
@@ -898,6 +1492,16 @@ class JarvisBot:
                         continuous_vad.reset_idle_timer()
                         continue
 
+                    # This turn is a reply to the "what's your name?"/"is
+                    # that you?" identity check-in run at conversation
+                    # start when there was no obvious active profile - see
+                    # _start_identity_checkin/_handle_identity_checkin_step.
+                    if self._pending_identity_checkin is not None:
+                        self._handle_identity_checkin_step(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
                     # Recovering a name after "I heard Voice Recognition but
                     # didn't catch a name" - this turn IS the name, not a
                     # tutoring question, regardless of what it contains.
@@ -923,6 +1527,30 @@ class JarvisBot:
                         self._handle_teaching_answer(user_text, continuous_vad, output_device_index)
                         self._speaker_busy.clear()
                         continuous_vad.reset_idle_timer()
+                        continue
+
+                    # This turn is the student's reply to one half of the
+                    # warm-up check-in - see _start_warmup_checkin/_handle_warmup_step.
+                    if self._pending_warmup_checkin is not None:
+                        self._handle_warmup_step(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continue
+
+                    # This turn is a yes/no reply to a proactive concept
+                    # suggestion - see _handle_proactive_suggestion_reply.
+                    if self._pending_proactive_suggestion is not None:
+                        self._handle_proactive_suggestion_reply(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continue
+
+                    # A request to help with a physical homework paper gets
+                    # its own flow (capture a photo, read it via vision,
+                    # let the student try it) - checked before is_math_query
+                    # so it isn't instead treated as an already-fully-stated
+                    # spoken question.
+                    if self.is_homework_help_request(user_text):
+                        self._run_homework_help_turn(continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
                         continue
 
                     # Math/geometry questions get a teaching plan (speech
@@ -984,7 +1612,8 @@ class JarvisBot:
 
                     # Pipeline: LLM (with tool-calling) -> TTS -> AudioPlayer
                     llm_stream = self.llm_client.generate_response_with_tools(
-                        messages, tools=[CURRICULUM_SEARCH_TOOL, VOLUME_CONTROL_TOOL], tool_executor=self._execute_tool
+                        messages, tools=[CURRICULUM_SEARCH_TOOL, VOLUME_CONTROL_TOOL], tool_executor=self._execute_tool,
+                        student_context=self._build_student_context()
                     )
                     collected_stream = text_collector(llm_stream)
                     tts_stream = audio_timing(self.tts_client.synthesize_stream(collected_stream))
@@ -1202,15 +1831,6 @@ class JarvisBot:
 
         self._speak_system_message(phrase, continuous_vad, output_device_index)
 
-    def _speak_greeting(self, continuous_vad, output_device_index: int) -> None:
-        """Speak a short, fixed introduction right when a conversation starts."""
-        phrase = os.getenv(
-            'GREETING_MESSAGE',
-            "Hi! I'm Jarvis. I can help you with homework, explain new topics, "
-            "or just answer questions you're curious about. What would you like to do today?"
-        )
-        self._speak_system_message(phrase, continuous_vad, output_device_index)
-
     def _speak_standalone(self, phrase: str, output_device_index: int) -> None:
         """
         Speak a fixed phrase with no active conversation (e.g. the
@@ -1326,13 +1946,9 @@ class JarvisBot:
             # student starts talking over it.
             active_id = self.profile_manager.get_active_profile_id()
             if active_id is not None and self.profile_manager.is_default_profile(active_id):
-                self._speak_fixed_phrase(
-                    "Please create your account before you start learning! "
-                    "Just say Voice Recognition, then say your name, and I'll remember you from now on.",
-                    continuous_vad, pulse_output_index
-                )
+                self._start_identity_checkin(continuous_vad, pulse_output_index)
             else:
-                self._speak_greeting(continuous_vad, pulse_output_index)
+                self._start_warmup_checkin(continuous_vad, pulse_output_index)
 
             # Wait for conversation to end (timeout or manual stop).
             # Two-stage idle handling: after `idle_timeout` of silence, ask if

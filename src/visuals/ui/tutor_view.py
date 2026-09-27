@@ -12,3 +12,18 @@ class TutorView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameShape(0)
         self.setStyleSheet("background: black; border: none;")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # The scene is a fixed 1280x720 "virtual" canvas (see TutorScene).
+        # Without this, QGraphicsView renders it at native 1:1 pixel scale
+        # regardless of the actual window size - fine only when the window
+        # happens to BE exactly 1280x720 (e.g. this project's own dev/test
+        # harness, which always uses fullscreen=False + resize(1280, 720)),
+        # but wrong on any real screen that isn't that exact resolution -
+        # every Pi display, any real fullscreen monitor. Confirmed live on
+        # the actual Pi (photo from teammate): the face rendered as a small
+        # circle in the middle of a much bigger white area instead of
+        # filling the screen's height, because the fixed-size scene was
+        # never being scaled up to the real (larger) screen at all.
+        self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)

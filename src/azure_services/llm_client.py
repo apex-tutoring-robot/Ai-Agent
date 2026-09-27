@@ -6,6 +6,7 @@ Generates tutoring responses using Azure OpenAI with streaming output.
 import os
 import json
 import re
+import base64
 import logging
 from typing import Callable, Iterator, List, Dict, Optional
 from openai import AzureOpenAI
@@ -72,6 +73,25 @@ class LLMClient:
 
         logger.info("Azure OpenAI client initialized")
     
+    @staticmethod
+    def _with_student_context(base_prompt: str, student_context: Optional[str]) -> str:
+        """
+        Appends a short per-student blurb (interests, learning challenges -
+        see ProfileManager.get_interests/get_learning_challenges) onto a
+        system prompt, so word-problem examples can be framed around
+        things this specific student actually cares about instead of
+        generic apples-and-buses. A no-op when there's nothing on file yet
+        (e.g. this profile hasn't finished onboarding).
+        """
+        if not student_context:
+            return base_prompt
+        return (
+            f"{base_prompt}\n\n"
+            "STUDENT CONTEXT (use this to make examples feel relevant to THIS "
+            "student when it fits naturally - don't force it into every "
+            f"response):\n{student_context}"
+        )
+
     def _load_system_prompt(self) -> str:
         """Load system prompt from file."""
         try:
@@ -141,7 +161,8 @@ class LLMClient:
         tools: List[Dict],
         tool_executor: Callable[[str, dict], str],
         temperature: float = 0.7,
-        max_tokens: int = 500
+        max_tokens: int = 500,
+        student_context: Optional[str] = None,
     ) -> Iterator[str]:
         """
         Real agentic tool-use loop (Decision -> Tool Call -> Observe ->
@@ -163,7 +184,8 @@ class LLMClient:
         this stays a generic Azure OpenAI wrapper - Jarvis-specific tool
         definitions and execution live in main.py.
         """
-        full_messages = [{"role": "system", "content": self.system_prompt}] + messages
+        system_content = self._with_student_context(self.system_prompt, student_context)
+        full_messages = [{"role": "system", "content": system_content}] + messages
 
         try:
             response = self.client.chat.completions.create(
@@ -244,7 +266,9 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.2,
-        max_tokens: int = 800
+        max_tokens: int = 800,
+        student_context: Optional[str] = None,
+        scene_hint: Optional[str] = None,
     ) -> Dict:
         """
         Generate a structured teaching plan (speech steps + synchronized
@@ -262,11 +286,9 @@ class LLMClient:
             # live: combining them makes the model follow the conversational
             # persona and ignore the JSON requirement entirely, returning
             # plain chat text instead of a parseable plan.
-            full_messages = [
-                {
-                    "role": "system",
-                    "content": """
-    You are an AI math tutor.
+            plan_system_prompt = """
+    You are an AI tutor for any K-8 subject - math, physics, biology, geography,
+    history, anything a student asks about, not only math.
 
     Return ONLY valid JSON.
     Do NOT include markdown.
@@ -281,6 +303,7 @@ class LLMClient:
       "check_question": "string or null",
       "visuals": [
         {"speech_id": 1, "action": "clear"},
+        {"speech_id": 1, "action": "set_title", "text": "Area of a Rectangle"},
         {"speech_id": 1, "action": "draw_text", "text": "string", "x": 100, "y": 120},
         {"speech_id": 1, "action": "draw_line", "x1": 0, "y1": 0, "x2": 100, "y2": 100},
         {"speech_id": 1, "action": "draw_rect", "x": 580, "y": 160, "w": 220, "h": 160},
@@ -288,16 +311,28 @@ class LLMClient:
         {"speech_id": 1, "action": "draw_circle", "x": 620, "y": 270, "rx": 110, "ry": 75},
         {"speech_id": 1, "action": "draw_polygon", "points": [[580,160],[780,160],[780,360],[580,360]]},
         {"speech_id": 1, "action": "draw_regular_polygon", "sides": 6, "cx": 620, "cy": 270, "radius": 110},
-        {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360}
+        {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360},
+        {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90}
       ]
     }
 
     Action field reference:
+    - set_title: shows a short title at the top of the whiteboard naming what's being
+      taught (e.g. "Area of a Rectangle", "Equivalent Fractions") - written in Title
+      Case, not snake_case. Always emit this once, with speech_id 1, right alongside
+      the initial "clear" action for every new question.
     - draw_circle: x,y = CENTER of circle. r = radius (for circles). rx,ry = separate radii (for ellipses).
     - draw_rect: x,y = top-left corner. w,h = width and height.
     - draw_regular_polygon: sides=number of sides, cx/cy=center, radius=circumscribed radius.
     - draw_polygon: points = list of [x,y] pairs (minimum 3 points).
     - draw_arc: x,y = top-left of bounding box, w/h = bounding box size, start_angle/span_angle in degrees.
+    - squiggly_underline: draws a red squiggly underline BELOW something already on the
+      board to call it out, like a teacher underlining the answer with a marker. x,y =
+      LEFT edge of the text/value being underlined, at/just below its baseline (e.g. same
+      x as the draw_text action for that line, y a few pixels below it). width = how far
+      right the underline spans (roughly the width of the text above it, e.g. width=90
+      for a short number/word). Never used alone - it always underlines something that
+      was already drawn by an earlier action.
 
     Rules:
     - "concept": a short snake_case identifier for the specific skill being taught
@@ -314,7 +349,9 @@ class LLMClient:
       simple, already fully-answered question where a follow-up check would feel
       repetitive. Do NOT put the check question in speech - it is spoken separately,
       after the explanation.
-    - Allowed actions: clear, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc
+    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+    - Always include exactly one "set_title" action, speech_id 1, right after the
+      initial "clear" - every question gets a title naming the topic.
     - Use 2-5 speech steps
     - Keep explanations short and teacher-like
     - Every visual must map to a valid speech_id
@@ -324,14 +361,35 @@ class LLMClient:
     - Do not stop at just writing the formula
     - Substitute the given values
     - Show the final numeric answer when possible
-    - For geometry problems, include:
+    - For problems with a numeric answer (math, physics, etc.), include:
         1. formula
         2. substituted values
         3. simplified result
         4. final answer
-    GEOMETRY DIAGRAM RULES - MANDATORY, NO EXCEPTIONS:
-    - You MUST draw a shape diagram for EVERY geometry problem. Never omit it.
-    - Equations go LEFT side (x: 60-420). Diagrams go MIDDLE zone (x: 480-750).
+    DIAGRAM RULES - MANDATORY, NO EXCEPTIONS:
+    - You MUST include at least one diagram for EVERY question, regardless of subject.
+      A text-only board (just equations or sentences, no picture) is never acceptable -
+      this applies just as much to physics, biology, geography, history, or anything
+      else as it does to geometry. Never skip the diagram just because the topic isn't
+      geometry.
+    - For an actual geometry/shape problem, draw the real shape - see SHAPE-BY-SHAPE
+      RULES below for exact placement per shape.
+    - For any non-geometry topic, draw the simplest diagram that represents the idea,
+      using the same primitives (draw_rect, draw_circle, draw_line, draw_polygon,
+      draw_arc, draw_text):
+        - physics motion/force: two points connected by a draw_line labeled with the
+          distance/force/speed, e.g. a short line from (560,270) to (740,270) with the
+          value labeled above it.
+        - biology/genetics: a Punnett square as a 2x2 grid of draw_rect cells (e.g.
+          four 80x80 squares) with a draw_text label in and around each cell, or a
+          simple labeled draw_circle for a cell/organism part.
+        - a process, cycle, or sequence (life cycle, water cycle, food chain, steps in
+          a historical event): 3-4 draw_rect boxes arranged in a row, connected by
+          draw_line, each with its own draw_text label underneath.
+        - anything else: at minimum, one labeled draw_circle or draw_rect representing
+          the central object/idea being discussed - never leave the diagram zone empty.
+    - Equations/explanation go LEFT side (x: 60-420). The diagram goes in the MIDDLE
+      zone (x: 480-750).
     - x > 780 is reserved for the face widget - NEVER place any shape or label there.
     - The face widget occupies x: 800-1280. Keep all drawing strictly left of x=780.
     - y range for both: 130 to 420.
@@ -345,7 +403,8 @@ class LLMClient:
     - Stack multiple bottom labels 30px apart: y=410, y=440, etc.
     - Stack multiple top labels 25px apart: y=145, y=120, etc.
 
-    SHAPE-BY-SHAPE RULES (with exact coordinate examples):
+    SHAPE-BY-SHAPE RULES (for genuine geometry/shape problems specifically - for
+    other subjects use the non-geometry diagram guidance above instead):
 
     TRIANGLE (right, scalene, isosceles, equilateral - any):
       Use 3x draw_line for edges. Example right triangle:
@@ -405,6 +464,33 @@ class LLMClient:
       1. The visual diagram with labeled dimensions
       2. The full calculation steps as draw_text on the left (x: 60-420)
 
+    WHITEBOARD CONTENT - write like a real teacher's board, not a caption
+    underneath one. A single vague line is NOT enough:
+    - Do NOT write descriptions of what you're doing (e.g. "Finding the area") -
+      that belongs in speech, not on the board.
+    - Write the actual solving progress as SEPARATE draw_text lines, one below
+      the other (55px apart, per the spacing rule below), in this order:
+        1. The formula itself, e.g. "Area = width x height"
+        2. The substituted values, e.g. "Area = 6 x 4"
+        3. The simplified/calculated result, e.g. "Area = 24"
+      Each of these is its own draw_text action - never combine them into one line.
+    - Before the worked example, write ONE short "key idea" line naming the
+      underlying principle in plain words, e.g. "Area = space inside a shape" or
+      "Equivalent fractions = same amount, different numbers" - the one thing the
+      student should remember even if they forget the specific numbers.
+    - If the concept has a specific vocabulary term (e.g. "numerator",
+      "circumference", "hypotenuse"), write it as its own short label near the
+      diagram, not only spoken - seeing the word paired with the picture is part
+      of how it's learned, not decoration.
+    - Use "squiggly_underline" to underline the FINAL ANSWER LINE in red once
+      it's calculated, like a teacher underlining the answer with a marker -
+      do this every time. Use the EXACT SAME x as the draw_text action for
+      that final-answer line itself, y about 14 pixels below that line's y
+      (so it sits just under that specific text, not the diagram), with
+      width=90 (wide enough to span a short line of text). Optionally
+      underline one key formula or term too if there's a specific thing the
+      student should notice.
+
     Canvas layout:
     - equations on the left: x between 60 and 420
     - diagrams in the middle zone: x between 480 and 750
@@ -412,9 +498,16 @@ class LLMClient:
     - use y values between 130 and 420
     - space equation rows at least 55 pixels apart
     - never place text labels on top of other text
+    - never state the same fact/value in two places on the board (e.g. don't add a
+      diagram label like "Distance = 150 meters" if the equation column already
+      shows that same "150 meters" in a line like "Speed = 150 meters / 10
+      seconds") - each given value appears in the equations OR as a short diagram
+      label, never both
     """
-                }
-            ] + messages
+            system_content = self._with_student_context(plan_system_prompt, student_context)
+            if scene_hint:
+                system_content = f"{system_content}\n\nSCENE NOTE: {scene_hint}"
+            full_messages = [{"role": "system", "content": system_content}] + messages
 
             response = self.client.chat.completions.create(
                 model=self.deployment,
@@ -446,7 +539,7 @@ class LLMClient:
             logger.warning(f"Azure teaching plan failed ({type(e).__name__}: {e}), trying local model")
             if self._local_client:
                 self._local_client.system_prompt = self.system_prompt
-                return self._local_client.generate_teaching_plan(messages, temperature, max_tokens)
+                return self._local_client.generate_teaching_plan(messages, temperature, max_tokens, scene_hint=scene_hint)
             logger.error(f"Error generating teaching plan: {e}")
             raise
 
@@ -552,6 +645,52 @@ Rules for "response":
                 "response": "Let's think about that one a bit more - want to try again?",
             }
 
+    def generate_review_question(
+        self,
+        concept: str,
+        previous_question: str,
+        temperature: float = 0.5,
+        max_tokens: int = 80,
+    ) -> str:
+        """
+        A fresh comprehension-check question for retrieval practice (see
+        ProfileManager.get_weak_concept_for_review / tutor/review_scheduler.py),
+        instead of literally replaying the stored last_question. Reusing
+        the exact same question tests whether the student memorized THAT
+        question's answer, not whether they still understand the concept -
+        this is a real one-call cost paid specifically to make retrieval
+        practice measure the right thing. Falls back to the original
+        stored question on any failure, so a review still happens even if
+        this call breaks.
+        """
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": f"""
+You write short spoken comprehension-check questions for a K-8 math tutor robot.
+
+Concept: {concept}
+A question this student was previously asked on this exact concept: "{previous_question}"
+
+Write ONE new question testing the SAME concept, with different specific
+numbers/values than the example above - the point is checking whether the
+student still understands the concept, not whether they remember that
+exact question. Keep it short and natural, spoken out loud - no
+formatting, no markdown, no explanation. Return ONLY the question text
+itself.
+""",
+                }
+            ]
+            response = self.client.chat.completions.create(
+                model=self.deployment, messages=messages, temperature=temperature, max_tokens=max_tokens,
+            )
+            text = (response.choices[0].message.content or "").strip().strip('"')
+            return text or previous_question
+        except Exception as e:
+            logger.error(f"Error generating review question ({type(e).__name__}: {e}) - reusing stored question")
+            return previous_question
+
     def generate_session_wrapup(
         self,
         concepts_covered: List[str],
@@ -625,6 +764,47 @@ Write a short, warm spoken goodbye for the student (2-3 sentences):
         except Exception as e:
             logger.error(f"Error generating response: {e}")
             raise
+
+    def extract_image_content(self, image_path: str, max_tokens: int = 1000) -> str:
+        """
+        Reads a local image file (e.g. a captured homework-paper photo -
+        see JarvisBot._run_homework_help_turn) via this same deployment's
+        vision input, returning a plain-text transcription of what's
+        written on it. This is the "upload homework paper" step of the
+        Agent Architecture doc's Homework Help branch - the transcribed
+        text becomes the "question" the student is then asked to try
+        solving (via the normal _pending_teaching_check/evaluate_answer
+        machinery), so it needs to be the actual problem text, not a
+        summary or description of the photo.
+        """
+        with open(image_path, 'rb') as f:
+            b64 = base64.b64encode(f.read()).decode('utf-8')
+        ext = os.path.splitext(image_path)[1].lstrip('.').lower() or 'jpeg'
+        if ext == 'jpg':
+            ext = 'jpeg'
+
+        response = self.client.chat.completions.create(
+            model=self.deployment,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "This is a photo of a K-8 student's homework paper. "
+                            "Transcribe the problem(s) written on it as plain text, "
+                            "as accurately as you can - just the problem text itself, "
+                            "no commentary or markdown. If it's unreadable or doesn't "
+                            "look like a homework problem, say so in one short plain "
+                            "sentence instead."
+                        ),
+                    },
+                    {"type": "image_url", "image_url": {"url": f"data:image/{ext};base64,{b64}"}},
+                ],
+            }],
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content.strip()
 
 
 if __name__ == "__main__":
