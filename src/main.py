@@ -3,6 +3,7 @@ import os
 
 import re
 import subprocess
+import textwrap
 import threading
 import time
 import queue
@@ -978,7 +979,18 @@ class JarvisBot:
         something worth spaced-repeating later, so it doesn't need a
         clean snake_case identifier the way generate_teaching_plan's
         concept field does.
+
+        Also switches to the whiteboard layout and writes the transcribed
+        problem on it, same as a normal teaching turn - the Graphics
+        Animation requirement ("robot types equations... like a teacher
+        uses a whiteboard") isn't specific to _run_teaching_turn, and
+        without this the board just stayed on the fullscreen face for the
+        whole exchange.
         """
+        if self.ui_signals:
+            self.ui_signals.show_teaching_layout.emit()
+            self.ui_signals.clear_canvas.emit()
+
         self._speak_fixed_phrase(
             "Sure, I'd love to help with your homework! Can you hold it up so I can take a picture of it?",
             continuous_vad, output_device_index
@@ -1006,6 +1018,15 @@ class JarvisBot:
                 continuous_vad, output_device_index
             )
             return
+
+        if self.ui_signals:
+            lines = textwrap.wrap(problem_text, width=42) or [problem_text]
+            actions = [{"action": "clear"}, {"action": "set_title", "text": "Homework Help"}]
+            actions += [
+                {"action": "draw_text", "text": line, "x": 60, "y": 160 + i * 55}
+                for i, line in enumerate(lines)
+            ]
+            self.ui_signals.draw_actions.emit(actions)
 
         intro = f"Okay, I can see it - it looks like: \"{problem_text}\". Give it a try - what do you think?"
         self._speak_fixed_phrase(intro, continuous_vad, output_device_index)
