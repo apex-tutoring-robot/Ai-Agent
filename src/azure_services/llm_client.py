@@ -267,6 +267,7 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int = 800,
         student_context: Optional[str] = None,
+        scene_hint: Optional[str] = None,
     ) -> Dict:
         """
         Generate a structured teaching plan (speech steps + synchronized
@@ -496,10 +497,16 @@ class LLMClient:
     - use y values between 130 and 420
     - space equation rows at least 55 pixels apart
     - never place text labels on top of other text
+    - never state the same fact/value in two places on the board (e.g. don't add a
+      diagram label like "Distance = 150 meters" if the equation column already
+      shows that same "150 meters" in a line like "Speed = 150 meters / 10
+      seconds") - each given value appears in the equations OR as a short diagram
+      label, never both
     """
-            full_messages = [
-                {"role": "system", "content": self._with_student_context(plan_system_prompt, student_context)}
-            ] + messages
+            system_content = self._with_student_context(plan_system_prompt, student_context)
+            if scene_hint:
+                system_content = f"{system_content}\n\nSCENE NOTE: {scene_hint}"
+            full_messages = [{"role": "system", "content": system_content}] + messages
 
             response = self.client.chat.completions.create(
                 model=self.deployment,
@@ -531,7 +538,7 @@ class LLMClient:
             logger.warning(f"Azure teaching plan failed ({type(e).__name__}: {e}), trying local model")
             if self._local_client:
                 self._local_client.system_prompt = self.system_prompt
-                return self._local_client.generate_teaching_plan(messages, temperature, max_tokens)
+                return self._local_client.generate_teaching_plan(messages, temperature, max_tokens, scene_hint=scene_hint)
             logger.error(f"Error generating teaching plan: {e}")
             raise
 

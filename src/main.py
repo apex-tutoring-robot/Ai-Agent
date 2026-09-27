@@ -958,18 +958,38 @@ class JarvisBot:
             self.conversation_manager.add_user_message(anonymized_text)
             messages = self.conversation_manager.get_messages()
 
-            plan = self.llm_client.generate_teaching_plan(messages, student_context=self._build_student_context())
+            # Decided up front (not from the LLM's own output) so a hint can
+            # be passed INTO generate_teaching_plan telling it to skip its
+            # own diagram for this problem - live testing showed the LLM
+            # drawing its own redundant "Distance = 150 meters" / "Time =
+            # 10 seconds" diagram labels directly on top of both the
+            # equation column and the sketched car, once both systems were
+            # independently trying to illustrate the same word problem.
+            scene = ScenePlanner.decide(user_text)
+            scene_hint = None
+            if scene:
+                scene_hint = (
+                    f"A hand-sketched {scene.icon} is already being drawn separately "
+                    f"on the board for this problem, animated to show the scenario - "
+                    f"do NOT also draw a diagram/shape/line for it, and do NOT add any "
+                    f"labels restating the given values (like 'Distance = 150 meters') "
+                    f"near where a diagram would normally go. Everything else stays "
+                    f"the same: still include set_title, still write out the formula/"
+                    f"substitution/result/final-answer as draw_text lines exactly as "
+                    f"you always do, and still squiggly_underline the final answer. "
+                    f"Only the diagram/shape portion is skipped - not the equations."
+                )
+
+            plan = self.llm_client.generate_teaching_plan(
+                messages, student_context=self._build_student_context(), scene_hint=scene_hint
+            )
             visuals = plan.get("visuals", [])
             concept = plan.get("concept") or "general_math"
             check_question = plan.get("check_question")
 
             # Sketches and animates the actual object the problem describes
             # (a car driving, a person walking, a plant growing) rather than
-            # leaving the board to only the LLM's own equations/diagram -
-            # decided separately, deterministically, from the raw question
-            # text (see ScenePlanner), not something the equation-writing
-            # LLM call is relied on to also remember to do.
-            scene = ScenePlanner.decide(user_text)
+            # leaving the board to only the LLM's own equations/diagram.
             if scene and plan.get("speech"):
                 first_speech_id = plan["speech"][0].get("id", 1)
                 icon_id = "scene_icon"

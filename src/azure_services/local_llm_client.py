@@ -107,6 +107,9 @@ Canvas layout:
 - use y values between 130 and 420
 - space equation rows at least 55 pixels apart
 - never place text labels on top of other text
+- never state the same fact/value in two places (e.g. don't add a diagram label
+  like "Distance = 150 meters" if the equations already show that same number) -
+  each given value appears in the equations OR as a short diagram label, never both
 """
 
 _SERVER_STARTUP_TIMEOUT = 60  # seconds to wait for llama-server to become ready
@@ -266,15 +269,17 @@ class LocalLLMClient:
         messages: List[Dict],
         temperature: float = 0.2,
         max_tokens: int = 800,
+        scene_hint: Optional[str] = None,
     ) -> dict:
         # Deliberately NOT prepending self.system_prompt here - same
         # conversational-persona-vs-JSON-only conflict found and fixed in
         # llm_client.py's generate_teaching_plan: combining "helpful AI
         # tutoring assistant" chat framing with "return ONLY JSON" below
         # risks the model following the former and ignoring the latter.
-        full_messages = [
-            {"role": "system", "content": _TEACHING_PLAN_INSTRUCTIONS}
-        ] + messages
+        system_content = _TEACHING_PLAN_INSTRUCTIONS
+        if scene_hint:
+            system_content = f"{system_content}\n\nSCENE NOTE: {scene_hint}"
+        full_messages = [{"role": "system", "content": system_content}] + messages
 
         response = self.client.chat.completions.create(
             model=self.model,
