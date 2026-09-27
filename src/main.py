@@ -217,6 +217,9 @@ class JarvisBot:
         self._avatars_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "data", "avatars"
         )
+        self._homework_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "data", "homework"
+        )
         
         self._is_running = False
         self._interaction_lock = threading.Lock()
@@ -802,6 +805,19 @@ class JarvisBot:
             self.current_session.record_tool_call(tool_name, args, result)
         return result
 
+    def is_homework_help_request(self, text: str) -> bool:
+        """Detects a request for help with a PHYSICAL homework paper - see
+        the Agent Architecture doc's Homework Help branch (ask to see it,
+        capture a photo, read it via vision, then let the student try it
+        with the normal hint/guide machinery) - checked BEFORE is_math_query
+        so "help with my homework, it's about fractions" triggers the
+        photo-capture flow instead of being treated as a normal spoken
+        question that already has all its numbers in the text.
+
+        Doesn't touch `self` (like is_math_query) so it's cheaply testable
+        unbound, without constructing a full JarvisBot."""
+        return bool(re.search(r"\bhomework\b", text, re.IGNORECASE))
+
     def is_math_query(self, text: str) -> bool:
         """Detect math/geometry questions that should get a teaching plan
         (whiteboard diagram + synced speech) instead of a plain answer."""
@@ -945,6 +961,57 @@ class JarvisBot:
             self._run_teaching_turn(f"Can you help me with {concept_readable}?", continuous_vad, output_device_index)
         else:
             self._request_queue.put(user_text)
+
+    def _run_homework_help_turn(self, continuous_vad, output_device_index: int) -> None:
+        """
+        Agent Architecture doc's "Homework Help" branch: greet, ask to see
+        the physical homework paper, capture + read it via camera + vision,
+        then let the student try solving it themselves - reusing the exact
+        same evaluate/hint/retry machinery as a normal teaching-turn check
+        question (_handle_teaching_answer, via _pending_teaching_check)
+        rather than building a separate "check if kid can solve it
+        themself, if not guide them" pedagogy engine from scratch.
+
+        The transcribed problem text is used as-is for both the spoken
+        "concept" label and the check question - unlike a recurring math
+        skill (e.g. "area_rectangle"), a specific homework problem isn't
+        something worth spaced-repeating later, so it doesn't need a
+        clean snake_case identifier the way generate_teaching_plan's
+        concept field does.
+        """
+        self._speak_fixed_phrase(
+            "Sure, I'd love to help with your homework! Can you hold it up so I can take a picture of it?",
+            continuous_vad, output_device_index
+        )
+
+        os.makedirs(self._homework_dir, exist_ok=True)
+        photo_path = os.path.join(self._homework_dir, f"homework_{int(time.time())}.jpg")
+
+        if not capture_avatar_photo(photo_path):
+            self._speak_fixed_phrase(
+                "I couldn't get a picture of it - can you just tell me what the homework question says instead?",
+                continuous_vad, output_device_index
+            )
+            return
+
+        try:
+            problem_text = self.llm_client.extract_image_content(photo_path).strip()
+        except Exception as e:
+            logger.error(f"Homework photo read failed: {e}")
+            problem_text = ""
+
+        if not problem_text:
+            self._speak_fixed_phrase(
+                "Hmm, I had trouble reading that clearly - can you tell me what the question says instead?",
+                continuous_vad, output_device_index
+            )
+            return
+
+        intro = f"Okay, I can see it - it looks like: \"{problem_text}\". Give it a try - what do you think?"
+        self._speak_fixed_phrase(intro, continuous_vad, output_device_index)
+        self.conversation_manager.add_assistant_message(intro)
+        self._pending_teaching_check = {"concept": problem_text[:60], "question": problem_text, "attempts": 0}
+        continuous_vad.reset_idle_timer()
 
     def _run_teaching_turn(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
@@ -1452,6 +1519,16 @@ class JarvisBot:
                     # suggestion - see _handle_proactive_suggestion_reply.
                     if self._pending_proactive_suggestion is not None:
                         self._handle_proactive_suggestion_reply(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continue
+
+                    # A request to help with a physical homework paper gets
+                    # its own flow (capture a photo, read it via vision,
+                    # let the student try it) - checked before is_math_query
+                    # so it isn't instead treated as an already-fully-stated
+                    # spoken question.
+                    if self.is_homework_help_request(user_text):
+                        self._run_homework_help_turn(continuous_vad, output_device_index)
                         self._speaker_busy.clear()
                         continue
 

@@ -6,6 +6,7 @@ Generates tutoring responses using Azure OpenAI with streaming output.
 import os
 import json
 import re
+import base64
 import logging
 from typing import Callable, Iterator, List, Dict, Optional
 from openai import AzureOpenAI
@@ -763,6 +764,47 @@ Write a short, warm spoken goodbye for the student (2-3 sentences):
         except Exception as e:
             logger.error(f"Error generating response: {e}")
             raise
+
+    def extract_image_content(self, image_path: str, max_tokens: int = 1000) -> str:
+        """
+        Reads a local image file (e.g. a captured homework-paper photo -
+        see JarvisBot._run_homework_help_turn) via this same deployment's
+        vision input, returning a plain-text transcription of what's
+        written on it. This is the "upload homework paper" step of the
+        Agent Architecture doc's Homework Help branch - the transcribed
+        text becomes the "question" the student is then asked to try
+        solving (via the normal _pending_teaching_check/evaluate_answer
+        machinery), so it needs to be the actual problem text, not a
+        summary or description of the photo.
+        """
+        with open(image_path, 'rb') as f:
+            b64 = base64.b64encode(f.read()).decode('utf-8')
+        ext = os.path.splitext(image_path)[1].lstrip('.').lower() or 'jpeg'
+        if ext == 'jpg':
+            ext = 'jpeg'
+
+        response = self.client.chat.completions.create(
+            model=self.deployment,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "This is a photo of a K-8 student's homework paper. "
+                            "Transcribe the problem(s) written on it as plain text, "
+                            "as accurately as you can - just the problem text itself, "
+                            "no commentary or markdown. If it's unreadable or doesn't "
+                            "look like a homework problem, say so in one short plain "
+                            "sentence instead."
+                        ),
+                    },
+                    {"type": "image_url", "image_url": {"url": f"data:image/{ext};base64,{b64}"}},
+                ],
+            }],
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content.strip()
 
 
 if __name__ == "__main__":
