@@ -71,6 +71,7 @@ class ProfileManager:
                     avatar_path TEXT,
                     voiceprint_id TEXT,
                     grade TEXT,
+                    school TEXT,
                     interests TEXT,
                     learning_challenges TEXT,
                     face_signature TEXT,
@@ -149,6 +150,10 @@ class ProfileManager:
             if "face_signature" not in existing_columns:
                 self._conn.execute("ALTER TABLE profiles ADD COLUMN face_signature TEXT")
                 logger.info("🔧 Migrated profiles table: added 'face_signature' column")
+
+            if "school" not in existing_columns:
+                self._conn.execute("ALTER TABLE profiles ADD COLUMN school TEXT")
+                logger.info("🔧 Migrated profiles table: added 'school' column")
 
             mastery_columns = {
                 row["name"] for row in self._conn.execute("PRAGMA table_info(concept_mastery)")
@@ -318,6 +323,21 @@ class ProfileManager:
                 "SELECT grade FROM profiles WHERE id = ?", (profile_id,)
             ).fetchone()
         return row["grade"] if row else None
+
+    def set_school(self, profile_id: int, school: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE profiles SET school = ? WHERE id = ?",
+                (school, profile_id)
+            )
+            self._conn.commit()
+
+    def get_school(self, profile_id: int) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT school FROM profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+        return row["school"] if row else None
 
     def set_interests(self, profile_id: int, text: str) -> None:
         """Free-text summary of what this student likes (favorite subject,

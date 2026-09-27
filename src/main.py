@@ -124,6 +124,7 @@ class JarvisBot:
     # asking directly up front is the only way Jarvis gets it at all.
     ONBOARDING_QUESTIONS = [
         "What grade are you in?",
+        "What school do you go to?",
         "What's your favorite subject to learn about?",
         "What do you like to do for fun, outside of school?",
         "Is there anything about learning that feels hard or frustrating for you?",
@@ -676,22 +677,27 @@ class JarvisBot:
             else:
                 logger.info(f"📓 Could not parse a grade from: '{user_text}'")
 
-        # question_index == 2 answers "favorite subject" - the start of
+        # question_index == 2 answers "what school do you go to" - per the
+        # Agent Architecture doc's REVISE/scenario-A step.
+        elif next_index == 2:
+            self.profile_manager.set_school(profile_id, user_text.strip())
+
+        # question_index == 3 answers "favorite subject" - the start of
         # this student's interests, used later to frame examples around
         # things they actually care about (see LLMClient's student_context).
-        elif next_index == 2:
+        elif next_index == 3:
             self.profile_manager.set_interests(profile_id, f"Enjoys learning about: {user_text.strip()}.")
 
-        # question_index == 3 answers "what do you like to do for fun" -
+        # question_index == 4 answers "what do you like to do for fun" -
         # appended onto interests rather than overwriting the subject answer.
-        elif next_index == 3:
+        elif next_index == 4:
             existing = self.profile_manager.get_interests(profile_id) or ""
             self.profile_manager.set_interests(profile_id, f"{existing} Outside school, likes: {user_text.strip()}.".strip())
 
-        # question_index == 4 answers "what feels hard or frustrating" -
+        # question_index == 5 answers "what feels hard or frustrating" -
         # stored separately from interests since it's used differently
         # (pacing/tone/encouragement, not example framing).
-        elif next_index == 4:
+        elif next_index == 5:
             self.profile_manager.set_learning_challenges(profile_id, user_text.strip())
 
         if next_index < len(self.ONBOARDING_QUESTIONS):
