@@ -30,6 +30,15 @@ board (e.g. "Area of a Rectangle") - set via a "set_title" draw action
 the LLM emits alongside "clear" at the start of each new question, so
 it flows through the same visuals pipeline as everything else on the
 board rather than needing its own wiring.
+
+When a problem describes a real-world object (a car, a person, a ball,
+a plant), a simple pencil-style sketch of that object - thin dark
+outline, no fill, unlike the colored geometry shapes above - is drawn
+and animated (driving/walking/kicking across the board, or growing) to
+show the scenario itself, not just abstract shapes. Which icon and
+animation to use is decided separately from the LLM by
+visuals.scene_planner.ScenePlanner, and arrives here as the same kind
+of draw_icon/animate_icon actions as everything else.
 """
 
 import math
@@ -38,7 +47,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer
-from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPolygonF, QColor
+from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPolygonF, QColor, QPainterPath
 from PyQt5.QtWidgets import QGraphicsObject
 
 # Kid-friendly palette: warm paper background (not stark white), a
@@ -88,6 +97,15 @@ _LASER_OFFSET_X = 18
 _LASER_ANIM_SECONDS = 0.3
 _LASER_PULSE_HZ = 6.0
 
+# Pencil-style sketches of real-world objects (car, person, ball, plant) -
+# see visuals.scene_planner.ScenePlanner and module docstring. Thin dark
+# outline, no fill, deliberately different from the bold colored/filled
+# geometry shapes above so it reads as a quick sketch, not a diagram shape.
+_ICON_COLOR = QColor(70, 70, 70)
+_ICON_STROKE_WIDTH = 2.5
+_ICON_DRAW_SECONDS = 1.1     # time to sketch the icon in, stroke by stroke
+_ICON_ANIM_SECONDS = 2.2     # default move/grow duration, once the sketch is done
+
 
 @dataclass
 class _Line:
@@ -132,6 +150,24 @@ class _Underline:
     start_time: float
 
 
+@dataclass
+class _Icon:
+    icon_id: str          # referenced by a later animate_icon action
+    name: str              # "car", "person", "ball", "plant" - dispatches to a _draw_*_icon method
+    x: float; y: float     # anchor point - bottom-center of the sketch
+    scale: float
+    start_time: float
+    # Animation state - see TeachingCanvas.animate_icon. anim_kind "none"
+    # means the icon just sits at (x, scale) once drawn in.
+    anim_kind: str = "none"          # "move" (animates x) or "grow" (animates scale)
+    anim_from_x: float = 0.0
+    anim_to_x: float = 0.0
+    anim_from_scale: float = 1.0
+    anim_to_scale: float = 1.0
+    anim_start_time: float = 0.0
+    anim_duration: float = 0.0
+
+
 class TeachingCanvas(QGraphicsObject):
     def __init__(self):
         super().__init__()
@@ -143,6 +179,7 @@ class TeachingCanvas(QGraphicsObject):
         self.arc_items: List[_Arc] = []
         self.underline_items: List[_Underline] = []
         self.title_text: str = ""
+        self.icons: List[_Icon] = []
 
         # Laser-pointer dot state - see module docstring and _retarget_laser.
         self._laser_visible = False
@@ -182,6 +219,8 @@ class TeachingCanvas(QGraphicsObject):
             self._paint_polygon(painter, item, now)
         for item in self.arc_items:
             self._paint_arc(painter, item, now)
+        for item in self.icons:
+            self._paint_icon(painter, item, now)
         for item in self.text_items:
             self._paint_text(painter, item, now)
         for item in self.underline_items:
@@ -314,6 +353,233 @@ class TeachingCanvas(QGraphicsObject):
             my = cy - ry * math.sin(angle_rad)
             self._draw_marker(painter, mx, my)
 
+    def _current_icon_state(self, icon: _Icon, now: float) -> Tuple[float, float]:
+        """Returns (x, scale) - animated if animate_icon() was called, static otherwise."""
+        if icon.anim_kind == "none" or icon.anim_duration <= 0:
+            return icon.x, icon.scale
+        p = self._progress(icon.anim_start_time, now, duration=icon.anim_duration)
+        x = icon.anim_from_x + (icon.anim_to_x - icon.anim_from_x) * p
+        scale = icon.anim_from_scale + (icon.anim_to_scale - icon.anim_from_scale) * p
+        return x, scale
+
+    def _paint_icon(self, painter: QPainter, icon: _Icon, now: float) -> None:
+        # Sketch-in reveal - each stroke draws in turn, like a pencil
+        # actually tracing the icon, rather than the whole thing popping
+        # in or scaling up from a point. Any move/grow animation (set
+        # separately via animate_icon) is timed to start only once this
+        # finishes - see animate_icon.
+        draw_progress = self._progress(icon.start_time, now, duration=_ICON_DRAW_SECONDS)
+        if draw_progress <= 0:
+            return
+        x, scale = self._current_icon_state(icon, now)
+        if scale <= 0:
+            return
+
+        painter.setBrush(Qt.NoBrush)
+
+        if icon.name == "car":
+            strokes = self._car_icon_strokes(x, icon.y, scale)
+        elif icon.name == "person":
+            strokes = self._person_icon_strokes(x, icon.y, scale)
+        elif icon.name == "ball":
+            strokes = self._ball_icon_strokes(x, icon.y, scale)
+        elif icon.name == "plant":
+            strokes = self._plant_icon_strokes(x, icon.y, scale)
+        else:
+            return
+        self._reveal_strokes(painter, strokes, draw_progress)
+
+    @staticmethod
+    def _partial_path(path: QPainterPath, t: float) -> QPainterPath:
+        """A polyline approximation of `path` traced up through fraction
+        `t` of its length - used to animate any curve (straight or
+        bezier) being drawn stroke by stroke."""
+        if t >= 1.0:
+            return path
+        result = QPainterPath()
+        steps = 24
+        result.moveTo(path.pointAtPercent(0.0))
+        for i in range(1, steps + 1):
+            result.lineTo(path.pointAtPercent(min(1.0, t * i / steps)))
+        return result
+
+    def _reveal_strokes(self, painter: QPainter, strokes: list, progress: float) -> None:
+        """Draws a list of ("path"|"line"|"ellipse"|"rounded_rect"|"arc", ...)
+        stroke descriptors in order, each getting an equal slice of the
+        overall progress - one stroke visibly finishes before the next
+        starts, the same "being sketched" feel as a real pencil drawing,
+        instead of every part of the icon fading/growing in at once.
+
+        Round caps/joins (not Qt's default sharp miter joins) so lines
+        look like they came from a soft pencil, not a CAD drawing - and
+        the very first stroke (always the main silhouette) is drawn
+        bolder than the interior detail strokes that follow it, the way
+        an illustrator weights an outline heavier than interior linework."""
+        n = len(strokes)
+        if n == 0:
+            return
+        bold_pen = QPen(_ICON_COLOR, _ICON_STROKE_WIDTH + 1.3)
+        bold_pen.setCapStyle(Qt.RoundCap)
+        bold_pen.setJoinStyle(Qt.RoundJoin)
+        fine_pen = QPen(_ICON_COLOR, _ICON_STROKE_WIDTH - 0.6)
+        fine_pen.setCapStyle(Qt.RoundCap)
+        fine_pen.setJoinStyle(Qt.RoundJoin)
+
+        for i, stroke in enumerate(strokes):
+            local_t = max(0.0, min(1.0, progress * n - i))
+            if local_t <= 0:
+                break
+            painter.setPen(bold_pen if i == 0 else fine_pen)
+            kind = stroke[0]
+            if kind == "path":
+                painter.drawPath(self._partial_path(stroke[1], local_t))
+            elif kind == "line":
+                _, p1, p2 = stroke
+                mid = QPointF(p1.x() + (p2.x() - p1.x()) * local_t, p1.y() + (p2.y() - p1.y()) * local_t)
+                painter.drawLine(p1, mid)
+            elif kind == "ellipse":
+                _, center, rx, ry = stroke
+                if local_t >= 1.0:
+                    painter.drawEllipse(center, rx, ry)
+                else:
+                    rect = QRectF(center.x() - rx, center.y() - ry, rx * 2, ry * 2)
+                    painter.drawArc(rect, 90 * 16, -int(360 * 16 * local_t))
+            elif kind == "rounded_rect":
+                _, rect, rx, ry = stroke
+                painter.setOpacity(local_t)
+                painter.drawRoundedRect(rect, rx, ry)
+                painter.setOpacity(1.0)
+            elif kind == "arc":
+                _, rect, start_angle, span_angle = stroke
+                painter.drawArc(rect, start_angle, int(span_angle * local_t))
+
+    def _car_icon_strokes(self, cx: float, ground_y: float, scale: float) -> list:
+        """Pencil-sketch car in side profile - a smooth rounded-hatchback
+        silhouette (three quadTo arcs sharing endpoints, so the roofline
+        forms one continuous dome instead of two curves meeting at a
+        sharp kink) plus windows, a door seam, a mirror, a headlight,
+        wheel hubs and a ground line - built as an ordered stroke list so
+        _reveal_strokes can sketch it in one piece at a time, body first."""
+        s = scale
+        rear_bottom = QPointF(cx - 65 * s, ground_y - 24 * s)
+        rear_top = QPointF(cx - 40 * s, ground_y - 60 * s)
+        rear_ctrl = QPointF(cx - 65 * s, ground_y - 55 * s)
+        dome_ctrl = QPointF(cx - 8 * s, ground_y - 82 * s)
+        front_top = QPointF(cx + 25 * s, ground_y - 60 * s)
+        front_ctrl = QPointF(cx + 60 * s, ground_y - 50 * s)
+        front_bottom = QPointF(cx + 68 * s, ground_y - 24 * s)
+
+        body = QPainterPath()
+        body.moveTo(rear_bottom)
+        body.quadTo(rear_ctrl, rear_top)
+        body.quadTo(dome_ctrl, front_top)
+        body.quadTo(front_ctrl, front_bottom)
+        body.lineTo(rear_bottom)
+
+        door_top = QPointF(cx + 2 * s, ground_y - 64 * s)
+        door_bottom = QPointF(cx + 4 * s, ground_y - 24 * s)
+        door = QPainterPath()
+        door.moveTo(door_top)
+        door.quadTo(QPointF(cx, ground_y - 45 * s), door_bottom)
+
+        rear_win = QRectF(cx - 36 * s, ground_y - 64 * s, 34 * s, 22 * s)
+        front_win = QRectF(cx + 6 * s, ground_y - 64 * s, 20 * s, 22 * s)
+        wheel_r, hub_r = 12 * s, 5 * s
+        wheel_y = ground_y - wheel_r
+        rear_wheel_x, front_wheel_x = cx - 34 * s, cx + 34 * s
+
+        return [
+            ("path", body),
+            ("path", door),
+            ("rounded_rect", rear_win, 4 * s, 4 * s),
+            ("rounded_rect", front_win, 4 * s, 4 * s),
+            ("line", QPointF(cx + 20 * s, ground_y - 58 * s), QPointF(cx + 30 * s, ground_y - 55 * s)),
+            ("ellipse", QPointF(cx + 58 * s, ground_y - 34 * s), 3.5 * s, 3.5 * s),
+            ("ellipse", QPointF(rear_wheel_x, wheel_y), wheel_r, wheel_r),
+            ("ellipse", QPointF(rear_wheel_x, wheel_y), hub_r, hub_r),
+            ("ellipse", QPointF(front_wheel_x, wheel_y), wheel_r, wheel_r),
+            ("ellipse", QPointF(front_wheel_x, wheel_y), hub_r, hub_r),
+            ("line", QPointF(rear_bottom.x() - 20 * s, ground_y), QPointF(front_bottom.x() + 20 * s, ground_y)),
+        ]
+
+    def _person_icon_strokes(self, cx: float, ground_y: float, scale: float) -> list:
+        """Pencil-sketch figure mid-stride, anchored at its feet - a curved
+        torso and bent limbs (quadTo) instead of a rigid stick figure, with
+        a small hair tuft and a ground shadow for grounding."""
+        s = scale
+        head_r = 9 * s
+        head_cy = ground_y - 70 * s
+        neck_y = head_cy + head_r
+        hip_y = ground_y - 26 * s
+        shoulder_y = neck_y + 6 * s
+
+        torso = QPainterPath()
+        torso.moveTo(cx, neck_y)
+        torso.quadTo(cx - 3 * s, (neck_y + hip_y) / 2, cx, hip_y)
+
+        return [
+            ("ellipse", QPointF(cx, head_cy), head_r, head_r),
+            ("arc", QRectF(cx - head_r, head_cy - head_r * 1.3, head_r * 2, head_r * 1.4), 20 * 16, 140 * 16),
+            ("path", torso),
+            ("line", QPointF(cx, shoulder_y), QPointF(cx - 20 * s, shoulder_y + 14 * s)),
+            ("line", QPointF(cx - 20 * s, shoulder_y + 14 * s), QPointF(cx - 14 * s, shoulder_y + 26 * s)),
+            ("line", QPointF(cx, shoulder_y), QPointF(cx + 18 * s, shoulder_y + 10 * s)),
+            # Mid-stride, feet spread wide apart (~58s) at the ground - at
+            # this icon's small on-screen size, anything narrower visually
+            # merges into a solid wedge instead of reading as two legs.
+            ("line", QPointF(cx, hip_y), QPointF(cx - 18 * s, hip_y + 14 * s)),
+            ("line", QPointF(cx - 18 * s, hip_y + 14 * s), QPointF(cx - 30 * s, ground_y)),
+            ("line", QPointF(cx, hip_y), QPointF(cx + 14 * s, hip_y + 18 * s)),
+            ("line", QPointF(cx + 14 * s, hip_y + 18 * s), QPointF(cx + 28 * s, ground_y)),
+            ("ellipse", QPointF(cx - 30 * s, ground_y + 2 * s), 6 * s, 2 * s),
+            ("ellipse", QPointF(cx + 28 * s, ground_y + 2 * s), 6 * s, 2 * s),
+        ]
+
+    def _ball_icon_strokes(self, cx: float, ground_y: float, scale: float) -> list:
+        """Pencil-sketch ball with two crossing lens-shaped seam curves
+        (the classic way to suggest a sphere's curved surface - tracing
+        the ball's own outer edge would be invisible against its own
+        outline) and a ground shadow, resting on the ground line."""
+        s = scale
+        r = 20 * s
+        cy = ground_y - r
+        center = QPointF(cx, cy)
+        return [
+            ("ellipse", center, r, r),
+            ("ellipse", center, r * 0.32, r),
+            ("ellipse", center, r, r * 0.32),
+            ("ellipse", QPointF(cx, ground_y + 2 * s), r * 0.8, 3 * s),
+        ]
+
+    def _plant_icon_strokes(self, cx: float, ground_y: float, scale: float) -> list:
+        """Pencil-sketch sprout with a curved stem, leaves, a ring of petals,
+        and a soil mound - scale drives the "grow" animation, so this needs
+        to look right small too, not just at full size."""
+        s = scale
+        stem_h = 60 * s
+        top_y = ground_y - stem_h
+        stem = QPainterPath()
+        stem.moveTo(cx, ground_y - 4 * s)
+        stem.quadTo(cx - 6 * s, ground_y - stem_h * 0.5, cx, top_y)
+
+        leaf_y = ground_y - stem_h * 0.55
+        petal_r = 6 * s
+        strokes = [
+            ("path", stem),
+            ("ellipse", QPointF(cx - 14 * s, leaf_y), 14 * s, 7 * s),
+            ("ellipse", QPointF(cx + 14 * s, leaf_y - 8 * s), 14 * s, 7 * s),
+        ]
+        for angle_deg in (0, 60, 120, 180, 240, 300):
+            rad = math.radians(angle_deg)
+            strokes.append((
+                "ellipse",
+                QPointF(cx + petal_r * 1.3 * math.cos(rad), top_y + petal_r * 1.3 * math.sin(rad)),
+                petal_r * 0.6, petal_r * 0.6
+            ))
+        strokes.append(("ellipse", QPointF(cx, top_y), petal_r * 0.7, petal_r * 0.7))
+        strokes.append(("arc", QRectF(cx - 18 * s, ground_y - 4 * s, 36 * s, 10 * s), 0, -180 * 16))
+        return strokes
+
     def _paint_text(self, painter: QPainter, item: _Text, now: float) -> None:
         # Typewriter reveal - duration scales with length so a short
         # label and a long equation both feel like they're being written
@@ -398,6 +664,7 @@ class TeachingCanvas(QGraphicsObject):
         self.polygon_items = []
         self.arc_items = []
         self.underline_items = []
+        self.icons = []
         self._hide_laser()
         self.update()
 
@@ -437,6 +704,28 @@ class TeachingCanvas(QGraphicsObject):
 
     def set_title(self, text):
         self.title_text = text
+        self.update()
+
+    def add_icon(self, icon_id, name, x, y, scale=1.0):
+        self.icons.append(_Icon(icon_id=icon_id, name=name, x=x, y=y, scale=scale, start_time=time.monotonic()))
+        self.update()
+
+    def animate_icon(self, icon_id, animation, duration, to_x=None, to_scale=None):
+        """Moves (animation="move", varies x) or grows (animation="grow",
+        varies scale) a previously add_icon'd icon, found by icon_id.
+        Starts only once that icon's own sketch-in reveal has finished -
+        see _ICON_DRAW_SECONDS - so it doesn't look like it's flying
+        across the board while still being drawn."""
+        icon = next((i for i in self.icons if i.icon_id == icon_id), None)
+        if icon is None:
+            return
+        icon.anim_kind = animation
+        icon.anim_from_x = icon.x
+        icon.anim_to_x = to_x if to_x is not None else icon.x
+        icon.anim_from_scale = icon.scale
+        icon.anim_to_scale = to_scale if to_scale is not None else icon.scale
+        icon.anim_start_time = max(time.monotonic(), icon.start_time + _ICON_DRAW_SECONDS)
+        icon.anim_duration = max(0.1, duration)
         self.update()
 
     def handle_draw_actions(self, actions):
@@ -507,6 +796,20 @@ class TeachingCanvas(QGraphicsObject):
 
             elif action_type == "set_title":
                 self.set_title(action.get("text", ""))
+
+            elif action_type == "draw_icon":
+                self.add_icon(
+                    action.get("id", ""), action.get("icon", "car"),
+                    action.get("x", 620), action.get("y", 340),
+                    action.get("scale", 1.0)
+                )
+
+            elif action_type == "animate_icon":
+                self.animate_icon(
+                    action.get("id", ""), action.get("animation", "move"),
+                    action.get("duration", _ICON_ANIM_SECONDS),
+                    to_x=action.get("to_x"), to_scale=action.get("to_scale")
+                )
 
         if text_positions:
             x, y = text_positions[-1]

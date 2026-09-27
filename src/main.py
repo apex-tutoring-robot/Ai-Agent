@@ -46,6 +46,7 @@ from expression.controller import Expression, ExpressionController
 
 from visuals.ui.ui_signals import UISignals
 from visuals.ui.main_window import MainWindow
+from visuals.scene_planner import ScenePlanner
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -961,6 +962,32 @@ class JarvisBot:
             visuals = plan.get("visuals", [])
             concept = plan.get("concept") or "general_math"
             check_question = plan.get("check_question")
+
+            # Sketches and animates the actual object the problem describes
+            # (a car driving, a person walking, a plant growing) rather than
+            # leaving the board to only the LLM's own equations/diagram -
+            # decided separately, deterministically, from the raw question
+            # text (see ScenePlanner), not something the equation-writing
+            # LLM call is relied on to also remember to do.
+            scene = ScenePlanner.decide(user_text)
+            if scene and plan.get("speech"):
+                first_speech_id = plan["speech"][0].get("id", 1)
+                icon_id = "scene_icon"
+                visuals = visuals + [{
+                    "speech_id": first_speech_id, "action": "draw_icon",
+                    "id": icon_id, "icon": scene.icon, "x": 560, "y": 360,
+                    "scale": 0.3 if scene.animation == "grow" else 0.9,
+                }]
+                if scene.animation == "move":
+                    visuals.append({
+                        "speech_id": first_speech_id, "action": "animate_icon",
+                        "id": icon_id, "animation": "move", "to_x": 740, "duration": 2.2,
+                    })
+                elif scene.animation == "grow":
+                    visuals.append({
+                        "speech_id": first_speech_id, "action": "animate_icon",
+                        "id": icon_id, "animation": "grow", "to_scale": 1.0, "duration": 2.2,
+                    })
 
             fast_blocked = False
             for step in plan.get("speech", []):

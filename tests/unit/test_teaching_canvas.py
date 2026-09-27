@@ -168,6 +168,65 @@ class TestHandleDrawActions:
         canvas.handle_draw_actions([{"action": "clear"}])
         assert canvas.title_text == "Area of a Rectangle"
 
+    def test_draw_icon_action_adds_an_icon(self):
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([
+            {"action": "draw_icon", "id": "car1", "icon": "car", "x": 560, "y": 360, "scale": 0.9}
+        ])
+        icon = canvas.icons[0]
+        assert (icon.icon_id, icon.name, icon.x, icon.y, icon.scale) == ("car1", "car", 560, 360, 0.9)
+
+    def test_animate_icon_action_sets_move_animation_on_a_matching_icon(self):
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([
+            {"action": "draw_icon", "id": "car1", "icon": "car", "x": 560, "y": 360},
+            {"action": "animate_icon", "id": "car1", "animation": "move", "to_x": 740, "duration": 2.2},
+        ])
+        icon = canvas.icons[0]
+        assert icon.anim_kind == "move"
+        assert icon.anim_from_x == 560
+        assert icon.anim_to_x == 740
+        assert icon.anim_duration == 2.2
+
+    def test_animate_icon_targeting_an_unknown_id_is_a_no_op(self):
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([{"action": "animate_icon", "id": "nope", "animation": "move", "to_x": 100}])
+        assert canvas.icons == []
+
+    def test_clear_action_also_clears_icons(self):
+        canvas = TeachingCanvas()
+        canvas.add_icon("car1", "car", 560, 360)
+        canvas.handle_draw_actions([{"action": "clear"}])
+        assert canvas.icons == []
+
+
+class TestIconAnimationState:
+    def test_static_icon_reports_its_own_position_and_scale(self):
+        canvas = TeachingCanvas()
+        canvas.add_icon("car1", "car", 560, 360, scale=0.9)
+        icon = canvas.icons[0]
+        assert canvas._current_icon_state(icon, now=time.monotonic()) == (560, 0.9)
+
+    def test_move_animation_interpolates_x_over_its_duration(self):
+        canvas = TeachingCanvas()
+        canvas.add_icon("car1", "car", 560, 360)
+        now = time.monotonic()
+        canvas.animate_icon("car1", "move", duration=2.0, to_x=760)
+        icon = canvas.icons[0]
+        icon.anim_start_time = now - 1.0  # halfway through a 2s animation
+        x, _ = canvas._current_icon_state(icon, now=now)
+        assert abs(x - 660) < 1e-6  # halfway between 560 and 760
+
+    def test_grow_animation_interpolates_scale_over_its_duration(self):
+        canvas = TeachingCanvas()
+        canvas.add_icon("plant1", "plant", 560, 360, scale=0.3)
+        now = time.monotonic()
+        canvas.animate_icon("plant1", "grow", duration=2.0, to_scale=1.0)
+        icon = canvas.icons[0]
+        icon.anim_start_time = now - 2.0  # fully complete
+        _, scale = canvas._current_icon_state(icon, now=now)
+        assert scale == 1.0
+
 
 class TestLaserPointerRetargeting:
     def test_laser_is_hidden_before_any_visuals_arrive(self):
