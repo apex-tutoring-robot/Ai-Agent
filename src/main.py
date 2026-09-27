@@ -634,11 +634,21 @@ class JarvisBot:
             # If capture fails (no camera, wrong platform, etc.) we just
             # skip the avatar - not fatal to profile creation.
 
-            self._speak_fixed_phrase(
-                f"Let's get to know each other a bit - {self.ONBOARDING_QUESTIONS[0]}",
-                continuous_vad, output_device_index
-            )
-            self._pending_onboarding = {"profile_id": profile_id, "question_index": 1}
+            # The 3-question interview (grade/interests/what's-hard) is a
+            # distinct, optional personalization layer, separate from the
+            # photo/face-enrollment above - "Out of Box" full onboarding is
+            # explicitly excluded from MVP V1, while the photo/face
+            # enrollment IS required (see Memory: name AND face). Gated
+            # behind an env var so restoring it later is a one-line
+            # config change, not a code change.
+            if os.getenv('ENABLE_ONBOARDING_INTERVIEW', 'false').lower() == 'true':
+                self._speak_fixed_phrase(
+                    f"Let's get to know each other a bit - {self.ONBOARDING_QUESTIONS[0]}",
+                    continuous_vad, output_device_index
+                )
+                self._pending_onboarding = {"profile_id": profile_id, "question_index": 1}
+            else:
+                self._start_warmup_checkin(continuous_vad, output_device_index)
         else:
             self._speak_fixed_phrase(f"Welcome back, {spoken_name}!", continuous_vad, output_device_index)
             self._start_warmup_checkin(continuous_vad, output_device_index)
