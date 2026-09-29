@@ -82,6 +82,8 @@ class TestMutators:
         canvas.add_circle(0, 0, 10)
         canvas.add_polygon([(0, 0), (1, 0), (1, 1)])
         canvas.add_arc(0, 0, 10, 10)
+        canvas.add_vertical_arithmetic("add", [1, 2], 0, 0)
+        canvas.add_long_multiplication([23, 14], 0, 0)
 
         canvas.clear_canvas()
 
@@ -91,6 +93,48 @@ class TestMutators:
         assert canvas.circle_items == []
         assert canvas.polygon_items == []
         assert canvas.arc_items == []
+        assert canvas.arithmetic_items == []
+        assert canvas.long_multiplication_items == []
+
+    def test_vertical_arithmetic_multiply_with_multidigit_multiplier_redirects(self):
+        # Live testing against the real LLM found it sometimes emits
+        # vertical_arithmetic (not long_multiplication) for a problem
+        # like "23 boxes of 14 pencils each" - operands[1]=14 has 2
+        # digits, which vertical_arithmetic's own multiply can't render.
+        # Rather than silently dropping it, it should redirect to
+        # long_multiplication instead, since both actions share the same
+        # [multiplicand, multiplier] operand convention.
+        canvas = TeachingCanvas()
+        canvas.add_vertical_arithmetic("multiply", [23, 14], 10, 20)
+        assert canvas.arithmetic_items == []
+        assert len(canvas.long_multiplication_items) == 1
+        item = canvas.long_multiplication_items[0]
+        assert item.layout.result_digits.strip() == "322"
+        assert (item.x, item.y) == (10, 20)
+
+    def test_long_multiplication_with_single_digit_multiplier_redirects(self):
+        # The mirror-image case: the LLM sometimes emits long_multiplication
+        # for a single-digit multiplier (e.g. "6 boxes of 234 crayons"),
+        # which long_multiplication's own validation rejects. Should
+        # redirect to vertical_arithmetic's multiply instead of dropping it.
+        canvas = TeachingCanvas()
+        canvas.add_long_multiplication([234, 6], 10, 20)
+        assert canvas.long_multiplication_items == []
+        assert len(canvas.arithmetic_items) == 1
+        item = canvas.arithmetic_items[0]
+        assert item.layout.result_digits.strip() == "1404"
+        assert (item.x, item.y) == (10, 20)
+
+    def test_vertical_arithmetic_add_and_subtract_never_redirect(self):
+        # The redirect is specific to "multiply" - add/subtract should
+        # behave exactly as before (this would previously not even reach
+        # the multiplier-digit-count check, but guard against a regression
+        # where the check fires for the wrong operation).
+        canvas = TeachingCanvas()
+        canvas.add_vertical_arithmetic("add", [347, 58], 0, 0)
+        canvas.add_vertical_arithmetic("subtract", [405, 58], 0, 0)
+        assert len(canvas.arithmetic_items) == 2
+        assert canvas.long_multiplication_items == []
 
 
 class TestHandleDrawActions:

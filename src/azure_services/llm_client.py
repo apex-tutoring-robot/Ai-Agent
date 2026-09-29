@@ -313,7 +313,8 @@ class LLMClient:
         {"speech_id": 1, "action": "draw_regular_polygon", "sides": 6, "cx": 620, "cy": 270, "radius": 110},
         {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360},
         {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90},
-        {"speech_id": 2, "action": "vertical_arithmetic", "operation": "add", "operands": [347, 58], "x": 100, "y": 180}
+        {"speech_id": 2, "action": "vertical_arithmetic", "operation": "add", "operands": [347, 58], "x": 100, "y": 180},
+        {"speech_id": 2, "action": "long_multiplication", "operands": [23, 14], "x": 100, "y": 160}
       ]
     }
 
@@ -341,6 +342,30 @@ class LLMClient:
       where digits are stacked and you might carry or borrow) - NOT for general
       equations like "Area = width x height" or fraction/word-based work, which
       still use draw_text as described below.
+    - long_multiplication: draws multi-digit x multi-digit multiplication - the
+      "one partial-product row per digit of the multiplier, then add them up" column
+      algorithm. operands = exactly 2 non-negative integers where BOTH have 2+ digits.
+      operands[0] = the number being multiplied (top row), operands[1] = the
+      multiplier (bottom row, one partial-product row is generated per digit of
+      this number) - put whichever number has FEWER digits in operands[1] when
+      you have a choice, to keep the number of partial-product rows small. x,y =
+      top-left anchor. Same rule as vertical_arithmetic: you supply ONLY the two
+      operands, every partial product, carry mark, and the final sum are computed
+      and drawn for you - never compute the result yourself or write out the
+      partial products as draw_text.
+    - CHOOSING BETWEEN vertical_arithmetic's "multiply" AND long_multiplication:
+      check BOTH numbers' digit counts, not just the bigger-looking one. If
+      EITHER number is a single digit (0-9), you MUST use vertical_arithmetic
+      (operation: "multiply") - NEVER long_multiplication - even when the other
+      number has several digits. Only use long_multiplication when BOTH numbers
+      have 2 or more digits. Worked contrast:
+        "6 boxes of 234 crayons each" -> 6 is single-digit, so this is
+          vertical_arithmetic, operation "multiply", operands: [234, 6].
+        "23 boxes of 14 pencils each" -> both 23 and 14 have 2 digits, so this
+          is long_multiplication, operands: [23, 14].
+      Picking the wrong one of these two actions means the drawing gets silently
+      dropped from the whiteboard (a single-digit number in long_multiplication's
+      operands is invalid), so get this check right every time.
     - draw_circle: x,y = CENTER of circle. r = radius (for circles). rx,ry = separate radii (for ellipses).
     - draw_rect: x,y = top-left corner. w,h = width and height.
     - draw_regular_polygon: sides=number of sides, cx/cy=center, radius=circumscribed radius.
@@ -369,7 +394,7 @@ class LLMClient:
       simple, already fully-answered question where a follow-up check would feel
       repetitive. Do NOT put the check question in speech - it is spoken separately,
       after the explanation.
-    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, vertical_arithmetic
+    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, vertical_arithmetic, long_multiplication
     - Always include exactly one "set_title" action, speech_id 1, right after the
       initial "clear" - every question gets a title naming the topic.
     - Use 2-5 speech steps
@@ -498,8 +523,11 @@ class LLMClient:
       single-digit-multiplier-multiplication (see vertical_arithmetic above), use
       ONE vertical_arithmetic action instead of the 3 draw_text lines above for
       that computation - it already shows the working and the answer together.
-      Don't do both for the same computation (that would show the answer twice).
-      You can still have a separate "key idea" draw_text line before it.
+      If it's multiplication where BOTH numbers have 2+ digits, use
+      long_multiplication instead (see above) for the same reason. Don't do both
+      a draw_text sequence AND a vertical_arithmetic/long_multiplication block for
+      the same computation (that would show the answer twice). You can still have
+      a separate "key idea" draw_text line before it.
     - Before the worked example, write ONE short "key idea" line naming the
       underlying principle in plain words, e.g. "Area = space inside a shape" or
       "Equivalent fractions = same amount, different numbers" - the one thing the
@@ -511,8 +539,8 @@ class LLMClient:
     - Use "squiggly_underline" to underline the FINAL ANSWER LINE in red once
       it's calculated, like a teacher underlining the answer with a marker -
       do this every time THE ANSWER WAS WRITTEN AS draw_text (not as part of a
-      vertical_arithmetic block - its own boxed layout already makes the
-      answer clear, so skip the underline for that one). Use the EXACT SAME x
+      vertical_arithmetic or long_multiplication block - its own boxed layout
+      already makes the answer clear, so skip the underline for those). Use the EXACT SAME x
       as the draw_text action for that final-answer line itself, y about 14
       pixels below that line's y (so it sits just under that specific text,
       not the diagram), with width=90 (wide enough to span a short line of

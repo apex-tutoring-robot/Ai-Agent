@@ -10,7 +10,12 @@ one of these computations needs to be independently, exhaustively correct
 
 import pytest
 
-from visuals.arithmetic import build_layout, validate_operands
+from visuals.arithmetic import (
+    build_layout,
+    validate_operands,
+    build_long_multiplication_layout,
+    validate_long_multiplication_operands,
+)
 
 
 class TestValidation:
@@ -181,3 +186,72 @@ class TestBuildLayoutRaisesOnInvalidSpec:
     def test_raises_on_unknown_operation(self):
         with pytest.raises(ValueError):
             build_layout("divide", [10, 2])
+
+
+class TestLongMultiplicationValidation:
+    def test_rejects_wrong_operand_count(self):
+        assert validate_long_multiplication_operands([23]) is not None
+
+    def test_rejects_non_integer_operands(self):
+        assert validate_long_multiplication_operands([23.5, 14]) is not None
+
+    def test_rejects_negative_operands(self):
+        assert validate_long_multiplication_operands([-23, 14]) is not None
+
+    def test_rejects_zero_multiplicand(self):
+        assert validate_long_multiplication_operands([0, 14]) is not None
+
+    def test_rejects_single_digit_multiplier(self):
+        # Should use vertical_arithmetic's multiply instead.
+        assert validate_long_multiplication_operands([234, 6]) is not None
+
+    def test_accepts_two_digit_multiplier(self):
+        assert validate_long_multiplication_operands([23, 14]) is None
+
+
+class TestLongMultiplication:
+    def test_two_digit_by_two_digit_with_carry(self):
+        # 23 x 14 = 322: first partial product (23x4=92) carries 1 into
+        # the tens column; summing 92 + 230 carries 1 into the hundreds.
+        layout = build_long_multiplication_layout([23, 14])
+        assert layout.top_digits.strip() == "23"
+        assert layout.bottom_digits.strip() == "14"
+        assert layout.result_digits.strip() == "322"
+        assert [p.strip() for p in layout.partial_products] == ["92", "230"]
+        assert layout.partial_carries[0] == ["", "1", ""]
+        assert layout.partial_carries[1] == ["", "", ""]
+        assert layout.result_carries == ["1", "", ""]
+
+    def test_three_digit_by_two_digit_no_summation_carry(self):
+        # 234 x 16 = 3744: partial products 1404 + 2340 sum cleanly
+        # (no column exceeds 9), so result_carries is all blank.
+        layout = build_long_multiplication_layout([234, 16])
+        assert layout.result_digits.strip() == "3744"
+        assert [p.strip() for p in layout.partial_products] == ["1404", "2340"]
+        assert all(c == "" for c in layout.result_carries)
+
+    def test_three_digit_multiplier_three_partial_rows(self):
+        layout = build_long_multiplication_layout([47, 123])
+        assert len(layout.partial_products) == 3
+        assert int("".join(layout.result_digits.split())) == 47 * 123
+
+    def test_multiplier_with_internal_zero_digit(self):
+        # 23 x 104: the tens-digit partial product is 23 x 0 = 0, still
+        # produces a valid (all-zero, correctly shifted) row.
+        layout = build_long_multiplication_layout([23, 104])
+        assert layout.result_digits.strip() == "2392"
+        assert [p.strip() for p in layout.partial_products] == ["92", "0", "2300"]
+
+    def test_result_matches_plain_python_multiplication_for_many_cases(self):
+        import random
+        random.seed(123)
+        for _ in range(200):
+            a = random.randint(1, 9999)
+            b = random.randint(10, 999)
+            layout = build_long_multiplication_layout([a, b])
+            assert int(layout.result_digits) == a * b
+            assert sum(int(p) for p in layout.partial_products) == a * b
+
+    def test_raises_on_invalid_spec(self):
+        with pytest.raises(ValueError):
+            build_long_multiplication_layout([234, 6])

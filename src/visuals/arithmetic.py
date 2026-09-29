@@ -11,13 +11,15 @@ itself are computed here in plain Python, so the class of bug where an
 LLM occasionally miscalculates arithmetic (already seen live in
 evaluate_answer) simply can't happen for this whiteboard element.
 
-Scope, deliberately: addition and subtraction of any two non-negative
-integers, and multiplication by a single-digit (0-9) multiplier - the
-standard grade 3-5 column-arithmetic algorithms. Multi-digit x multi-digit
-long multiplication (partial-product rows) and long division (quotient
-bar, remainder) are structurally different layouts, not just bigger
-numbers - deliberately out of scope for this first primitive rather than
-half-implemented.
+Scope: addition and subtraction of any two non-negative integers, and
+multiplication by a single-digit (0-9) multiplier - the standard grade
+3-5 column-arithmetic algorithms (vertical_arithmetic / ArithmeticLayout
+below). Multi-digit x multi-digit long multiplication (partial-product
+rows, see LongMultiplicationLayout / build_long_multiplication_layout
+below) is a structurally different layout - its own action name and
+dataclass, rather than overloading vertical_arithmetic's "multiply" with
+a second shape. Long division (quotient bar, remainder) is a further,
+separate layout still not implemented here.
 """
 
 from dataclasses import dataclass, field
@@ -182,4 +184,107 @@ def build_layout(operation: str, operands: List[int]) -> ArithmeticLayout:
         bottom_digits=str(b).rjust(width, " "),
         result_digits=str(result).rjust(width, " "),
         carry_marks=_multiplication_carries(a, b, width),
+    )
+
+
+@dataclass
+class LongMultiplicationLayout:
+    """Multi-digit x multi-digit long multiplication: one partial-product
+    row per digit of the multiplier (bottom_digits), right-aligned and
+    already left-shifted with explicit zero placeholders (e.g. 23 x 14's
+    second partial product is written "230", not "23" shifted - the
+    beginner-friendly "placeholder zero" convention, since it keeps every
+    row a plain right-aligned digit string with no shift for the renderer
+    to reinterpret), followed by a final summation row.
+
+    partial_carries[row] holds that row's own multiplication carry marks
+    (the same per-digit carry annotation used by ArithmeticLayout's single-
+    digit multiply, since computing one partial product IS a single-digit
+    multiplication - it's unrelated to the shift applied afterward).
+    result_carries holds the addition carry marks for summing all the
+    partial product rows together into result_digits.
+
+    All digit strings are right-aligned, space-padded, and the same width.
+    """
+    top_digits: str
+    bottom_digits: str
+    partial_products: List[str] = field(default_factory=list)
+    partial_carries: List[List[str]] = field(default_factory=list)
+    result_digits: str = ""
+    result_carries: List[str] = field(default_factory=list)
+
+
+def validate_long_multiplication_operands(operands: List[int]) -> Optional[str]:
+    """Returns an error message if the spec is invalid, or None. Long
+    multiplication is specifically for a multi-digit multiplier - a
+    single-digit multiplier should use vertical_arithmetic's "multiply"
+    operation instead, so there's only ever one correct action for a
+    given problem."""
+    if not isinstance(operands, (list, tuple)) or len(operands) != 2:
+        return "long_multiplication needs exactly 2 operands."
+    a, b = operands
+    if not (isinstance(a, int) and isinstance(b, int)) or isinstance(a, bool) or isinstance(b, bool):
+        return "Both operands must be plain integers."
+    if a < 0 or b < 0:
+        return "Negative operands aren't supported (grade-school column arithmetic stays non-negative)."
+    if a == 0:
+        return "The first operand (the number being multiplied) must be positive."
+    if b < 10:
+        return (
+            "The second operand has only one digit - use vertical_arithmetic's "
+            "'multiply' operation instead of long_multiplication for a "
+            "single-digit multiplier."
+        )
+    return None
+
+
+def _sum_carries(rows: List[str], width: int) -> List[str]:
+    """Right-to-left addition-carry simulation for summing N same-width,
+    right-aligned digit-strings (the partial product rows) - a
+    generalization of _addition_carries beyond exactly 2 addends. A carry
+    can exceed 1 digit at wide columns with several rows, so marks are
+    stored as their full string value (e.g. "12"), same convention as
+    ArithmeticLayout.borrow_marks."""
+    carries = [""] * width
+    carry = 0
+    for i in range(width - 1, -1, -1):
+        col_sum = carry
+        for row in rows:
+            ch = row[i]
+            if ch != " ":
+                col_sum += int(ch)
+        carry = col_sum // 10
+        if carry and i > 0:
+            carries[i - 1] = str(carry)
+    return carries
+
+
+def build_long_multiplication_layout(operands: List[int]) -> LongMultiplicationLayout:
+    """Raises ValueError if the spec fails validate_long_multiplication_
+    operands() - callers should validate first and treat a raised error
+    as "don't render this", same as any other malformed draw action."""
+    error = validate_long_multiplication_operands(operands)
+    if error:
+        raise ValueError(error)
+
+    a, b = operands
+    result = a * b
+    b_str = str(b)
+    width = len(str(result))
+
+    partial_products: List[str] = []
+    partial_carries: List[List[str]] = []
+    for shift, digit_char in enumerate(reversed(b_str)):
+        d = int(digit_char)
+        shifted_value = (a * d) * (10 ** shift)
+        partial_products.append(str(shifted_value).rjust(width, " "))
+        partial_carries.append(_multiplication_carries(a, d, width))
+
+    return LongMultiplicationLayout(
+        top_digits=str(a).rjust(width, " "),
+        bottom_digits=str(b).rjust(width, " "),
+        partial_products=partial_products,
+        partial_carries=partial_carries,
+        result_digits=str(result).rjust(width, " "),
+        result_carries=_sum_carries(partial_products, width),
     )

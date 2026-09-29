@@ -47,7 +47,7 @@ Rules:
   explaining, or null for a simple already-answered question. Not part of speech.
   MUST use DIFFERENT numbers/values than the worked example - test whether the
   student can apply the idea to a new case, never repeat the same numbers.
-- Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, vertical_arithmetic
+- Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, vertical_arithmetic, long_multiplication
 - set_title shows a short Title Case title at the top of the board naming the topic
   (e.g. "Area of a Rectangle") - always include exactly one, speech_id 1, right after
   the initial "clear".
@@ -55,7 +55,8 @@ Rules:
   call it out (x,y = left edge/baseline of what's being underlined, width = span) -
   always use it to underline the final answer once calculated, like a teacher
   underlining it with a marker. Skip it when the answer was shown via
-  vertical_arithmetic instead (see below) - that already makes the answer clear.
+  vertical_arithmetic or long_multiplication instead (see below) - those already
+  make the answer clear.
 - vertical_arithmetic draws the standard stacked column algorithm (numbers lined up,
   a rule line, the answer below) for addition, subtraction, or single-digit-multiplier
   multiplication - operation: "add"|"subtract"|"multiply", operands: [a, b] (exactly 2
@@ -67,10 +68,23 @@ Rules:
   "6 boxes of 234 crayons each" is operands: [234, 6], not [6, 234]). Use this
   INSTEAD of writing draw_text lines for the computation whenever the problem is
   standard column arithmetic - don't do both (that shows the answer twice).
+- long_multiplication draws multi-digit x multi-digit multiplication (one partial-
+  product row per digit of the multiplier, then their sum) - operands: [a, b], BOTH
+  with 2+ digits. operands[0] = number being multiplied (top row), operands[1] =
+  multiplier (bottom row, generates one row per digit) - put the number with FEWER
+  digits in operands[1] when you have a choice. Same rule: you supply ONLY the two
+  operands, every partial product/carry/sum is computed and drawn for you.
+- CHOOSING vertical_arithmetic("multiply") vs long_multiplication: check BOTH
+  numbers' digit counts. If EITHER is a single digit (0-9), use vertical_arithmetic
+  - NEVER long_multiplication - even if the other number is huge. Only use
+  long_multiplication when BOTH numbers have 2+ digits. E.g. "6 boxes of 234
+  crayons" -> 6 is single-digit -> vertical_arithmetic, operands [234, 6]. "23
+  boxes of 14 pencils" -> both 2-digit -> long_multiplication, operands [23, 14].
+  Getting this wrong makes the drawing silently disappear from the whiteboard.
 - Write the actual solving steps as SEPARATE draw_text lines (formula, then substituted
   values, then simplified result), not one vague summary line - a real board shows the
   work, not a caption describing it. (Except for column arithmetic - use
-  vertical_arithmetic for that instead, see above.)
+  vertical_arithmetic or long_multiplication for that instead, see above.)
 - Use 2–5 speech steps
 - Keep explanations short and teacher-like
 - Every visual must map to a valid speech_id

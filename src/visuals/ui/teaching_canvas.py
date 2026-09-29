@@ -55,13 +55,16 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer
 from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QFontMetrics, QPolygonF, QColor, QPainterPath
 from PyQt5.QtWidgets import QGraphicsObject
 
-from visuals.arithmetic import build_layout, ArithmeticLayout
+from visuals.arithmetic import (
+    build_layout, ArithmeticLayout,
+    build_long_multiplication_layout, LongMultiplicationLayout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +135,11 @@ _ARITH_ANNOT_FONT_SIZE = 14
 _ARITH_ROW_GAP = 8
 _ARITH_REVEAL_SECONDS = 1.8
 
+# Long multiplication reuses all the above (same font sizes/colors) but has
+# a variable number of partial-product rows, so its reveal duration scales
+# with how many parts there are to show instead of a fixed constant.
+_LONGMULT_SECONDS_PER_PART = 0.35
+
 
 @dataclass
 class _Line:
@@ -201,6 +209,13 @@ class _VerticalArithmetic:
     start_time: float
 
 
+@dataclass
+class _LongMultiplication:
+    layout: LongMultiplicationLayout  # fully computed by build_long_multiplication_layout - no math left to do
+    x: float; y: float                 # top-left anchor
+    start_time: float
+
+
 class TeachingCanvas(QGraphicsObject):
     def __init__(self):
         super().__init__()
@@ -214,6 +229,7 @@ class TeachingCanvas(QGraphicsObject):
         self.title_text: str = ""
         self.icons: List[_Icon] = []
         self.arithmetic_items: List[_VerticalArithmetic] = []
+        self.long_multiplication_items: List[_LongMultiplication] = []
 
         # Laser-pointer dot state - see module docstring and _retarget_laser.
         self._laser_visible = False
@@ -257,6 +273,8 @@ class TeachingCanvas(QGraphicsObject):
             self._paint_icon(painter, item, now)
         for item in self.arithmetic_items:
             self._paint_vertical_arithmetic(painter, item, now)
+        for item in self.long_multiplication_items:
+            self._paint_long_multiplication(painter, item, now)
         for item in self.text_items:
             self._paint_text(painter, item, now)
         for item in self.underline_items:
@@ -725,6 +743,106 @@ class TeachingCanvas(QGraphicsObject):
 
         painter.setOpacity(1.0)
 
+    def _paint_long_multiplication(self, painter: QPainter, item: _LongMultiplication, now: float) -> None:
+        """Reveals top/bottom numbers, then each partial-product row in
+        turn (with that row's own carry marks shown directly above it,
+        rather than transiently above the top number - avoiding any need
+        to erase/rewrite carries as later rows are added), then the final
+        sum line and result. Every digit and carry mark came from
+        visuals.arithmetic.build_long_multiplication_layout(), never
+        computed here or by the LLM."""
+        layout = item.layout
+        n_rows = len(layout.partial_products)
+        n_parts = 3 + n_rows + 2  # top, bottom, line1, each partial row, line2, result
+        duration = max(_ARITH_REVEAL_SECONDS, n_parts * _LONGMULT_SECONDS_PER_PART)
+        p = self._progress(item.start_time, now, duration=duration)
+        if p <= 0:
+            return
+
+        font = QFont("Consolas", _ARITH_FONT_SIZE)
+        font.setStyleHint(QFont.Monospace)
+        font.setBold(True)
+        metrics = QFontMetrics(font)
+        char_w = metrics.horizontalAdvance("0")
+        ascent = metrics.ascent()
+        row_h = metrics.height() + _ARITH_ROW_GAP
+
+        annot_font = QFont("Consolas", _ARITH_ANNOT_FONT_SIZE)
+        annot_font.setStyleHint(QFont.Monospace)
+
+        operator_gap = char_w * 1.4
+        digits_x = item.x + operator_gap
+        width_chars = len(layout.top_digits)
+        line_w = operator_gap + width_chars * char_w
+
+        # Every digit row (top, bottom, each partial product, result) sits
+        # one row_h apart, same pitch throughout - a row's own carry marks
+        # are drawn in the leading gap *within* that row's slot (the same
+        # gap vertical_arithmetic reserves above its single top row), never
+        # as extra height stacked on top of it.
+        top_baseline = item.y + row_h * 0.55 + ascent
+        bottom_baseline = top_baseline + row_h
+        line1_y = bottom_baseline + row_h * 0.32
+
+        first_partial_baseline = line1_y + row_h * 0.55 + ascent
+        partial_baselines = [
+            (first_partial_baseline + i * row_h - ascent - row_h * 0.18, first_partial_baseline + i * row_h)
+            for i in range(n_rows)
+        ]
+
+        last_partial_baseline = first_partial_baseline + (n_rows - 1) * row_h
+        line2_y = last_partial_baseline + row_h * 0.32
+        result_baseline = line2_y + row_h * 0.55 + ascent
+        result_annot_baseline = result_baseline - ascent - row_h * 0.18
+
+        def part_alpha(i):
+            return max(0.0, min(1.0, p * n_parts - i))
+
+        idx = 0
+        a = part_alpha(idx); idx += 1
+        if a > 0:
+            painter.setOpacity(a)
+            self._draw_digit_row(painter, layout.top_digits, digits_x, top_baseline, char_w, font, _ARITH_COLOR)
+
+        a = part_alpha(idx); idx += 1
+        if a > 0:
+            painter.setOpacity(a)
+            painter.setFont(font)
+            painter.setPen(QPen(_ARITH_COLOR))
+            painter.drawText(QPointF(item.x, bottom_baseline), "×")
+            self._draw_digit_row(painter, layout.bottom_digits, digits_x, bottom_baseline, char_w, font, _ARITH_COLOR)
+
+        a = part_alpha(idx); idx += 1
+        if a > 0:
+            painter.setOpacity(a)
+            painter.setPen(QPen(_ARITH_COLOR, 3))
+            painter.drawLine(QPointF(item.x, line1_y), QPointF(item.x + line_w, line1_y))
+
+        for i in range(n_rows):
+            a = part_alpha(idx); idx += 1
+            if a > 0:
+                painter.setOpacity(a)
+                annot_baseline, row_baseline = partial_baselines[i]
+                carries = layout.partial_carries[i]
+                if any(carries):
+                    self._draw_arithmetic_annotations(painter, carries, digits_x, annot_baseline, char_w, annot_font)
+                self._draw_digit_row(painter, layout.partial_products[i], digits_x, row_baseline, char_w, font, _ARITH_COLOR)
+
+        a = part_alpha(idx); idx += 1
+        if a > 0:
+            painter.setOpacity(a)
+            painter.setPen(QPen(_ARITH_COLOR, 3))
+            painter.drawLine(QPointF(item.x, line2_y), QPointF(item.x + line_w, line2_y))
+
+        a = part_alpha(idx); idx += 1
+        if a > 0:
+            painter.setOpacity(a)
+            if any(layout.result_carries):
+                self._draw_arithmetic_annotations(painter, layout.result_carries, digits_x, result_annot_baseline, char_w, annot_font)
+            self._draw_digit_row(painter, layout.result_digits, digits_x, result_baseline, char_w, font, _ARITH_COLOR)
+
+        painter.setOpacity(1.0)
+
     def _paint_text(self, painter: QPainter, item: _Text, now: float) -> None:
         # Typewriter reveal - duration scales with length so a short
         # label and a long equation both feel like they're being written
@@ -811,6 +929,7 @@ class TeachingCanvas(QGraphicsObject):
         self.underline_items = []
         self.icons = []
         self.arithmetic_items = []
+        self.long_multiplication_items = []
         self._hide_laser()
         self.update()
 
@@ -856,19 +975,70 @@ class TeachingCanvas(QGraphicsObject):
         self.icons.append(_Icon(icon_id=icon_id, name=name, x=x, y=y, scale=scale, start_time=time.monotonic()))
         self.update()
 
+    @staticmethod
+    def _multiplier_digit_count(operands) -> Optional[int]:
+        """Returns the digit count of operands[1] (the multiplier, by the
+        convention both multiplication actions share), or None if operands
+        isn't even shaped like [a, b]. Used only to redirect between
+        vertical_arithmetic's multiply and long_multiplication below -
+        never for the actual math, which stays entirely in arithmetic.py."""
+        if not isinstance(operands, (list, tuple)) or len(operands) != 2:
+            return None
+        b = operands[1]
+        if not isinstance(b, int) or isinstance(b, bool) or b < 0:
+            return None
+        return len(str(b))
+
     def add_vertical_arithmetic(self, operation, operands, x, y):
         """Validates + computes via visuals.arithmetic.build_layout(),
         then stores the result for rendering - no math or layout
         decisions happen here or in the LLM's own output. Silently skips
         an invalid spec (same "drop this one malformed action" pattern
         as draw_polygon needing >=3 points), logging a warning so a bad
-        LLM output is visible without crashing the turn."""
+        LLM output is visible without crashing the turn.
+
+        Exception: for "multiply" with a multi-digit multiplier, redirect
+        to add_long_multiplication instead of failing - live testing found
+        the LLM sometimes emits vertical_arithmetic (rather than
+        long_multiplication) for a multi-digit x multi-digit problem
+        despite the prompt saying otherwise. Both actions share the exact
+        same operands convention ([number being multiplied, multiplier]),
+        so the redirect is a straight pass-through - the board should
+        never silently drop a real multiplication just because the model
+        picked between two equivalent action names for it."""
+        if operation == "multiply" and (self._multiplier_digit_count(operands) or 0) >= 2:
+            self.add_long_multiplication(operands, x, y)
+            return
         try:
             layout = build_layout(operation, operands)
         except ValueError as e:
             logger.warning(f"Skipping invalid vertical_arithmetic action: {e}")
             return
         self.arithmetic_items.append(_VerticalArithmetic(layout, x, y, time.monotonic()))
+        self.update()
+
+    def add_long_multiplication(self, operands, x, y):
+        """Validates + computes via visuals.arithmetic.
+        build_long_multiplication_layout(), then stores the result for
+        rendering - no math or layout decisions happen here or in the
+        LLM's own output. Silently skips an invalid spec (same pattern as
+        add_vertical_arithmetic), logging a warning so a bad LLM output is
+        visible without crashing the turn.
+
+        Exception: for a single-digit multiplier, redirect to
+        add_vertical_arithmetic's "multiply" instead of failing - see
+        add_vertical_arithmetic's docstring for why this redirect exists
+        in both directions."""
+        digit_count = self._multiplier_digit_count(operands)
+        if digit_count is not None and digit_count <= 1:
+            self.add_vertical_arithmetic("multiply", operands, x, y)
+            return
+        try:
+            layout = build_long_multiplication_layout(operands)
+        except ValueError as e:
+            logger.warning(f"Skipping invalid long_multiplication action: {e}")
+            return
+        self.long_multiplication_items.append(_LongMultiplication(layout, x, y, time.monotonic()))
         self.update()
 
     def animate_icon(self, icon_id, animation, duration, to_x=None, to_scale=None):
@@ -975,6 +1145,12 @@ class TeachingCanvas(QGraphicsObject):
             elif action_type == "vertical_arithmetic":
                 self.add_vertical_arithmetic(
                     action.get("operation", ""), action.get("operands", []),
+                    action.get("x", 60), action.get("y", 130)
+                )
+
+            elif action_type == "long_multiplication":
+                self.add_long_multiplication(
+                    action.get("operands", []),
                     action.get("x", 60), action.get("y", 130)
                 )
 
