@@ -84,6 +84,9 @@ CURRICULUM_SEARCH_TOOL = {
 # more loudly" or "can you be quieter" instead of just replying in words.
 # `level` is relative (louder/quieter/normal) rather than a raw number since
 # that's how kids actually phrase the request - see JarvisBot._tool_set_volume().
+# `amount` captures INTENSITY separately from direction, so "a little quieter"
+# and "way too loud, turn it way down" produce different-sized changes instead
+# of the same fixed step regardless of how the request was phrased.
 VOLUME_CONTROL_TOOL = {
     "type": "function",
     "function": {
@@ -106,6 +109,21 @@ VOLUME_CONTROL_TOOL = {
                     "type": "string",
                     "enum": ["louder", "quieter", "normal"],
                     "description": "Direction to adjust the speaking volume."
+                },
+                "amount": {
+                    "type": "string",
+                    "enum": ["small", "medium", "large"],
+                    "description": (
+                        "How big a change to make - judge this from the student's "
+                        "own wording, not just the direction. Use 'small' for a "
+                        "mild/polite request ('a little quieter', 'could you speak "
+                        "a bit softer'). Use 'large' for an intense or urgent one "
+                        "('way too loud', 'my ears!', 'I can BARELY hear you'). "
+                        "Use 'medium' for anything in between or unspecified "
+                        "('quieter please', 'turn it up'). Ignored (and can be "
+                        "omitted) when level is 'normal' - resetting to normal "
+                        "volume has no notion of a bigger or smaller reset."
+                    )
                 }
             },
             "required": ["level"]
@@ -758,19 +776,23 @@ class JarvisBot:
             parts.append(f"Past misconceptions to watch for: {summary}")
         return " ".join(parts) if parts else None
 
-    # Step size per "louder"/"quieter" call, and the hard ceiling/floor -
-    # matches the clamp already enforced in AudioPlayer.set_volume().
-    _VOLUME_STEP = 0.25
+    # Step sizes per "louder"/"quieter" call, keyed by the LLM-judged intensity
+    # of the student's request (see VOLUME_CONTROL_TOOL's amount parameter),
+    # and the hard ceiling/floor - matches the clamp already enforced in
+    # AudioPlayer.set_volume(). "medium" is the pre-existing step size, kept
+    # unchanged so a missing/unrecognized amount degrades to prior behavior.
+    _VOLUME_STEPS = {"small": 0.15, "medium": 0.25, "large": 0.5}
     _VOLUME_MIN = 0.25
     _VOLUME_MAX = 2.0
 
-    def _tool_set_volume(self, level: str) -> str:
+    def _tool_set_volume(self, level: str, amount: str = "medium") -> str:
         """Implementation behind the set_volume tool the LLM can call."""
         current = self.audio_player.volume
+        step = self._VOLUME_STEPS.get(amount, self._VOLUME_STEPS["medium"])
         if level == "louder":
-            new_volume = min(current + self._VOLUME_STEP, self._VOLUME_MAX)
+            new_volume = min(current + step, self._VOLUME_MAX)
         elif level == "quieter":
-            new_volume = max(current - self._VOLUME_STEP, self._VOLUME_MIN)
+            new_volume = max(current - step, self._VOLUME_MIN)
         elif level == "normal":
             new_volume = 1.0
         else:
@@ -798,7 +820,7 @@ class JarvisBot:
         if tool_name == "search_curriculum":
             result = self._tool_search_curriculum(args.get("query", ""))
         elif tool_name == "set_volume":
-            result = self._tool_set_volume(args.get("level", ""))
+            result = self._tool_set_volume(args.get("level", ""), args.get("amount", "medium"))
         else:
             result = f"Unknown tool: {tool_name}"
 
