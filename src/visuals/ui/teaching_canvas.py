@@ -39,16 +39,31 @@ show the scenario itself, not just abstract shapes. Which icon and
 animation to use is decided separately from the LLM by
 visuals.scene_planner.ScenePlanner, and arrives here as the same kind
 of draw_icon/animate_icon actions as everything else.
+
+Column arithmetic (addition/subtraction/multiplication, the "line up
+the digits" grade-school algorithm) is NOT something the LLM lays out
+itself - it only supplies (operation, operands) via the
+vertical_arithmetic action, and visuals.arithmetic.build_layout()
+computes every digit, carry mark, and borrow mark deterministically
+before this module ever draws a pixel. This is deliberate: the LLM
+occasionally miscalculates arithmetic (already seen live in
+evaluate_answer), so for this one whiteboard element it never gets the
+chance to - see arithmetic.py's own docstring for the full reasoning.
 """
 
+import logging
 import math
 import time
 from dataclasses import dataclass
 from typing import List, Tuple
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer
-from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPolygonF, QColor, QPainterPath
+from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QFontMetrics, QPolygonF, QColor, QPainterPath
 from PyQt5.QtWidgets import QGraphicsObject
+
+from visuals.arithmetic import build_layout, ArithmeticLayout
+
+logger = logging.getLogger(__name__)
 
 # Kid-friendly palette: warm paper background (not stark white), a
 # friendly blue board frame, blue shape outlines with a warm translucent
@@ -105,6 +120,17 @@ _ICON_COLOR = QColor(70, 70, 70)
 _ICON_STROKE_WIDTH = 2.5
 _ICON_DRAW_SECONDS = 1.1     # time to sketch the icon in, stroke by stroke
 _ICON_ANIM_SECONDS = 2.2     # default move/grow duration, once the sketch is done
+
+# Column arithmetic - see visuals.arithmetic and module docstring. Carries/
+# borrows are drawn in the same red as the squiggly underline, matching
+# the "red is a teacher's annotation pen" convention already established.
+_ARITH_COLOR = QColor(35, 40, 50)          # same ink as regular equation text
+_ARITH_ANNOT_COLOR = QColor(225, 30, 30)   # carry/borrow marks - a teacher's red pen
+_ARITH_STRIKE_COLOR = QColor(225, 30, 30)  # a borrowed-from digit, struck through
+_ARITH_FONT_SIZE = 30
+_ARITH_ANNOT_FONT_SIZE = 14
+_ARITH_ROW_GAP = 8
+_ARITH_REVEAL_SECONDS = 1.8
 
 
 @dataclass
@@ -168,6 +194,13 @@ class _Icon:
     anim_duration: float = 0.0
 
 
+@dataclass
+class _VerticalArithmetic:
+    layout: ArithmeticLayout   # fully computed by visuals.arithmetic.build_layout - no math left to do
+    x: float; y: float          # top-left anchor
+    start_time: float
+
+
 class TeachingCanvas(QGraphicsObject):
     def __init__(self):
         super().__init__()
@@ -180,6 +213,7 @@ class TeachingCanvas(QGraphicsObject):
         self.underline_items: List[_Underline] = []
         self.title_text: str = ""
         self.icons: List[_Icon] = []
+        self.arithmetic_items: List[_VerticalArithmetic] = []
 
         # Laser-pointer dot state - see module docstring and _retarget_laser.
         self._laser_visible = False
@@ -221,6 +255,8 @@ class TeachingCanvas(QGraphicsObject):
             self._paint_arc(painter, item, now)
         for item in self.icons:
             self._paint_icon(painter, item, now)
+        for item in self.arithmetic_items:
+            self._paint_vertical_arithmetic(painter, item, now)
         for item in self.text_items:
             self._paint_text(painter, item, now)
         for item in self.underline_items:
@@ -580,6 +616,115 @@ class TeachingCanvas(QGraphicsObject):
         strokes.append(("arc", QRectF(cx - 18 * s, ground_y - 4 * s, 36 * s, 10 * s), 0, -180 * 16))
         return strokes
 
+    def _draw_digit_row(self, painter: QPainter, digits: str, x: float, baseline_y: float,
+                         char_w: float, font: QFont, color: QColor, struck_flags: list = None) -> None:
+        """Draws a right-aligned, space-padded digit string one character
+        at a time (needed so individual digits can be struck through for
+        a subtraction borrow - see visuals.arithmetic's borrow_struck)."""
+        plain_pen = QPen(color)
+        strike_pen = QPen(_ARITH_STRIKE_COLOR)
+        strike_font = QFont(font)
+        strike_font.setStrikeOut(True)
+        for i, ch in enumerate(digits):
+            if ch == " ":
+                continue
+            struck = bool(struck_flags and struck_flags[i])
+            painter.setFont(strike_font if struck else font)
+            painter.setPen(strike_pen if struck else plain_pen)
+            painter.drawText(QPointF(x + i * char_w, baseline_y), ch)
+
+    def _draw_arithmetic_annotations(self, painter: QPainter, marks: list, x: float, baseline_y: float,
+                                      char_w: float, font: QFont) -> None:
+        """Carry/borrow marks - small text right-aligned to sit above the
+        column they annotate (a multi-digit mark like "15" naturally
+        extends left over the neighboring column, matching how these are
+        actually handwritten)."""
+        if not marks:
+            return
+        painter.setFont(font)
+        painter.setPen(QPen(_ARITH_ANNOT_COLOR))
+        metrics = QFontMetrics(font)
+        for i, mark in enumerate(marks):
+            if not mark:
+                continue
+            mark_w = metrics.horizontalAdvance(mark)
+            col_right = x + (i + 1) * char_w
+            painter.drawText(QPointF(col_right - mark_w, baseline_y), mark)
+
+    def _paint_vertical_arithmetic(self, painter: QPainter, item: _VerticalArithmetic, now: float) -> None:
+        """Reveals in the order a teacher actually works through it: both
+        numbers, then the line, then the carry/borrow marks, then the
+        answer - not everything at once. Every digit shown here came from
+        visuals.arithmetic.build_layout(), never computed by this method
+        or by the LLM."""
+        p = self._progress(item.start_time, now, duration=_ARITH_REVEAL_SECONDS)
+        if p <= 0:
+            return
+        layout = item.layout
+
+        font = QFont("Consolas", _ARITH_FONT_SIZE)
+        font.setStyleHint(QFont.Monospace)
+        font.setBold(True)
+        metrics = QFontMetrics(font)
+        char_w = metrics.horizontalAdvance("0")
+        ascent = metrics.ascent()
+        row_h = metrics.height() + _ARITH_ROW_GAP
+
+        annot_font = QFont("Consolas", _ARITH_ANNOT_FONT_SIZE)
+        annot_font.setStyleHint(QFont.Monospace)
+
+        operator_gap = char_w * 1.4
+        digits_x = item.x + operator_gap
+        width_chars = len(layout.top_digits)
+
+        annot_baseline = item.y + QFontMetrics(annot_font).ascent()
+        top_baseline = item.y + row_h * 0.55 + ascent
+        bottom_baseline = top_baseline + row_h
+        line_y = bottom_baseline + row_h * 0.32
+        result_baseline = line_y + row_h * 0.85 + ascent * 0.35
+
+        # 5 sequential parts, each getting an equal slice of the reveal -
+        # same "one part finishes before the next starts" technique as
+        # the icons' _reveal_strokes.
+        n_parts = 5
+        def part_alpha(i):
+            return max(0.0, min(1.0, p * n_parts - i))
+
+        top_struck = layout.borrow_struck if layout.operation == "subtract" else None
+        annotation_marks = layout.carry_marks if layout.operation in ("add", "multiply") else layout.borrow_marks
+
+        a0 = part_alpha(0)
+        if a0 > 0:
+            painter.setOpacity(a0)
+            self._draw_digit_row(painter, layout.top_digits, digits_x, top_baseline, char_w, font, _ARITH_COLOR, top_struck)
+
+        a1 = part_alpha(1)
+        if a1 > 0:
+            painter.setOpacity(a1)
+            painter.setFont(font)
+            painter.setPen(QPen(_ARITH_COLOR))
+            painter.drawText(QPointF(item.x, bottom_baseline), layout.operator_symbol)
+            self._draw_digit_row(painter, layout.bottom_digits, digits_x, bottom_baseline, char_w, font, _ARITH_COLOR)
+
+        a2 = part_alpha(2)
+        if a2 > 0:
+            painter.setOpacity(a2)
+            line_w = operator_gap + width_chars * char_w
+            painter.setPen(QPen(_ARITH_COLOR, 3))
+            painter.drawLine(QPointF(item.x, line_y), QPointF(item.x + line_w, line_y))
+
+        a3 = part_alpha(3)
+        if a3 > 0 and any(annotation_marks):
+            painter.setOpacity(a3)
+            self._draw_arithmetic_annotations(painter, annotation_marks, digits_x, annot_baseline, char_w, annot_font)
+
+        a4 = part_alpha(4)
+        if a4 > 0:
+            painter.setOpacity(a4)
+            self._draw_digit_row(painter, layout.result_digits, digits_x, result_baseline, char_w, font, _ARITH_COLOR)
+
+        painter.setOpacity(1.0)
+
     def _paint_text(self, painter: QPainter, item: _Text, now: float) -> None:
         # Typewriter reveal - duration scales with length so a short
         # label and a long equation both feel like they're being written
@@ -665,6 +810,7 @@ class TeachingCanvas(QGraphicsObject):
         self.arc_items = []
         self.underline_items = []
         self.icons = []
+        self.arithmetic_items = []
         self._hide_laser()
         self.update()
 
@@ -708,6 +854,21 @@ class TeachingCanvas(QGraphicsObject):
 
     def add_icon(self, icon_id, name, x, y, scale=1.0):
         self.icons.append(_Icon(icon_id=icon_id, name=name, x=x, y=y, scale=scale, start_time=time.monotonic()))
+        self.update()
+
+    def add_vertical_arithmetic(self, operation, operands, x, y):
+        """Validates + computes via visuals.arithmetic.build_layout(),
+        then stores the result for rendering - no math or layout
+        decisions happen here or in the LLM's own output. Silently skips
+        an invalid spec (same "drop this one malformed action" pattern
+        as draw_polygon needing >=3 points), logging a warning so a bad
+        LLM output is visible without crashing the turn."""
+        try:
+            layout = build_layout(operation, operands)
+        except ValueError as e:
+            logger.warning(f"Skipping invalid vertical_arithmetic action: {e}")
+            return
+        self.arithmetic_items.append(_VerticalArithmetic(layout, x, y, time.monotonic()))
         self.update()
 
     def animate_icon(self, icon_id, animation, duration, to_x=None, to_scale=None):
@@ -809,6 +970,12 @@ class TeachingCanvas(QGraphicsObject):
                     action.get("id", ""), action.get("animation", "move"),
                     action.get("duration", _ICON_ANIM_SECONDS),
                     to_x=action.get("to_x"), to_scale=action.get("to_scale")
+                )
+
+            elif action_type == "vertical_arithmetic":
+                self.add_vertical_arithmetic(
+                    action.get("operation", ""), action.get("operands", []),
+                    action.get("x", 60), action.get("y", 130)
                 )
 
         if text_positions:

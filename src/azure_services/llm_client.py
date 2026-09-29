@@ -312,7 +312,8 @@ class LLMClient:
         {"speech_id": 1, "action": "draw_polygon", "points": [[580,160],[780,160],[780,360],[580,360]]},
         {"speech_id": 1, "action": "draw_regular_polygon", "sides": 6, "cx": 620, "cy": 270, "radius": 110},
         {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360},
-        {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90}
+        {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90},
+        {"speech_id": 2, "action": "vertical_arithmetic", "operation": "add", "operands": [347, 58], "x": 100, "y": 180}
       ]
     }
 
@@ -321,6 +322,25 @@ class LLMClient:
       taught (e.g. "Area of a Rectangle", "Equivalent Fractions") - written in Title
       Case, not snake_case. Always emit this once, with speech_id 1, right alongside
       the initial "clear" action for every new question.
+    - vertical_arithmetic: draws the standard "line up the digits" column algorithm
+      for addition, subtraction, or multiplication - like a teacher writing it on a
+      board with the numbers stacked, a line underneath, and the answer below that.
+      operation = "add" | "subtract" | "multiply". operands = the two numbers, as a
+      list of exactly 2 non-negative integers, e.g. [347, 58]. x,y = top-left anchor
+      of the whole block. You supply ONLY the operation and operands - every digit,
+      carry mark, and borrow mark is computed and drawn for you; you never compute
+      the result yourself for this action, and you never invent coordinates for
+      individual digits. Constraints: subtract requires operands[0] >= operands[1]
+      (the result must not go negative); multiply ALWAYS needs the single-digit
+      number in operands[1] and the other (larger) number in operands[0],
+      regardless of which order the word problem mentions them in - e.g. "6 boxes
+      of 234 crayons each" is operands: [234, 6], NOT [6, 234], since 6 is the
+      single-digit multiplier. If neither number is a single digit, don't use
+      this action, write it as draw_text lines instead.
+      Use this whenever a problem calls for the standard column algorithm (the kind
+      where digits are stacked and you might carry or borrow) - NOT for general
+      equations like "Area = width x height" or fraction/word-based work, which
+      still use draw_text as described below.
     - draw_circle: x,y = CENTER of circle. r = radius (for circles). rx,ry = separate radii (for ellipses).
     - draw_rect: x,y = top-left corner. w,h = width and height.
     - draw_regular_polygon: sides=number of sides, cx/cy=center, radius=circumscribed radius.
@@ -349,7 +369,7 @@ class LLMClient:
       simple, already fully-answered question where a follow-up check would feel
       repetitive. Do NOT put the check question in speech - it is spoken separately,
       after the explanation.
-    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, vertical_arithmetic
     - Always include exactly one "set_title" action, speech_id 1, right after the
       initial "clear" - every question gets a title naming the topic.
     - Use 2-5 speech steps
@@ -474,6 +494,12 @@ class LLMClient:
         2. The substituted values, e.g. "Area = 6 x 4"
         3. The simplified/calculated result, e.g. "Area = 24"
       Each of these is its own draw_text action - never combine them into one line.
+    - EXCEPTION: if the calculation IS a standard column addition/subtraction/
+      single-digit-multiplier-multiplication (see vertical_arithmetic above), use
+      ONE vertical_arithmetic action instead of the 3 draw_text lines above for
+      that computation - it already shows the working and the answer together.
+      Don't do both for the same computation (that would show the answer twice).
+      You can still have a separate "key idea" draw_text line before it.
     - Before the worked example, write ONE short "key idea" line naming the
       underlying principle in plain words, e.g. "Area = space inside a shape" or
       "Equivalent fractions = same amount, different numbers" - the one thing the
@@ -484,12 +510,14 @@ class LLMClient:
       of how it's learned, not decoration.
     - Use "squiggly_underline" to underline the FINAL ANSWER LINE in red once
       it's calculated, like a teacher underlining the answer with a marker -
-      do this every time. Use the EXACT SAME x as the draw_text action for
-      that final-answer line itself, y about 14 pixels below that line's y
-      (so it sits just under that specific text, not the diagram), with
-      width=90 (wide enough to span a short line of text). Optionally
-      underline one key formula or term too if there's a specific thing the
-      student should notice.
+      do this every time THE ANSWER WAS WRITTEN AS draw_text (not as part of a
+      vertical_arithmetic block - its own boxed layout already makes the
+      answer clear, so skip the underline for that one). Use the EXACT SAME x
+      as the draw_text action for that final-answer line itself, y about 14
+      pixels below that line's y (so it sits just under that specific text,
+      not the diagram), with width=90 (wide enough to span a short line of
+      text). Optionally underline one key formula or term too if there's a
+      specific thing the student should notice.
 
     Canvas layout:
     - equations on the left: x between 60 and 420
