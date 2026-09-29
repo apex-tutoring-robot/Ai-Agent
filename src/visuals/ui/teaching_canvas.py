@@ -61,7 +61,10 @@ from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer
 from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QFontMetrics, QPolygonF, QColor, QPainterPath
 from PyQt5.QtWidgets import QGraphicsObject
 
-from visuals.arithmetic import build_layout, ArithmeticLayout
+from visuals.arithmetic import (
+    build_layout, ArithmeticLayout,
+    build_division_layout, DivisionLayout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +135,11 @@ _ARITH_ANNOT_FONT_SIZE = 14
 _ARITH_ROW_GAP = 8
 _ARITH_REVEAL_SECONDS = 1.8
 
+# Long division reuses the same font sizes/colors, but has a variable
+# number of steps, so its reveal duration scales with step count instead
+# of a fixed constant (same idea as long_multiplication's per-part pacing).
+_DIVISION_SECONDS_PER_PART = 0.45
+
 
 @dataclass
 class _Line:
@@ -201,6 +209,13 @@ class _VerticalArithmetic:
     start_time: float
 
 
+@dataclass
+class _Division:
+    layout: DivisionLayout   # fully computed by visuals.arithmetic.build_division_layout - no math left to do
+    x: float; y: float        # top-left anchor
+    start_time: float
+
+
 class TeachingCanvas(QGraphicsObject):
     def __init__(self):
         super().__init__()
@@ -214,6 +229,7 @@ class TeachingCanvas(QGraphicsObject):
         self.title_text: str = ""
         self.icons: List[_Icon] = []
         self.arithmetic_items: List[_VerticalArithmetic] = []
+        self.division_items: List[_Division] = []
 
         # Laser-pointer dot state - see module docstring and _retarget_laser.
         self._laser_visible = False
@@ -257,6 +273,8 @@ class TeachingCanvas(QGraphicsObject):
             self._paint_icon(painter, item, now)
         for item in self.arithmetic_items:
             self._paint_vertical_arithmetic(painter, item, now)
+        for item in self.division_items:
+            self._paint_division(painter, item, now)
         for item in self.text_items:
             self._paint_text(painter, item, now)
         for item in self.underline_items:
@@ -725,6 +743,92 @@ class TeachingCanvas(QGraphicsObject):
 
         painter.setOpacity(1.0)
 
+    def _paint_division(self, painter: QPainter, item: _Division, now: float) -> None:
+        """Reveals the divisor/dividend/bracket first, then each step in
+        turn - a step's own quotient digit, its "bring down" row (skipped
+        for the very first step, since that value is already sitting
+        unmodified in the dividend row above - see arithmetic.py's
+        docstring), its product, the subtraction line, and the
+        remainder. Every digit came from visuals.arithmetic.
+        build_division_layout(), never computed here or by the LLM."""
+        layout = item.layout
+        n_parts = 1 + len(layout.steps)
+        duration = max(_ARITH_REVEAL_SECONDS, n_parts * _DIVISION_SECONDS_PER_PART)
+        p = self._progress(item.start_time, now, duration=duration)
+        if p <= 0:
+            return
+
+        font = QFont("Consolas", _ARITH_FONT_SIZE)
+        font.setStyleHint(QFont.Monospace)
+        font.setBold(True)
+        metrics = QFontMetrics(font)
+        char_w = metrics.horizontalAdvance("0")
+        ascent = metrics.ascent()
+        row_h = metrics.height() + _ARITH_ROW_GAP
+
+        divisor_w = char_w * len(layout.divisor_digits)
+        bar_x = item.x + divisor_w + char_w * 0.35
+        digits_x = bar_x + char_w * 0.5
+        dividend_line_w = len(layout.dividend_digits) * char_w
+
+        quotient_baseline = item.y + row_h * 0.55 + ascent
+        roof_line_y = quotient_baseline + row_h * 0.32
+        dividend_baseline = roof_line_y + row_h * 0.55 + ascent
+
+        step_baselines = []
+        cursor = dividend_baseline
+        for k in range(len(layout.steps)):
+            brought_baseline = None
+            if k > 0:
+                cursor += row_h
+                brought_baseline = cursor
+            cursor += row_h
+            product_baseline = cursor
+            line_y = product_baseline + row_h * 0.32
+            cursor = line_y + row_h * 0.55 + ascent
+            remainder_baseline = cursor
+            step_baselines.append((brought_baseline, product_baseline, line_y, remainder_baseline))
+
+        n_parts_total = n_parts
+
+        def part_alpha(i):
+            return max(0.0, min(1.0, p * n_parts_total - i))
+
+        idx = 0
+        a = part_alpha(idx); idx += 1
+        if a > 0:
+            painter.setOpacity(a)
+            self._draw_digit_row(painter, layout.divisor_digits, item.x, dividend_baseline, char_w, font, _ARITH_COLOR)
+            self._draw_digit_row(painter, layout.dividend_digits, digits_x, dividend_baseline, char_w, font, _ARITH_COLOR)
+            painter.setPen(QPen(_ARITH_COLOR, 3))
+            painter.drawLine(QPointF(bar_x, roof_line_y), QPointF(bar_x, dividend_baseline + metrics.descent() * 0.6))
+            painter.drawLine(QPointF(bar_x, roof_line_y), QPointF(bar_x + dividend_line_w + char_w * 0.3, roof_line_y))
+
+        for k, step in enumerate(layout.steps):
+            a = part_alpha(idx); idx += 1
+            if a <= 0:
+                continue
+            painter.setOpacity(a)
+            col_x = digits_x + step.start_col * char_w
+            step_w = (step.end_col - step.start_col + 1) * char_w
+            brought_baseline, product_baseline, line_y, remainder_baseline = step_baselines[k]
+
+            q_char = layout.quotient_row[step.end_col]
+            if q_char != " ":
+                self._draw_digit_row(painter, q_char, digits_x + step.end_col * char_w, quotient_baseline, char_w, font, _ARITH_COLOR)
+
+            if brought_baseline is not None:
+                self._draw_digit_row(painter, step.brought_value, col_x, brought_baseline, char_w, font, _ARITH_COLOR)
+
+            self._draw_digit_row(painter, step.product, col_x, product_baseline, char_w, font, _ARITH_COLOR)
+
+            painter.setPen(QPen(_ARITH_COLOR, 3))
+            painter.drawLine(QPointF(col_x, line_y), QPointF(col_x + step_w, line_y))
+
+            self._draw_digit_row(painter, step.remainder_after, col_x, remainder_baseline, char_w, font, _ARITH_COLOR)
+
+        painter.setOpacity(1.0)
+
     def _paint_text(self, painter: QPainter, item: _Text, now: float) -> None:
         # Typewriter reveal - duration scales with length so a short
         # label and a long equation both feel like they're being written
@@ -811,6 +915,7 @@ class TeachingCanvas(QGraphicsObject):
         self.underline_items = []
         self.icons = []
         self.arithmetic_items = []
+        self.division_items = []
         self._hide_laser()
         self.update()
 
@@ -869,6 +974,21 @@ class TeachingCanvas(QGraphicsObject):
             logger.warning(f"Skipping invalid vertical_arithmetic action: {e}")
             return
         self.arithmetic_items.append(_VerticalArithmetic(layout, x, y, time.monotonic()))
+        self.update()
+
+    def add_division(self, operands, x, y):
+        """Validates + computes via visuals.arithmetic.
+        build_division_layout(), then stores the result for rendering -
+        no math or layout decisions happen here or in the LLM's own
+        output. Silently skips an invalid spec (same pattern as
+        add_vertical_arithmetic), logging a warning so a bad LLM output
+        is visible without crashing the turn."""
+        try:
+            layout = build_division_layout(operands)
+        except ValueError as e:
+            logger.warning(f"Skipping invalid long_division action: {e}")
+            return
+        self.division_items.append(_Division(layout, x, y, time.monotonic()))
         self.update()
 
     def animate_icon(self, icon_id, animation, duration, to_x=None, to_scale=None):
@@ -975,6 +1095,12 @@ class TeachingCanvas(QGraphicsObject):
             elif action_type == "vertical_arithmetic":
                 self.add_vertical_arithmetic(
                     action.get("operation", ""), action.get("operands", []),
+                    action.get("x", 60), action.get("y", 130)
+                )
+
+            elif action_type == "long_division":
+                self.add_division(
+                    action.get("operands", []),
                     action.get("x", 60), action.get("y", 130)
                 )
 

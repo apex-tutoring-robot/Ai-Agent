@@ -47,7 +47,7 @@ Rules:
   explaining, or null for a simple already-answered question. Not part of speech.
   MUST use DIFFERENT numbers/values than the worked example - test whether the
   student can apply the idea to a new case, never repeat the same numbers.
-- Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, vertical_arithmetic
+- Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, vertical_arithmetic, long_division
 - set_title shows a short Title Case title at the top of the board naming the topic
   (e.g. "Area of a Rectangle") - always include exactly one, speech_id 1, right after
   the initial "clear".
@@ -55,7 +55,8 @@ Rules:
   call it out (x,y = left edge/baseline of what's being underlined, width = span) -
   always use it to underline the final answer once calculated, like a teacher
   underlining it with a marker. Skip it when the answer was shown via
-  vertical_arithmetic instead (see below) - that already makes the answer clear.
+  vertical_arithmetic or long_division instead (see below) - those already make
+  the answer clear.
 - vertical_arithmetic draws the standard stacked column algorithm (numbers lined up,
   a rule line, the answer below) for addition, subtraction, or single-digit-multiplier
   multiplication - operation: "add"|"subtract"|"multiply", operands: [a, b] (exactly 2
@@ -67,10 +68,16 @@ Rules:
   "6 boxes of 234 crayons each" is operands: [234, 6], not [6, 234]). Use this
   INSTEAD of writing draw_text lines for the computation whenever the problem is
   standard column arithmetic - don't do both (that shows the answer twice).
+- long_division draws the "bring down each digit" long division algorithm (bracket,
+  quotient on top, one subtraction step per digit) - operands: [dividend, divisor],
+  divisor MUST be a single digit (1-9) and dividend >= divisor (a multi-digit divisor
+  needs a different algorithm - write it as draw_text instead in that case). Same
+  rule: you supply ONLY the dividend and divisor, every quotient digit/step/remainder
+  is computed and drawn for you.
 - Write the actual solving steps as SEPARATE draw_text lines (formula, then substituted
   values, then simplified result), not one vague summary line - a real board shows the
-  work, not a caption describing it. (Except for column arithmetic - use
-  vertical_arithmetic for that instead, see above.)
+  work, not a caption describing it. (Except for column arithmetic/division - use
+  vertical_arithmetic or long_division for that instead, see above.)
 - Use 2–5 speech steps
 - Keep explanations short and teacher-like
 - Every visual must map to a valid speech_id

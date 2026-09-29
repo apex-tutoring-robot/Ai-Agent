@@ -11,13 +11,15 @@ itself are computed here in plain Python, so the class of bug where an
 LLM occasionally miscalculates arithmetic (already seen live in
 evaluate_answer) simply can't happen for this whiteboard element.
 
-Scope, deliberately: addition and subtraction of any two non-negative
-integers, and multiplication by a single-digit (0-9) multiplier - the
-standard grade 3-5 column-arithmetic algorithms. Multi-digit x multi-digit
-long multiplication (partial-product rows) and long division (quotient
-bar, remainder) are structurally different layouts, not just bigger
-numbers - deliberately out of scope for this first primitive rather than
-half-implemented.
+Scope: addition and subtraction of any two non-negative integers, and
+multiplication by a single-digit (0-9) multiplier - the standard grade
+3-5 column-arithmetic algorithms (vertical_arithmetic / ArithmeticLayout
+below). Long division by a single-digit (1-9) divisor (the "bring down
+each digit" algorithm, see DivisionLayout / build_division_layout below)
+is a further, structurally different layout of its own. Multi-digit x
+multi-digit long multiplication and multi-digit-divisor long division
+(which needs trial-and-adjust quotient digit guessing, not a direct
+digit-by-digit computation) are both out of scope here.
 """
 
 from dataclasses import dataclass, field
@@ -182,4 +184,121 @@ def build_layout(operation: str, operands: List[int]) -> ArithmeticLayout:
         bottom_digits=str(b).rjust(width, " "),
         result_digits=str(result).rjust(width, " "),
         carry_marks=_multiplication_carries(a, b, width),
+    )
+
+
+@dataclass
+class DivisionStep:
+    """One digit-position's worth of the "bring down" algorithm.
+    start_col/end_col are dividend-digit column indices (0-based, left to
+    right) - brought_value/product/remainder_after are all right-aligned
+    strings spanning exactly those columns (width 1 if nothing was
+    carried into this step, width 2 if the previous step's remainder was
+    carried in - never more, since a single-digit divisor's remainder is
+    always itself a single digit)."""
+    start_col: int
+    end_col: int
+    brought_value: str
+    product: str
+    remainder_after: str
+
+
+@dataclass
+class DivisionLayout:
+    """Everything the renderer needs for long division, already computed.
+
+    dividend_digits: plain digit string, e.g. "402" - unpadded, since
+    division has no separate "result width" the way add/subtract/multiply
+    do; every column position is just an index into this string.
+    quotient_row: same length as dividend_digits, one character per
+    column - a space at any column that comes before the first non-zero
+    quotient digit (division "skips" a leading digit that's smaller than
+    the divisor, same as real long division never writes a leading-zero
+    quotient digit).
+    steps: one entry per column that actually got a subtraction step
+    (the skipped leading column, if any, has no entry).
+    quotient/remainder: the ground-truth answer, computed directly via
+    Python's own // and % - never re-derived from quotient_row/steps, so
+    a rendering bug in the row layout can never silently change what the
+    "real" answer is understood to be in tests or elsewhere.
+    """
+    dividend_digits: str
+    divisor_digits: str
+    quotient_row: str
+    quotient: int
+    remainder: int
+    steps: List[DivisionStep] = field(default_factory=list)
+
+
+def validate_division_operands(operands: List[int]) -> Optional[str]:
+    """Returns an error message if the spec is invalid, or None. Scoped
+    to a single-digit (1-9) divisor - the standard grade 4-5 "bring down"
+    algorithm computes one quotient digit directly per dividend digit;
+    a multi-digit divisor needs trial-and-adjust quotient guessing
+    instead, a different algorithm, out of scope here."""
+    if not isinstance(operands, (list, tuple)) or len(operands) != 2:
+        return "long_division needs exactly 2 operands."
+    a, b = operands
+    if not (isinstance(a, int) and isinstance(b, int)) or isinstance(a, bool) or isinstance(b, bool):
+        return "Both operands must be plain integers."
+    if a < 0:
+        return "The dividend must be non-negative."
+    if not (1 <= b <= 9):
+        return "long_division only supports a single-digit (1-9) divisor as the second operand."
+    if a < b:
+        return f"Dividing {a} by {b} gives a quotient of 0 - not supported for this visual."
+    return None
+
+
+def build_division_layout(operands: List[int]) -> DivisionLayout:
+    """Raises ValueError if the spec fails validate_division_operands() -
+    callers should validate first and treat a raised error as "don't
+    render this", same as any other malformed draw action."""
+    error = validate_division_operands(operands)
+    if error:
+        raise ValueError(error)
+
+    dividend, divisor = operands
+    digits = str(dividend)
+    n = len(digits)
+    quotient_chars = [" "] * n
+    steps: List[DivisionStep] = []
+    remainder = 0
+    started = False
+
+    for i, ch in enumerate(digits):
+        digit = int(ch)
+        remainder_before = remainder
+        current = remainder_before * 10 + digit
+        q, r = divmod(current, divisor)
+
+        if not started and q == 0 and i < n - 1:
+            # Dividend's leading digit(s) are smaller than the divisor -
+            # skip writing a step/quotient digit here, but the remainder
+            # still carries into the next column (a single-digit divisor
+            # can only ever skip this one leading column - see the
+            # module docstring's reasoning).
+            remainder = r
+            continue
+
+        started = True
+        start_col = i if remainder_before == 0 else i - 1
+        width = i - start_col + 1
+        steps.append(DivisionStep(
+            start_col=start_col,
+            end_col=i,
+            brought_value=str(current).rjust(width, " "),
+            product=str(q * divisor).rjust(width, " "),
+            remainder_after=str(r).rjust(width, " "),
+        ))
+        quotient_chars[i] = str(q)
+        remainder = r
+
+    return DivisionLayout(
+        dividend_digits=digits,
+        divisor_digits=str(divisor),
+        quotient_row="".join(quotient_chars),
+        quotient=dividend // divisor,
+        remainder=dividend % divisor,
+        steps=steps,
     )

@@ -82,6 +82,8 @@ class TestMutators:
         canvas.add_circle(0, 0, 10)
         canvas.add_polygon([(0, 0), (1, 0), (1, 1)])
         canvas.add_arc(0, 0, 10, 10)
+        canvas.add_vertical_arithmetic("add", [1, 2], 0, 0)
+        canvas.add_division([84, 3], 0, 0)
 
         canvas.clear_canvas()
 
@@ -91,6 +93,24 @@ class TestMutators:
         assert canvas.circle_items == []
         assert canvas.polygon_items == []
         assert canvas.arc_items == []
+        assert canvas.arithmetic_items == []
+        assert canvas.division_items == []
+
+    def test_add_division_computes_and_stores_the_layout(self):
+        canvas = TeachingCanvas()
+        canvas.add_division([84, 3], 10, 20)
+        assert len(canvas.division_items) == 1
+        item = canvas.division_items[0]
+        assert item.layout.quotient == 28
+        assert item.layout.remainder == 0
+        assert (item.x, item.y) == (10, 20)
+
+    def test_add_division_skips_invalid_spec(self):
+        # Multi-digit divisor isn't supported - should log and no-op,
+        # same pattern as add_vertical_arithmetic with a bad spec.
+        canvas = TeachingCanvas()
+        canvas.add_division([100, 12], 0, 0)
+        assert canvas.division_items == []
 
 
 class TestHandleDrawActions:

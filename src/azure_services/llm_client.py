@@ -313,7 +313,8 @@ class LLMClient:
         {"speech_id": 1, "action": "draw_regular_polygon", "sides": 6, "cx": 620, "cy": 270, "radius": 110},
         {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360},
         {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90},
-        {"speech_id": 2, "action": "vertical_arithmetic", "operation": "add", "operands": [347, 58], "x": 100, "y": 180}
+        {"speech_id": 2, "action": "vertical_arithmetic", "operation": "add", "operands": [347, 58], "x": 100, "y": 180},
+        {"speech_id": 2, "action": "long_division", "operands": [84, 3], "x": 100, "y": 160}
       ]
     }
 
@@ -341,6 +342,18 @@ class LLMClient:
       where digits are stacked and you might carry or borrow) - NOT for general
       equations like "Area = width x height" or fraction/word-based work, which
       still use draw_text as described below.
+    - long_division: draws the standard "bring down each digit" long division
+      algorithm - a bracket with the divisor outside, the dividend inside, the
+      quotient on top, and a subtraction step per dividend digit. operands =
+      [dividend, divisor], exactly 2 non-negative integers, where divisor is a
+      SINGLE digit (1-9) - a multi-digit divisor needs a different (trial-and-
+      adjust) algorithm and isn't supported by this action, so write it as
+      draw_text lines instead in that case. dividend must be >= divisor (a
+      quotient of 0 isn't a useful long-division example). x,y = top-left anchor.
+      Same rule as the other arithmetic actions: you supply ONLY the dividend and
+      divisor - every quotient digit, subtraction step, and remainder is computed
+      and drawn for you; never compute the answer yourself or write the steps as
+      draw_text.
     - draw_circle: x,y = CENTER of circle. r = radius (for circles). rx,ry = separate radii (for ellipses).
     - draw_rect: x,y = top-left corner. w,h = width and height.
     - draw_regular_polygon: sides=number of sides, cx/cy=center, radius=circumscribed radius.
@@ -369,7 +382,7 @@ class LLMClient:
       simple, already fully-answered question where a follow-up check would feel
       repetitive. Do NOT put the check question in speech - it is spoken separately,
       after the explanation.
-    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, vertical_arithmetic
+    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, vertical_arithmetic, long_division
     - Always include exactly one "set_title" action, speech_id 1, right after the
       initial "clear" - every question gets a title naming the topic.
     - Use 2-5 speech steps
@@ -498,8 +511,11 @@ class LLMClient:
       single-digit-multiplier-multiplication (see vertical_arithmetic above), use
       ONE vertical_arithmetic action instead of the 3 draw_text lines above for
       that computation - it already shows the working and the answer together.
-      Don't do both for the same computation (that would show the answer twice).
-      You can still have a separate "key idea" draw_text line before it.
+      If it's division by a single-digit divisor, use long_division instead for
+      the same reason. Don't do both a draw_text sequence AND a
+      vertical_arithmetic/long_division block for the same computation (that
+      would show the answer twice). You can still have a separate "key idea"
+      draw_text line before it.
     - Before the worked example, write ONE short "key idea" line naming the
       underlying principle in plain words, e.g. "Area = space inside a shape" or
       "Equivalent fractions = same amount, different numbers" - the one thing the
@@ -511,8 +527,8 @@ class LLMClient:
     - Use "squiggly_underline" to underline the FINAL ANSWER LINE in red once
       it's calculated, like a teacher underlining the answer with a marker -
       do this every time THE ANSWER WAS WRITTEN AS draw_text (not as part of a
-      vertical_arithmetic block - its own boxed layout already makes the
-      answer clear, so skip the underline for that one). Use the EXACT SAME x
+      vertical_arithmetic or long_division block - its own boxed layout already
+      makes the answer clear, so skip the underline for those). Use the EXACT SAME x
       as the draw_text action for that final-answer line itself, y about 14
       pixels below that line's y (so it sits just under that specific text,
       not the diagram), with width=90 (wide enough to span a short line of
