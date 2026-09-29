@@ -312,7 +312,10 @@ class LLMClient:
         {"speech_id": 1, "action": "draw_polygon", "points": [[580,160],[780,160],[780,360],[580,360]]},
         {"speech_id": 1, "action": "draw_regular_polygon", "sides": 6, "cx": 620, "cy": 270, "radius": 110},
         {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360},
-        {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90}
+        {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90},
+        {"speech_id": 2, "action": "number_line", "min": 0, "max": 10, "x": 100, "y": 300, "width": 600,
+         "points": [{"value": 5, "label": "start"}, {"value": 8, "label": "end"}],
+         "jumps": [{"from": 5, "to": 8}]}
       ]
     }
 
@@ -321,6 +324,25 @@ class LLMClient:
       taught (e.g. "Area of a Rectangle", "Equivalent Fractions") - written in Title
       Case, not snake_case. Always emit this once, with speech_id 1, right alongside
       the initial "clear" action for every new question.
+    - number_line: draws a horizontal number line with tick marks over an integer
+      range, for plotting values or showing addition/subtraction as a "jump".
+      min,max = integer range endpoints (max-min must be between 2 and 30 - keep
+      the range small enough that tick marks stay legible, e.g. 0-10 or -5-10, not
+      0-500). x,y = top-left anchor. width = how many pixels the line spans.
+      points = optional list of {"value": int, "label": optional string} to mark
+      with a dot - omit "label" to just show the plain number (it already appears
+      as a tick label below the line, so a custom label is only needed for
+      something like "start"/"end"). jumps = optional list of {"from": int,
+      "to": int, "label": optional string} - draws a curved arrow from one value
+      to another above the line (the classic "hop forward/back" way addition/
+      subtraction is taught), auto-labeled with the signed difference (e.g. "+3")
+      unless you give your own label. Every tick, point, and arc position is
+      computed and placed for you - you supply ONLY the range and the integer
+      values, never a pixel coordinate for an individual tick/point/arc. Use this
+      for problems that are naturally about position or movement along a line of
+      numbers (skip-counting, comparing two numbers, addition/subtraction as
+      hopping forward/back) - not a substitute for vertical_arithmetic's column
+      algorithm when the problem is really just "add these two numbers".
     - draw_circle: x,y = CENTER of circle. r = radius (for circles). rx,ry = separate radii (for ellipses).
     - draw_rect: x,y = top-left corner. w,h = width and height.
     - draw_regular_polygon: sides=number of sides, cx/cy=center, radius=circumscribed radius.
@@ -349,7 +371,7 @@ class LLMClient:
       simple, already fully-answered question where a follow-up check would feel
       repetitive. Do NOT put the check question in speech - it is spoken separately,
       after the explanation.
-    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, number_line
     - Always include exactly one "set_title" action, speech_id 1, right after the
       initial "clear" - every question gets a title naming the topic.
     - Use 2-5 speech steps

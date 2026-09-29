@@ -47,10 +47,19 @@ Rules:
   explaining, or null for a simple already-answered question. Not part of speech.
   MUST use DIFFERENT numbers/values than the worked example - test whether the
   student can apply the idea to a new case, never repeat the same numbers.
-- Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+- Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, number_line
 - set_title shows a short Title Case title at the top of the board naming the topic
   (e.g. "Area of a Rectangle") - always include exactly one, speech_id 1, right after
   the initial "clear".
+- number_line draws a horizontal number line with tick marks for plotting values or
+  showing addition/subtraction as a "jump" - min,max: integer range (max-min between
+  2 and 30, keep it small enough to stay legible), x,y: top-left anchor, width: pixel
+  span. points: optional [{"value": int, "label": optional string}] to mark with a
+  dot (label only needed for something like "start"/"end" - the plain number already
+  shows as a tick label). jumps: optional [{"from": int, "to": int, "label": optional
+  string}] - a curved arrow from one value to another, auto-labeled with the signed
+  difference (e.g. "+3") unless you give your own label. Every tick/point/arc pixel
+  position is computed for you - you supply ONLY the range and integer values.
 - squiggly_underline draws a red squiggly line under something already on the board to
   call it out (x,y = left edge/baseline of what's being underlined, width = span) -
   always use it to underline the final answer once calculated, like a teacher

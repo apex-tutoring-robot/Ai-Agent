@@ -41,14 +41,19 @@ visuals.scene_planner.ScenePlanner, and arrives here as the same kind
 of draw_icon/animate_icon actions as everything else.
 """
 
+import logging
 import math
 import time
 from dataclasses import dataclass
 from typing import List, Tuple
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer
-from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPolygonF, QColor, QPainterPath
+from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QFontMetrics, QPolygonF, QColor, QPainterPath
 from PyQt5.QtWidgets import QGraphicsObject
+
+from visuals.number_line import build_number_line_layout, NumberLineLayout
+
+logger = logging.getLogger(__name__)
 
 # Kid-friendly palette: warm paper background (not stark white), a
 # friendly blue board frame, blue shape outlines with a warm translucent
@@ -105,6 +110,18 @@ _ICON_COLOR = QColor(70, 70, 70)
 _ICON_STROKE_WIDTH = 2.5
 _ICON_DRAW_SECONDS = 1.1     # time to sketch the icon in, stroke by stroke
 _ICON_ANIM_SECONDS = 2.2     # default move/grow duration, once the sketch is done
+
+# Number line - see visuals.number_line and module docstring. Points use
+# the same red as the squiggly underline/carry marks (a teacher's
+# emphasis pen); jump arcs use the board's own friendly blue so they read
+# as a distinct "movement" annotation rather than more emphasis-red.
+_NUMBERLINE_COLOR = QColor(35, 40, 50)        # same ink as regular text
+_NUMBERLINE_POINT_COLOR = QColor(225, 30, 30)
+_NUMBERLINE_JUMP_COLOR = QColor(60, 130, 200)
+_NUMBERLINE_TICK_HEIGHT = 10
+_NUMBERLINE_LABEL_FONT_SIZE = 15
+_NUMBERLINE_JUMP_ARC_HEIGHT = 46
+_NUMBERLINE_SECONDS_PER_PART = 0.5
 
 
 @dataclass
@@ -168,6 +185,13 @@ class _Icon:
     anim_duration: float = 0.0
 
 
+@dataclass
+class _NumberLine:
+    layout: NumberLineLayout  # fully computed by visuals.number_line.build_number_line_layout - no math left to do
+    x: float; y: float         # top-left anchor
+    start_time: float
+
+
 class TeachingCanvas(QGraphicsObject):
     def __init__(self):
         super().__init__()
@@ -180,6 +204,7 @@ class TeachingCanvas(QGraphicsObject):
         self.underline_items: List[_Underline] = []
         self.title_text: str = ""
         self.icons: List[_Icon] = []
+        self.number_line_items: List[_NumberLine] = []
 
         # Laser-pointer dot state - see module docstring and _retarget_laser.
         self._laser_visible = False
@@ -221,6 +246,8 @@ class TeachingCanvas(QGraphicsObject):
             self._paint_arc(painter, item, now)
         for item in self.icons:
             self._paint_icon(painter, item, now)
+        for item in self.number_line_items:
+            self._paint_number_line(painter, item, now)
         for item in self.text_items:
             self._paint_text(painter, item, now)
         for item in self.underline_items:
@@ -580,6 +607,104 @@ class TeachingCanvas(QGraphicsObject):
         strokes.append(("arc", QRectF(cx - 18 * s, ground_y - 4 * s, 36 * s, 10 * s), 0, -180 * 16))
         return strokes
 
+    def _paint_number_line(self, painter: QPainter, item: _NumberLine, now: float) -> None:
+        """Reveals the line/ticks/labels first (like a ruler being
+        placed), then each point and jump in turn. Every tick, point, and
+        arc position came from visuals.number_line.
+        build_number_line_layout(), never computed here or by the LLM."""
+        layout = item.layout
+        n_parts = 1 + len(layout.points) + len(layout.jumps)
+        duration = max(1.2, n_parts * _NUMBERLINE_SECONDS_PER_PART)
+        p = self._progress(item.start_time, now, duration=duration)
+        if p <= 0:
+            return
+
+        label_font = QFont("Comic Sans MS", _NUMBERLINE_LABEL_FONT_SIZE)
+        label_font.setBold(True)
+        label_metrics = QFontMetrics(label_font)
+
+        line_y = item.y + _NUMBERLINE_JUMP_ARC_HEIGHT + label_metrics.height() * 0.6
+        line_x0 = item.x
+        line_x1 = item.x + layout.width
+
+        def part_alpha(i):
+            return max(0.0, min(1.0, p * n_parts - i))
+
+        idx = 0
+        a = part_alpha(idx); idx += 1
+        if a > 0:
+            painter.setOpacity(a)
+            painter.setPen(QPen(_NUMBERLINE_COLOR, 3))
+            painter.drawLine(QPointF(line_x0, line_y), QPointF(line_x1, line_y))
+            painter.setFont(label_font)
+            for value, tick_px in zip(layout.tick_values, layout.tick_px):
+                tx = item.x + tick_px
+                painter.setPen(QPen(_NUMBERLINE_COLOR, 3))
+                painter.drawLine(QPointF(tx, line_y - _NUMBERLINE_TICK_HEIGHT / 2),
+                                  QPointF(tx, line_y + _NUMBERLINE_TICK_HEIGHT / 2))
+                label = str(value)
+                label_w = label_metrics.horizontalAdvance(label)
+                painter.setPen(QPen(_NUMBERLINE_COLOR))
+                painter.drawText(
+                    QPointF(tx - label_w / 2, line_y + _NUMBERLINE_TICK_HEIGHT / 2 + label_metrics.ascent() + 4),
+                    label
+                )
+
+        for point in layout.points:
+            a = part_alpha(idx); idx += 1
+            if a <= 0:
+                continue
+            painter.setOpacity(a)
+            px = item.x + point.px
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(_NUMBERLINE_POINT_COLOR))
+            painter.drawEllipse(QPointF(px, line_y), 7, 7)
+            # A custom label (not just the plain numeric value, which the
+            # tick label below the line already shows) gets its own
+            # callout above the dot.
+            if point.label != str(point.value):
+                painter.setFont(label_font)
+                painter.setPen(QPen(_NUMBERLINE_POINT_COLOR))
+                label_w = label_metrics.horizontalAdvance(point.label)
+                painter.drawText(QPointF(px - label_w / 2, line_y - 14), point.label)
+
+        for jump in layout.jumps:
+            a = part_alpha(idx); idx += 1
+            if a <= 0:
+                continue
+            painter.setOpacity(a)
+            fx = item.x + jump.from_px
+            tx = item.x + jump.to_px
+            mid_x = (fx + tx) / 2
+            peak_y = line_y - _NUMBERLINE_JUMP_ARC_HEIGHT
+
+            path = QPainterPath()
+            path.moveTo(fx, line_y)
+            path.quadTo(mid_x, peak_y, tx, line_y)
+            painter.setPen(QPen(_NUMBERLINE_JUMP_COLOR, 3))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(path)
+
+            # Arrowhead at the destination end, oriented along the arc's
+            # incoming direction (the tangent from the control point to
+            # the endpoint - close enough for a small arrowhead at this
+            # scale, and self-consistent regardless of jump direction).
+            dx, dy = tx - mid_x, line_y - peak_y
+            angle = math.atan2(dy, dx)
+            arrow_len, arrow_spread = 10, math.radians(28)
+            for sign in (1, -1):
+                wing_angle = angle + math.pi + sign * arrow_spread
+                wing_x = tx + arrow_len * math.cos(wing_angle)
+                wing_y = line_y + arrow_len * math.sin(wing_angle)
+                painter.drawLine(QPointF(tx, line_y), QPointF(wing_x, wing_y))
+
+            painter.setFont(label_font)
+            painter.setPen(QPen(_NUMBERLINE_JUMP_COLOR))
+            label_w = label_metrics.horizontalAdvance(jump.label)
+            painter.drawText(QPointF(mid_x - label_w / 2, peak_y - 6), jump.label)
+
+        painter.setOpacity(1.0)
+
     def _paint_text(self, painter: QPainter, item: _Text, now: float) -> None:
         # Typewriter reveal - duration scales with length so a short
         # label and a long equation both feel like they're being written
@@ -665,6 +790,7 @@ class TeachingCanvas(QGraphicsObject):
         self.arc_items = []
         self.underline_items = []
         self.icons = []
+        self.number_line_items = []
         self._hide_laser()
         self.update()
 
@@ -708,6 +834,21 @@ class TeachingCanvas(QGraphicsObject):
 
     def add_icon(self, icon_id, name, x, y, scale=1.0):
         self.icons.append(_Icon(icon_id=icon_id, name=name, x=x, y=y, scale=scale, start_time=time.monotonic()))
+        self.update()
+
+    def add_number_line(self, min_value, max_value, width, points, jumps, x, y):
+        """Validates + computes via visuals.number_line.
+        build_number_line_layout(), then stores the result for rendering
+        - no math or coordinate decisions happen here or in the LLM's own
+        output. Silently skips an invalid spec (same pattern as
+        add_vertical_arithmetic), logging a warning so a bad LLM output
+        is visible without crashing the turn."""
+        try:
+            layout = build_number_line_layout(min_value, max_value, width, points, jumps)
+        except ValueError as e:
+            logger.warning(f"Skipping invalid number_line action: {e}")
+            return
+        self.number_line_items.append(_NumberLine(layout, x, y, time.monotonic()))
         self.update()
 
     def animate_icon(self, icon_id, animation, duration, to_x=None, to_scale=None):
@@ -809,6 +950,13 @@ class TeachingCanvas(QGraphicsObject):
                     action.get("id", ""), action.get("animation", "move"),
                     action.get("duration", _ICON_ANIM_SECONDS),
                     to_x=action.get("to_x"), to_scale=action.get("to_scale")
+                )
+
+            elif action_type == "number_line":
+                self.add_number_line(
+                    action.get("min", 0), action.get("max", 10), action.get("width", 600),
+                    action.get("points", []), action.get("jumps", []),
+                    action.get("x", 100), action.get("y", 300)
                 )
 
         if text_positions:
