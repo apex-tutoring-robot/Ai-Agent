@@ -41,14 +41,19 @@ visuals.scene_planner.ScenePlanner, and arrives here as the same kind
 of draw_icon/animate_icon actions as everything else.
 """
 
+import logging
 import math
 import time
 from dataclasses import dataclass
 from typing import List, Tuple
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer
-from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPolygonF, QColor, QPainterPath
+from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QFontMetrics, QPolygonF, QColor, QPainterPath
 from PyQt5.QtWidgets import QGraphicsObject
+
+from visuals.fraction_bar import build_fraction_bar_layout, FractionBarLayout
+
+logger = logging.getLogger(__name__)
 
 # Kid-friendly palette: warm paper background (not stark white), a
 # friendly blue board frame, blue shape outlines with a warm translucent
@@ -105,6 +110,14 @@ _ICON_COLOR = QColor(70, 70, 70)
 _ICON_STROKE_WIDTH = 2.5
 _ICON_DRAW_SECONDS = 1.1     # time to sketch the icon in, stroke by stroke
 _ICON_ANIM_SECONDS = 2.2     # default move/grow duration, once the sketch is done
+
+# Fraction bar - see visuals.fraction_bar and module docstring. Reuses the
+# same blue outline / warm fill used for the other filled shapes, so a
+# shaded fraction segment reads as "the same kind of shape" as a
+# rectangle/circle elsewhere on the board, not a new visual language.
+_FRACTION_BAR_GAP = 70          # vertical gap between stacked bars
+_FRACTION_BAR_LABEL_FONT_SIZE = 20
+_FRACTION_BAR_SECONDS_PER_PART = 0.35
 
 
 @dataclass
@@ -168,6 +181,13 @@ class _Icon:
     anim_duration: float = 0.0
 
 
+@dataclass
+class _FractionBar:
+    layout: FractionBarLayout  # fully computed by visuals.fraction_bar.build_fraction_bar_layout - no math left to do
+    x: float; y: float          # top-left anchor
+    start_time: float
+
+
 class TeachingCanvas(QGraphicsObject):
     def __init__(self):
         super().__init__()
@@ -180,6 +200,7 @@ class TeachingCanvas(QGraphicsObject):
         self.underline_items: List[_Underline] = []
         self.title_text: str = ""
         self.icons: List[_Icon] = []
+        self.fraction_bar_items: List[_FractionBar] = []
 
         # Laser-pointer dot state - see module docstring and _retarget_laser.
         self._laser_visible = False
@@ -221,6 +242,8 @@ class TeachingCanvas(QGraphicsObject):
             self._paint_arc(painter, item, now)
         for item in self.icons:
             self._paint_icon(painter, item, now)
+        for item in self.fraction_bar_items:
+            self._paint_fraction_bar(painter, item, now)
         for item in self.text_items:
             self._paint_text(painter, item, now)
         for item in self.underline_items:
@@ -580,6 +603,65 @@ class TeachingCanvas(QGraphicsObject):
         strokes.append(("arc", QRectF(cx - 18 * s, ground_y - 4 * s, 36 * s, 10 * s), 0, -180 * 16))
         return strokes
 
+    def _paint_fraction_bar(self, painter: QPainter, item: _FractionBar, now: float) -> None:
+        """Reveals each bar in turn (if there's more than one, for a
+        comparison) - first its outline/dividers/label (like a rectangle
+        being drawn and split into parts), then its shaded segments one
+        at a time left to right (like a marker coloring them in). Every
+        segment boundary and shaded/unshaded flag came from
+        visuals.fraction_bar.build_fraction_bar_layout(), never computed
+        here or by the LLM."""
+        layout = item.layout
+        n_parts = sum(1 + bar.numerator for bar in layout.bars)
+        duration = max(1.2, n_parts * _FRACTION_BAR_SECONDS_PER_PART)
+        p = self._progress(item.start_time, now, duration=duration)
+        if p <= 0:
+            return
+
+        label_font = QFont("Comic Sans MS", _FRACTION_BAR_LABEL_FONT_SIZE)
+        label_font.setBold(True)
+
+        def part_alpha(i):
+            return max(0.0, min(1.0, p * n_parts - i))
+
+        idx = 0
+        row_y = item.y
+        for bar in layout.bars:
+            bar_top = row_y
+            bar_bottom = row_y + layout.bar_height
+
+            struct_alpha = part_alpha(idx); idx += 1
+            if struct_alpha > 0:
+                painter.setOpacity(struct_alpha)
+                painter.setFont(label_font)
+                painter.setPen(QPen(_TEXT_COLOR))
+                painter.drawText(QPointF(item.x, bar_top - 10), bar.label)
+
+                painter.setPen(QPen(_SHAPE_OUTLINE, 3))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(QRectF(item.x, bar_top, layout.width, layout.bar_height))
+                for seg in bar.segments[:-1]:
+                    sx = item.x + seg.x1
+                    painter.drawLine(QPointF(sx, bar_top), QPointF(sx, bar_bottom))
+
+            for seg in bar.segments:
+                if not seg.shaded:
+                    continue
+                seg_alpha = part_alpha(idx); idx += 1
+                if seg_alpha <= 0:
+                    continue
+                painter.setOpacity(seg_alpha)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(_SHAPE_FILL))
+                painter.drawRect(QRectF(
+                    item.x + seg.x0 + 1, bar_top + 1,
+                    seg.x1 - seg.x0 - 2, layout.bar_height - 2
+                ))
+
+            row_y += layout.bar_height + _FRACTION_BAR_GAP
+
+        painter.setOpacity(1.0)
+
     def _paint_text(self, painter: QPainter, item: _Text, now: float) -> None:
         # Typewriter reveal - duration scales with length so a short
         # label and a long equation both feel like they're being written
@@ -665,6 +747,7 @@ class TeachingCanvas(QGraphicsObject):
         self.arc_items = []
         self.underline_items = []
         self.icons = []
+        self.fraction_bar_items = []
         self._hide_laser()
         self.update()
 
@@ -708,6 +791,21 @@ class TeachingCanvas(QGraphicsObject):
 
     def add_icon(self, icon_id, name, x, y, scale=1.0):
         self.icons.append(_Icon(icon_id=icon_id, name=name, x=x, y=y, scale=scale, start_time=time.monotonic()))
+        self.update()
+
+    def add_fraction_bar(self, fractions, width, bar_height, x, y):
+        """Validates + computes via visuals.fraction_bar.
+        build_fraction_bar_layout(), then stores the result for rendering
+        - no math or coordinate decisions happen here or in the LLM's own
+        output. Silently skips an invalid spec (same pattern as
+        add_vertical_arithmetic), logging a warning so a bad LLM output
+        is visible without crashing the turn."""
+        try:
+            layout = build_fraction_bar_layout(fractions, width, bar_height)
+        except ValueError as e:
+            logger.warning(f"Skipping invalid fraction_bar action: {e}")
+            return
+        self.fraction_bar_items.append(_FractionBar(layout, x, y, time.monotonic()))
         self.update()
 
     def animate_icon(self, icon_id, animation, duration, to_x=None, to_scale=None):
@@ -809,6 +907,12 @@ class TeachingCanvas(QGraphicsObject):
                     action.get("id", ""), action.get("animation", "move"),
                     action.get("duration", _ICON_ANIM_SECONDS),
                     to_x=action.get("to_x"), to_scale=action.get("to_scale")
+                )
+
+            elif action_type == "fraction_bar":
+                self.add_fraction_bar(
+                    action.get("fractions", []), action.get("width", 600), action.get("bar_height", 50),
+                    action.get("x", 100), action.get("y", 200)
                 )
 
         if text_positions:
