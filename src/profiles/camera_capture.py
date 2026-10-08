@@ -22,6 +22,32 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def detect_camera() -> bool:
+    """Best-effort presence check for picamera2 + a physical CSI camera,
+    without opening a capture session (unlike capture_avatar_photo, which
+    does a real capture) - just for a clear startup log line, so a
+    missing/disconnected camera is visible immediately instead of only
+    discovered later when avatar capture silently returns False."""
+    try:
+        from picamera2 import Picamera2
+    except ImportError:
+        logger.info("Camera: picamera2 not installed (expected off-Pi) - avatar capture will be skipped.")
+        return False
+
+    try:
+        cameras = Picamera2.global_camera_info()
+    except Exception as e:
+        logger.warning(f"Camera: detection check failed ({e}) - avatar capture will be skipped.")
+        return False
+
+    if not cameras:
+        logger.warning("Camera: picamera2 is installed but no camera was detected - avatar capture will be skipped.")
+        return False
+
+    logger.info(f"Camera: detected ({cameras[0].get('Model', 'unknown model')}).")
+    return True
+
+
 def capture_avatar_photo(output_path: str, warmup_seconds: float = 1.0) -> bool:
     """
     Capture a single still photo to `output_path`. Returns True on success,

@@ -22,13 +22,14 @@ import numpy as np
 from audio.wake_word import WakeWordDetector
 from audio.continuous_vad import ContinuousVADCapture
 from audio.playback import AudioPlayer
+from audio.device_detection import resolve_device_index, describe_devices
 from azure_services.stt_client import SpeechToTextClient
 from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
 from azure_services.interfaces import SpeechToTextProvider, LLMProvider, TextToSpeechProvider
 from privacy.privacy_manager import PrivacyManager
 from profiles.profile_manager import ProfileManager
-from profiles.camera_capture import capture_avatar_photo
+from profiles.camera_capture import capture_avatar_photo, detect_camera
 from session import Session
 from knowledge.textbook_search import TextbookSearch, normalize_grade
 from guardrails.guardrails_manager import GuardrailsManager
@@ -139,6 +140,15 @@ class JarvisBot:
         # Initialize shared PyAudio instance
         import pyaudio
         self.pa = pyaudio.PyAudio()
+
+        # Logged once up front so a wrong/missing device is visible
+        # immediately on startup instead of only discovered later as
+        # unexplained silence (see audio/device_detection.py's docstring
+        # for the two real bugs - a stale Windows .env index and a
+        # Raspberry Pi where PulseAudio auto-detection silently
+        # overrode an already-correct .env index - that motivated this).
+        logger.info(f"Available audio devices:\n{describe_devices(self.pa)}")
+        detect_camera()
 
         # Initialize components with shared PyAudio
         self.wake_word_detector = WakeWordDetector(pa=self.pa)
@@ -1705,30 +1715,6 @@ class JarvisBot:
         except Exception as e:
             logger.error(f"Speaker loop error: {e}")
 
-    def _get_pulse_device_index(self, pa, direction: str = 'output') -> int:
-        """Find the index of the 'pulse' audio device.
-
-        PulseAudio (Linux/Pi) exposes a single bridging device that handles
-        both directions, so a single index normally works for input and
-        output alike. Platforms without PulseAudio (e.g. native Windows) have
-        no such device, so the fallback must use the correctly-directioned
-        env var instead of reusing the output device index for microphone
-        input (which has no input channels and silently mis-selects a mic).
-        """
-        try:
-            for i in range(pa.get_device_count()):
-                info = pa.get_device_info_by_index(i)
-                if info and 'pulse' in info.get('name', '').lower():
-                    logger.info(f"✅ Found PulseAudio device at index {i}: {info['name']}")
-                    return i
-        except Exception as e:
-            logger.warning(f"Error searching for PulseAudio device: {e}")
-
-        env_var = 'AUDIO_INPUT_DEVICE_INDEX' if direction == 'input' else 'AUDIO_OUTPUT_DEVICE_INDEX'
-        fallback = int(os.getenv(env_var, 1))
-        logger.warning(f"⚠️  PulseAudio not found - falling back to {env_var}={fallback} for {direction}")
-        return fallback
-
     @staticmethod
     def _set_display_power(on: bool) -> None:
         """
@@ -1892,10 +1878,11 @@ class JarvisBot:
                 f"then end after {check_in_grace}s more with no response"
             )
 
-            # DYNAMICALLY FIND PULSE DEVICE (falls back to the correctly-directioned
-            # env var per direction when no PulseAudio device exists, e.g. Windows)
-            pulse_input_index = self._get_pulse_device_index(self.pa, direction='input')
-            pulse_output_index = self._get_pulse_device_index(self.pa, direction='output')
+            # An explicit, valid .env index wins; otherwise falls back to
+            # PulseAudio auto-detection, then the system default - see
+            # audio/device_detection.py.
+            pulse_input_index = resolve_device_index(self.pa, 'input', 'AUDIO_INPUT_DEVICE_INDEX')
+            pulse_output_index = resolve_device_index(self.pa, 'output', 'AUDIO_OUTPUT_DEVICE_INDEX')
 
             # Initialize VAD with dedicated INPUT stream. Its own hard idle-stop
             # must cover the check-in grace period too, otherwise it kills the
@@ -2345,7 +2332,7 @@ class JarvisBot:
                         and not self._conversation_active.is_set()
                         and (time.time() - self._standby_since) >= display_sleep_timeout):
                     logger.info(f"💤 {display_sleep_timeout}s idle - going to sleep")
-                    sleep_output_index = self._get_pulse_device_index(self.pa, direction='output')
+                    sleep_output_index = resolve_device_index(self.pa, 'output', 'AUDIO_OUTPUT_DEVICE_INDEX')
                     self._speak_standalone(
                         os.getenv('SLEEP_MESSAGE', "I'm going to sleep now. Just say Hey Jarvis to wake me up!"),
                         sleep_output_index

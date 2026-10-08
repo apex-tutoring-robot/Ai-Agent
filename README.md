@@ -75,11 +75,14 @@ Required: `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`, `AZURE_OPENAI_API_KEY`, `AZ
 
 ### 5. Configure Audio Devices
 
-List available audio devices:
+Every available device is logged at startup ("Available audio devices" in the
+first few lines of output), or list them yourself ahead of time:
 ```bash
 python -c "import pyaudio; p = pyaudio.PyAudio(); [print(f'{i}: {p.get_device_info_by_index(i)[\"name\"]}') for i in range(p.get_device_count())]"
 ```
-Set `AUDIO_INPUT_DEVICE_INDEX` / `AUDIO_OUTPUT_DEVICE_INDEX` in `.env` if PulseAudio auto-detection doesn't pick the right device.
+Set `AUDIO_INPUT_DEVICE_INDEX` / `AUDIO_OUTPUT_DEVICE_INDEX` in `.env` if PulseAudio
+auto-detection doesn't pick the right device - an explicit, valid index always takes
+priority over auto-detection (see `src/audio/device_detection.py`).
 
 ### 6. Configure the System Prompt
 

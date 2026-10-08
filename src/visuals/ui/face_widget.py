@@ -214,8 +214,27 @@ class FaceWidget(QWidget):
         # QPixmap.fromImage() deep-copies the pixel data, so it's safe even
         # though `rgb` (the numpy buffer QImage was built on) goes out of
         # scope right after this line.
+        #
+        # KeepAspectRatioByExpanding (not KeepAspectRatio) deliberately -
+        # the source art is a fixed 600x600 SQUARE (see _load), but in
+        # full-screen mode this widget is set to the scene's full 1280x720
+        # (see TutorScene.show_face_fullscreen), a 16:9 widescreen rect.
+        # KeepAspectRatio ("fit"/"contain") would scale that square down
+        # to fit WITHIN the widget, leaving black letterbox bars on both
+        # sides - confirmed live on the real Pi (teammate screenshot): the
+        # face rendered as a small square centered on the screen instead
+        # of filling it, even though the widget itself was already
+        # correctly sized (see tutor_view.py's fitInView fix, a separate,
+        # earlier bug). KeepAspectRatioByExpanding ("fill"/"cover") scales
+        # the square UP to cover the whole widget instead, cropping the
+        # overflow (which Qt's normal paint clipping handles for free,
+        # since the oversized pixmap is centered in a widget whose own
+        # bounds clip it) - the face fills the screen instead of leaving
+        # bars. In the circular "bubble" mode (TutorScene.show_teaching_
+        # layout), the widget is ALSO square, so this is a no-op there -
+        # this only changes behavior for the non-square full-screen case.
         pixmap = QPixmap.fromImage(qimg).scaled(
             self.width() or w, self.height() or h,
-            Qt.KeepAspectRatio, Qt.SmoothTransformation
+            Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
         )
         self.label.setPixmap(pixmap)
