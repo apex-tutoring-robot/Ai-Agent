@@ -13,11 +13,35 @@ class TutorView(QGraphicsView):
         self.setFrameShape(0)
         # White, not black - matches the face art's own white background
         # (see FaceWidget._load) and the whiteboard's own near-white
-        # background (TeachingCanvas._BG_COLOR), so the thin letterbox
-        # strip fitInView leaves on a screen whose aspect ratio isn't
-        # exactly 1280:720 (e.g. a real Pi's 1024x600) blends in instead
-        # of reading as a visible black seam.
+        # background (TeachingCanvas._BG_COLOR), so a KeepAspectRatio
+        # letterbox strip (teaching-layout mode, see below) blends in
+        # instead of reading as a visible black seam.
         self.setStyleSheet("background: white; border: none;")
+
+        # Whether to stretch the scene to fill the window exactly
+        # (IgnoreAspectRatio) or preserve its aspect ratio with letterbox
+        # margins (KeepAspectRatio) - see set_fill_mode(). Starts matching
+        # TutorScene's own initial state (it calls show_face_fullscreen()
+        # in its own __init__ before this view exists) - kept in sync by
+        # MainWindow calling set_fill_mode() alongside every scene mode
+        # switch, not inferred here.
+        self._stretch_to_fill = True
+
+    def set_fill_mode(self, stretch_to_fill: bool) -> None:
+        """stretch_to_fill=True: the scene fills the window exactly, no
+        margins, by stretching (distorts proportions) - used for the
+        full-screen face, which has no content whose exact geometry
+        matters. stretch_to_fill=False: the scene keeps its own aspect
+        ratio, letterboxed if needed - used for the teaching layout, so
+        the whiteboard's shapes/text aren't skewed on a screen whose
+        aspect ratio isn't exactly the scene's fixed 1280:720 (e.g. a
+        real Pi's 1024x600)."""
+        self._stretch_to_fill = stretch_to_fill
+        self._apply_fit()
+
+    def _apply_fit(self) -> None:
+        mode = Qt.IgnoreAspectRatio if self._stretch_to_fill else Qt.KeepAspectRatio
+        self.fitInView(self.scene().sceneRect(), mode)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -32,4 +56,4 @@ class TutorView(QGraphicsView):
         # circle in the middle of a much bigger white area instead of
         # filling the screen's height, because the fixed-size scene was
         # never being scaled up to the real (larger) screen at all.
-        self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
+        self._apply_fit()

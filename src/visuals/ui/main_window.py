@@ -23,6 +23,10 @@ class MainWindow(QMainWindow):
         self.canvas = TeachingCanvas()
         self.scene = TutorScene(self.face_widget, self.canvas)
         self.view = TutorView(self.scene)
+        # TutorScene's own __init__ already calls show_face_fullscreen(),
+        # so the view's fill mode needs to start matching that (stretch to
+        # fill, no letterbox) rather than its own class-level default.
+        self.view.set_fill_mode(stretch_to_fill=True)
 
         self.setCentralWidget(self.view)
         self.setWindowTitle("Jarvis AI Tutor")
@@ -66,11 +70,25 @@ class MainWindow(QMainWindow):
 
         self.signals.draw_actions.connect(self.canvas.handle_draw_actions)
         self.signals.clear_canvas.connect(self.canvas.clear_canvas)
-        self.signals.show_face_fullscreen.connect(self.scene.show_face_fullscreen)
-        self.signals.show_teaching_layout.connect(self.scene.show_teaching_layout)
+        self.signals.show_face_fullscreen.connect(self._show_face_fullscreen)
+        self.signals.show_teaching_layout.connect(self._show_teaching_layout)
         self.signals.volume_changed.connect(self.volume_indicator.show_level)
         self.signals.enter_sleep.connect(self.show_sleep_mode)
         self.signals.wake_up.connect(self.show_wake_mode)
+
+    def _show_face_fullscreen(self) -> None:
+        self.scene.show_face_fullscreen()
+        # Stretch to fill - no content with geometry that matters is
+        # visible in this mode, so an exact edge-to-edge fill (over a
+        # letterboxed one) is the better tradeoff - see TutorView.
+        self.view.set_fill_mode(stretch_to_fill=True)
+
+    def _show_teaching_layout(self) -> None:
+        self.scene.show_teaching_layout()
+        # Keep the scene's own aspect ratio here - the whiteboard's
+        # shapes/text would otherwise be skewed on a screen whose aspect
+        # ratio isn't exactly the scene's fixed 1280:720.
+        self.view.set_fill_mode(stretch_to_fill=False)
 
     def _position_volume_indicator(self) -> None:
         margin = 24

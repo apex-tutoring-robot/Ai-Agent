@@ -219,24 +219,21 @@ class FaceWidget(QWidget):
         # though `rgb` (the numpy buffer QImage was built on) goes out of
         # scope right after this line.
         #
-        # KeepAspectRatio ("fit"/"contain") - the source art is a fixed
-        # 600x600 SQUARE (see _load), but in full-screen mode this widget
-        # is set to the scene's full 1280x720 (see TutorScene.
-        # show_face_fullscreen), a 16:9 widescreen rect. This scales the
-        # square to fill the widget's HEIGHT exactly (the constraining
-        # dimension for a square going into a wider rect), centered, with
-        # equal blank margins left/right rather than cropping or
-        # stretching the face. Deliberately NOT KeepAspectRatioByExpanding
-        # ("fill"/"cover") - tried that first, but it crops the top/bottom
-        # of the face (eyebrows, chin) to eliminate the margins entirely,
-        # which looked worse than the margins themselves once the margins
-        # were made to match the face art's own white background (see
-        # the label's stylesheet above) - at that point the margins read
-        # as "face centered on a white screen", not a visible bug. In the
-        # circular "bubble" mode (TutorScene.show_teaching_layout), the
-        # widget is ALSO square, so this is a no-op there either way.
+        # IgnoreAspectRatio ("stretch") - per explicit direction after
+        # seeing both alternatives tried live on the real Pi screen:
+        # KeepAspectRatioByExpanding ("cover") crops the face's top/bottom
+        # to fill the screen; KeepAspectRatio ("fit") leaves blank margins
+        # on the sides (made white to blend in, but still visible as a
+        # seam in a photo of the physical screen). Stretching the fixed
+        # 600x600 square source (see _load) to exactly match this
+        # widget's own (non-square, in full-screen mode) bounds fills the
+        # screen edge to edge with neither cropping nor a margin, at the
+        # cost of a slight proportion distortion - the explicitly
+        # requested tradeoff. In the circular "bubble" mode (TutorScene.
+        # show_teaching_layout), the widget is ALSO square, so this is a
+        # no-op there (600x600 -> e.g. 190x190 stretches evenly either way).
         pixmap = QPixmap.fromImage(qimg).scaled(
             self.width() or w, self.height() or h,
-            Qt.KeepAspectRatio, Qt.SmoothTransformation
+            Qt.IgnoreAspectRatio, Qt.SmoothTransformation
         )
         self.label.setPixmap(pixmap)
