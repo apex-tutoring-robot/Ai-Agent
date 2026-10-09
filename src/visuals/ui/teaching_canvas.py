@@ -4,9 +4,12 @@ typed dataclasses and paints them via QPainter - driven by draw_action
 dicts that arrive from LLMClient.generate_teaching_plan() via JarvisBot's
 teaching turn, routed through UISignals.draw_actions for thread-safety.
 
-Built for a 3rd-5th grade audience: a colored, framed "whiteboard" look
-(not a flat white rectangle), filled/colored shapes (not a black-on-white
-wireframe), and every primitive animates in over a short duration - a
+Built for a 3rd-5th grade audience: a soft grid-paper background with no
+bounding frame/border drawn around it - an "infinite board" feel, not a
+rectangle floating in the window (tried a framed rounded-rect border
+first; dropped it per direct feedback on a real screenshot) - filled/
+colored shapes (not a black-on-white wireframe), and every primitive
+animates in over a short duration - a
 line grows from its start point, a circle sweeps around like it's being
 traced, a rectangle/polygon draws edge by edge, text types on - with a
 small marker-dot following the current drawing point, instead of
@@ -68,16 +71,15 @@ from visuals.arithmetic import (
 
 logger = logging.getLogger(__name__)
 
-# Kid-friendly palette: warm paper background (not stark white), a
-# friendly blue board frame, blue shape outlines with a warm translucent
-# fill (so shapes read as solid, not wireframe), dark marker-black text
+# Kid-friendly palette: warm paper background (not stark white), no
+# bounding frame (see module docstring), blue shape outlines with a warm
+# translucent fill (so shapes read as solid, not wireframe), dark marker-black text
 # for equations/labels, and a bright orange "marker tip" that traces
 # each shape as it draws. Text is deliberately NOT red - red is reserved
 # for the underline/laser emphasis below, so it actually stands out
 # instead of blending in with every other letter on the board.
 _BG_COLOR = QColor(250, 250, 245)
 _GRID_COLOR = QColor(222, 233, 245)
-_FRAME_COLOR = QColor(60, 130, 200)
 _SHAPE_OUTLINE = QColor(40, 100, 170)
 _SHAPE_FILL = QColor(255, 205, 90, 140)
 _TEXT_COLOR = QColor(35, 40, 50)
@@ -256,7 +258,6 @@ class TeachingCanvas(QGraphicsObject):
 
         painter.fillRect(rect, _BG_COLOR)
         self._paint_grid(painter, rect)
-        self._paint_frame(painter, rect)
         self._paint_title(painter, rect)
 
         for line in self.lines:
@@ -294,11 +295,6 @@ class TeachingCanvas(QGraphicsObject):
         while y < rect.bottom():
             painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
             y += _GRID_SPACING
-
-    def _paint_frame(self, painter: QPainter, rect: QRectF) -> None:
-        painter.setPen(QPen(_FRAME_COLOR, 6))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRoundedRect(rect.adjusted(3, 3, -3, -3), 18, 18)
 
     def _paint_title(self, painter: QPainter, rect: QRectF) -> None:
         if not self.title_text:
