@@ -69,7 +69,11 @@ class FaceWidget(QWidget):
 
         self.label = QLabel(self)
         self.label.setAlignment(Qt.AlignCenter)
-        self.label.setStyleSheet("background: black;")
+        # White, not black - matches the face art's own white background
+        # (see _load), so when the square art is letterboxed into a wider
+        # widget (see _tick()'s KeepAspectRatio scaling) the side bars
+        # blend in seamlessly instead of reading as a visible seam/bug.
+        self.label.setStyleSheet("background: white;")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.label)
@@ -215,26 +219,24 @@ class FaceWidget(QWidget):
         # though `rgb` (the numpy buffer QImage was built on) goes out of
         # scope right after this line.
         #
-        # KeepAspectRatioByExpanding (not KeepAspectRatio) deliberately -
-        # the source art is a fixed 600x600 SQUARE (see _load), but in
-        # full-screen mode this widget is set to the scene's full 1280x720
-        # (see TutorScene.show_face_fullscreen), a 16:9 widescreen rect.
-        # KeepAspectRatio ("fit"/"contain") would scale that square down
-        # to fit WITHIN the widget, leaving black letterbox bars on both
-        # sides - confirmed live on the real Pi (teammate screenshot): the
-        # face rendered as a small square centered on the screen instead
-        # of filling it, even though the widget itself was already
-        # correctly sized (see tutor_view.py's fitInView fix, a separate,
-        # earlier bug). KeepAspectRatioByExpanding ("fill"/"cover") scales
-        # the square UP to cover the whole widget instead, cropping the
-        # overflow (which Qt's normal paint clipping handles for free,
-        # since the oversized pixmap is centered in a widget whose own
-        # bounds clip it) - the face fills the screen instead of leaving
-        # bars. In the circular "bubble" mode (TutorScene.show_teaching_
-        # layout), the widget is ALSO square, so this is a no-op there -
-        # this only changes behavior for the non-square full-screen case.
+        # KeepAspectRatio ("fit"/"contain") - the source art is a fixed
+        # 600x600 SQUARE (see _load), but in full-screen mode this widget
+        # is set to the scene's full 1280x720 (see TutorScene.
+        # show_face_fullscreen), a 16:9 widescreen rect. This scales the
+        # square to fill the widget's HEIGHT exactly (the constraining
+        # dimension for a square going into a wider rect), centered, with
+        # equal blank margins left/right rather than cropping or
+        # stretching the face. Deliberately NOT KeepAspectRatioByExpanding
+        # ("fill"/"cover") - tried that first, but it crops the top/bottom
+        # of the face (eyebrows, chin) to eliminate the margins entirely,
+        # which looked worse than the margins themselves once the margins
+        # were made to match the face art's own white background (see
+        # the label's stylesheet above) - at that point the margins read
+        # as "face centered on a white screen", not a visible bug. In the
+        # circular "bubble" mode (TutorScene.show_teaching_layout), the
+        # widget is ALSO square, so this is a no-op there either way.
         pixmap = QPixmap.fromImage(qimg).scaled(
             self.width() or w, self.height() or h,
-            Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+            Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         self.label.setPixmap(pixmap)

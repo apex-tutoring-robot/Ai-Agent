@@ -11,7 +11,13 @@ class TutorView(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameShape(0)
-        self.setStyleSheet("background: black; border: none;")
+        # White, not black - matches the face art's own white background
+        # (see FaceWidget._load) and the whiteboard's own near-white
+        # background (TeachingCanvas._BG_COLOR), so the thin letterbox
+        # strip fitInView leaves on a screen whose aspect ratio isn't
+        # exactly 1280:720 (e.g. a real Pi's 1024x600) blends in instead
+        # of reading as a visible black seam.
+        self.setStyleSheet("background: white; border: none;")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
