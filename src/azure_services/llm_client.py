@@ -312,7 +312,9 @@ class LLMClient:
         {"speech_id": 1, "action": "draw_polygon", "points": [[580,160],[780,160],[780,360],[580,360]]},
         {"speech_id": 1, "action": "draw_regular_polygon", "sides": 6, "cx": 620, "cy": 270, "radius": 110},
         {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360},
-        {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90}
+        {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90},
+        {"speech_id": 2, "action": "fraction_bar", "x": 100, "y": 200, "width": 600, "bar_height": 60,
+         "fractions": [{"numerator": 3, "denominator": 4}]}
       ]
     }
 
@@ -321,6 +323,20 @@ class LLMClient:
       taught (e.g. "Area of a Rectangle", "Equivalent Fractions") - written in Title
       Case, not snake_case. Always emit this once, with speech_id 1, right alongside
       the initial "clear" action for every new question.
+    - fraction_bar: draws one or more horizontal bars, each split into equal segments
+      with some of them shaded, for visualizing/comparing fractions. fractions = a
+      list of {"numerator": int, "denominator": int, "label": optional string} -
+      denominator must be between 1 and 12, numerator between 0 and denominator
+      (proper fractions or exactly a whole - not improper fractions/mixed numbers).
+      Give 2+ fractions (max 4) to compare them or show equivalence (e.g. 1/2 and
+      2/4 drawn at the same width will visibly shade the same span). label defaults
+      to "numerator/denominator" - only set it to something else (like "pizza eaten")
+      when that's clearer than the bare fraction. x,y = top-left anchor, width =
+      pixel width of each bar (all bars share the same width so equivalent/compared
+      fractions line up), bar_height = pixel height of each bar (omit for a sensible
+      default). Multiple bars stack automatically - don't set y per fraction. Every
+      segment boundary is computed and drawn for you - you supply ONLY the
+      numerator(s) and denominator(s), never a pixel coordinate for a segment.
     - draw_circle: x,y = CENTER of circle. r = radius (for circles). rx,ry = separate radii (for ellipses).
     - draw_rect: x,y = top-left corner. w,h = width and height.
     - draw_regular_polygon: sides=number of sides, cx/cy=center, radius=circumscribed radius.
@@ -349,7 +365,7 @@ class LLMClient:
       simple, already fully-answered question where a follow-up check would feel
       repetitive. Do NOT put the check question in speech - it is spoken separately,
       after the explanation.
-    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, fraction_bar
     - Always include exactly one "set_title" action, speech_id 1, right after the
       initial "clear" - every question gets a title naming the topic.
     - Use 2-5 speech steps

@@ -47,7 +47,7 @@ Rules:
   explaining, or null for a simple already-answered question. Not part of speech.
   MUST use DIFFERENT numbers/values than the worked example - test whether the
   student can apply the idea to a new case, never repeat the same numbers.
-- Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+- Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, fraction_bar
 - set_title shows a short Title Case title at the top of the board naming the topic
   (e.g. "Area of a Rectangle") - always include exactly one, speech_id 1, right after
   the initial "clear".
@@ -55,6 +55,14 @@ Rules:
   call it out (x,y = left edge/baseline of what's being underlined, width = span) -
   always use it to underline the final answer once calculated, like a teacher
   underlining it with a marker.
+- fraction_bar draws one or more horizontal bars split into equal segments with some
+  shaded, for visualizing/comparing fractions - fractions: a list of {"numerator":
+  int, "denominator": int, "label": optional string}, denominator 1-12, numerator
+  0-denominator (proper fractions or a whole, not improper/mixed numbers). Give 2+
+  (max 4) to compare or show equivalence (e.g. 1/2 and 2/4 at the same width shade
+  the same span). x,y: top-left anchor, width: pixel width shared by all bars,
+  bar_height: optional pixel height. Bars stack automatically. Every segment
+  boundary is computed for you - you supply ONLY the numerator(s)/denominator(s).
 - Write the actual solving steps as SEPARATE draw_text lines (formula, then substituted
   values, then simplified result), not one vague summary line - a real board shows the
   work, not a caption describing it.
