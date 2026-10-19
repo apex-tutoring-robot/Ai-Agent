@@ -151,7 +151,20 @@ class JarvisBot:
         detect_camera()
 
         # Initialize components with shared PyAudio
-        self.wake_word_detector = WakeWordDetector(pa=self.pa)
+        #
+        # Resolved via the same validated path as every other input/output
+        # stream (see resolve_device_index's priority order) - NOT left to
+        # WakeWordDetector's own fallback (a raw os.getenv(..., 1) with no
+        # validation), which was the real bug behind "robot never responds
+        # to 'Hey Jarvis', even on a WiFi network that works fine for
+        # everything else": wake-word matching runs entirely locally
+        # (openWakeWord, no network call at all), so a listener silently
+        # reading from the wrong-but-still-openable input device would
+        # explain total unresponsiveness with zero errors far better than
+        # a connectivity issue would - that failure mode only kicks in once
+        # a conversation actually starts and needs Azure STT/TTS.
+        wake_word_input_index = resolve_device_index(self.pa, 'input', 'AUDIO_INPUT_DEVICE_INDEX')
+        self.wake_word_detector = WakeWordDetector(pa=self.pa, input_device_index=wake_word_input_index)
         self.audio_player = AudioPlayer(
             pa=self.pa,
             # Qt signal emission is thread-safe (queued to the GUI thread)
@@ -352,7 +365,9 @@ class JarvisBot:
                 pa=self.pa,
                 on_audio_played=self.continuous_vad.on_audio_played
             )
-            self.wake_word_detector = WakeWordDetector(pa=self.pa)
+            # Same validated resolution as __init__ - see the comment there.
+            wake_word_input_index = resolve_device_index(self.pa, 'input', 'AUDIO_INPUT_DEVICE_INDEX')
+            self.wake_word_detector = WakeWordDetector(pa=self.pa, input_device_index=wake_word_input_index)
             
             logger.info("✅ Audio system fully recreated and re-wired")
         except Exception as e:
