@@ -204,7 +204,7 @@ Ai-Agent/
 | `LOCAL_LLM_MODEL_PATH` | `.gguf` model path, enables the local-LLM fallback if Azure is down | No |
 | `LOG_LEVEL` | Logging level (INFO) | No |
 
-A number of spoken-phrase overrides (`WARMUP_CHECKIN_MESSAGE`, `DISCOVERY_MESSAGE`, `IDENTITY_CHECKIN_MESSAGE`, `GOODBYE_MESSAGE`, `SLEEP_MESSAGE`) and a few more timing/threshold knobs also exist with sane defaults - see `os.getenv(...)` calls in `src/main.py` for the full list.
+A number of spoken-phrase overrides (`BOOT_GREETING`, `WARMUP_CHECKIN_MESSAGE`, `DISCOVERY_MESSAGE`, `IDENTITY_CHECKIN_MESSAGE`, `GOODBYE_MESSAGE`, `SLEEP_MESSAGE`) and a few more timing/threshold knobs also exist with sane defaults - see `os.getenv(...)` calls in `src/main.py` for the full list.
 
 ## 🛡️ Privacy
 

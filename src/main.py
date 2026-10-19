@@ -1852,6 +1852,21 @@ class JarvisBot:
         finally:
             self.audio_player.stop_streaming(immediate=True)
 
+    def _speak_boot_greeting(self) -> None:
+        """
+        Passed as WakeWordDetector.start()'s on_ready callback for the
+        very first startup (see run()) - fires once model loading + mic
+        setup are actually done, not before, so "I'm ready" is true when
+        said. Doubles as a startup health check: if this doesn't play,
+        the problem is upstream of wake-word listening entirely (TTS/
+        audio output, or startup never finished) rather than in wake-word
+        matching itself - two different problems that otherwise look
+        identical from the outside ("said Hey Jarvis, nothing happened").
+        """
+        phrase = os.getenv('BOOT_GREETING', "Hi! I'm ready - just say Hey Jarvis to get started.")
+        output_device_index = resolve_device_index(self.pa, 'output', 'AUDIO_OUTPUT_DEVICE_INDEX')
+        self._speak_standalone(phrase, output_device_index)
+
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
         # Prevent concurrent interactions
@@ -2334,7 +2349,16 @@ class JarvisBot:
             # _restart_wake_word() which takes over in a daemon thread. After that,
             # start() returns here — but we must NOT call stop() at that point because
             # the daemon thread and all shared resources (self.pa, TTS) are still needed.
-            self.wake_word_detector.start(self._handle_wake_word)
+            #
+            # on_ready=_speak_boot_greeting ONLY on this very first call - model
+            # loading + mic setup can take several real seconds, and without any
+            # signal, someone powering it on has no way to tell "still booting"
+            # from "not working" (exactly what a team debugging session spent a
+            # while on). _restart_wake_word()'s own start() calls (every cycle
+            # after a conversation ends) deliberately leave on_ready unset - a
+            # "ready" announcement after every single conversation would be
+            # noise, not a signal.
+            self.wake_word_detector.start(self._handle_wake_word, on_ready=self._speak_boot_greeting)
 
             # Keep run() alive while wake-word/conversation cycles continue in daemon threads.
             # Only exit when _is_running is cleared by stop() or a signal arrives.
