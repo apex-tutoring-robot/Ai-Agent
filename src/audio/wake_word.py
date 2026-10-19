@@ -85,12 +85,23 @@ class WakeWordDetector:
         logger.info(f"Wake word detector initialized: model='{self.model_name or 'all'}', "
                    f"threshold={self.threshold}, vad={self.vad_threshold}, speex={self.enable_speex}")
     
-    def start(self, callback: Callable[[], None]) -> None:
+    def start(self, callback: Callable[[], None], on_ready: Optional[Callable[[], None]] = None) -> None:
         """
         Start listening for wake word.
-        
+
         Args:
             callback: Function to call when wake word is detected
+            on_ready: Optional, called once the model is loaded and the
+                mic stream is actually open - right before the listen
+                loop starts, not before. Lets a caller announce "I'm
+                ready" at the moment that's actually true, instead of
+                immediately on process launch (misleading - model
+                loading/mic setup can take a few real seconds) or not at
+                all (leaving someone saying the wake word with no way to
+                tell whether it's still booting or just not listening).
+                Exceptions here are logged and swallowed, never allowed
+                to stop detection from actually starting - see the
+                `except Exception` around the call below.
         """
         try:
             # openWakeWord's pretrained models (both .tflite and .onnx
@@ -208,7 +219,13 @@ class WakeWordDetector:
                 logger.info(f"VAD filtering enabled (threshold: {self.vad_threshold})")
             
             self._is_running = True
-            
+
+            if on_ready:
+                try:
+                    on_ready()
+                except Exception as e:
+                    logger.error(f"on_ready callback failed (continuing to listen anyway): {e}")
+
             # Listen loop
             while self._is_running:
                 # Read audio chunk
