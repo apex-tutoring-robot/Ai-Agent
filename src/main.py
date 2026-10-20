@@ -165,6 +165,16 @@ class JarvisBot:
         # a conversation actually starts and needs Azure STT/TTS.
         wake_word_input_index = resolve_device_index(self.pa, 'input', 'AUDIO_INPUT_DEVICE_INDEX')
         self.wake_word_detector = WakeWordDetector(pa=self.pa, input_device_index=wake_word_input_index)
+
+        # Output isn't actually needed yet at this point (AudioPlayer
+        # below takes its own device index per-call, resolved fresh when
+        # a conversation starts - see _handle_wake_word) - resolved here
+        # too, cheaply, purely so the on-screen health-check indicator
+        # has both names to show from the moment the app starts, not
+        # only once the first conversation begins.
+        wake_word_output_index = resolve_device_index(self.pa, 'output', 'AUDIO_OUTPUT_DEVICE_INDEX')
+        self._announce_resolved_audio_devices(wake_word_input_index, wake_word_output_index)
+
         self.audio_player = AudioPlayer(
             pa=self.pa,
             # Qt signal emission is thread-safe (queued to the GUI thread)
@@ -368,10 +378,28 @@ class JarvisBot:
             # Same validated resolution as __init__ - see the comment there.
             wake_word_input_index = resolve_device_index(self.pa, 'input', 'AUDIO_INPUT_DEVICE_INDEX')
             self.wake_word_detector = WakeWordDetector(pa=self.pa, input_device_index=wake_word_input_index)
-            
+            wake_word_output_index = resolve_device_index(self.pa, 'output', 'AUDIO_OUTPUT_DEVICE_INDEX')
+            self._announce_resolved_audio_devices(wake_word_input_index, wake_word_output_index)
+
             logger.info("✅ Audio system fully recreated and re-wired")
         except Exception as e:
             logger.error(f"Failed to recreate audio system: {e}")
+
+    def _announce_resolved_audio_devices(self, input_index: int, output_index: int) -> None:
+        """Pushes the resolved mic/speaker names to the on-screen health-
+        check indicator (see ui_signals.audio_devices_resolved and
+        visuals/ui/audio_device_indicator.py) - a no-op headless (no
+        ui_signals) or if either index somehow doesn't resolve to a real
+        device (defensive only; resolve_device_index always returns SOME
+        int, but this never needs to be fatal either way)."""
+        if not self.ui_signals:
+            return
+        try:
+            mic_name = self.pa.get_device_info_by_index(input_index).get('name', '?')
+            speaker_name = self.pa.get_device_info_by_index(output_index).get('name', '?')
+            self.ui_signals.audio_devices_resolved.emit(mic_name, speaker_name)
+        except Exception as e:
+            logger.warning(f"Could not announce resolved audio devices to the UI: {e}")
 
     @staticmethod
     def _text_similarity(a: str, b: str) -> float:

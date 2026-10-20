@@ -7,6 +7,7 @@ the main thread instead of FaceAnimator.render_forever()'s blocking cv2 loop
 
 import os
 from PyQt5.QtWidgets import QMainWindow, QWidget
+from visuals.ui.audio_device_indicator import AudioDeviceIndicator
 from visuals.ui.face_widget import FaceWidget
 from visuals.ui.teaching_canvas import TeachingCanvas
 from visuals.ui.tutor_scene import TutorScene
@@ -36,6 +37,11 @@ class MainWindow(QMainWindow):
         # volume overlay - positioned in _position_volume_indicator().
         self.volume_indicator = VolumeIndicator(self)
 
+        # Opposite corner from the volume indicator - a persistent (not
+        # auto-hiding) health-check readout of which mic/speaker Jarvis
+        # actually picked, see audio_device_indicator.py's own docstring.
+        self.audio_device_indicator = AudioDeviceIndicator(self)
+
         # Plain black overlay shown during the display-sleep cycle (after
         # prolonged idle - see JarvisBot's run() loop). Qt-side equivalent
         # of the old cv2 FaceAnimator's blanked frame; paired with an actual
@@ -54,6 +60,7 @@ class MainWindow(QMainWindow):
             self.resize(1280, 720)
 
         self._position_volume_indicator()
+        self._position_audio_device_indicator()
         self._position_sleep_overlay()
         self._connect_signals()
         self.show_idle_mode()
@@ -73,6 +80,7 @@ class MainWindow(QMainWindow):
         self.signals.show_face_fullscreen.connect(self._show_face_fullscreen)
         self.signals.show_teaching_layout.connect(self._show_teaching_layout)
         self.signals.volume_changed.connect(self.volume_indicator.show_level)
+        self.signals.audio_devices_resolved.connect(self.audio_device_indicator.show_devices)
         self.signals.enter_sleep.connect(self.show_sleep_mode)
         self.signals.wake_up.connect(self.show_wake_mode)
 
@@ -96,12 +104,17 @@ class MainWindow(QMainWindow):
             self.width() - self.volume_indicator.width() - margin, margin
         )
 
+    def _position_audio_device_indicator(self) -> None:
+        margin = 24
+        self.audio_device_indicator.move(margin, margin)
+
     def _position_sleep_overlay(self) -> None:
         self.sleep_overlay.setGeometry(0, 0, self.width(), self.height())
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._position_volume_indicator()
+        self._position_audio_device_indicator()
         self._position_sleep_overlay()
 
     def show_idle_mode(self):
