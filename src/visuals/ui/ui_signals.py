@@ -35,6 +35,12 @@ class UISignals(QObject):
     # set_volume tool actually changes it - see JarvisBot._tool_set_volume.
     volume_changed = pyqtSignal(float)
 
+    # (mic_name, speaker_name) - emitted once device resolution actually
+    # runs (see JarvisBot.__init__/_recreate_audio_system and
+    # audio.device_detection.resolve_device_index) so the physical screen
+    # can show which devices were picked, as a visible health check.
+    audio_devices_resolved = pyqtSignal(str, str)
+
     # Display-sleep cycle after prolonged idle (see JarvisBot.run()'s main
     # loop) - Qt-side equivalent of the old cv2 FaceAnimator's
     # enter_sleep()/wake_up(), paired with an actual HDMI power toggle via
