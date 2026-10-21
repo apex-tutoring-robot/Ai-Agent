@@ -54,7 +54,17 @@ class SpeechToTextClient:
         # independent conversation turn, that fires a separate LLM/TTS answer
         # per fragment instead of one answer for the whole sentence. Widening
         # this window lets brief pauses pass without ending the segment.
-        segmentation_silence_ms = os.getenv('STT_SEGMENTATION_SILENCE_TIMEOUT_MS', '1000')
+        #
+        # 1000ms (doubling Azure's default) fixed that, but direct feedback
+        # after the barge-in fix (see continuous_vad.py's
+        # _is_barge_in_trigger_chunk) was that the resulting full-second wait
+        # before ANY utterance - including what you just interrupted Jarvis
+        # to say - gets processed felt sluggish. 600ms is a deliberate
+        # middle ground: still meaningfully more forgiving of a brief pause
+        # than Azure's bare 500ms default (the original fragmentation
+        # problem), while cutting the extra latency this was carrying
+        # almost in half.
+        segmentation_silence_ms = os.getenv('STT_SEGMENTATION_SILENCE_TIMEOUT_MS', '600')
         self.speech_config.set_property(
             speechsdk.PropertyId.Speech_SegmentationSilenceTimeoutMs,
             segmentation_silence_ms
