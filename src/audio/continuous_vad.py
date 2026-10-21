@@ -567,15 +567,50 @@ class ContinuousVADCapture:
             # The lifecycle is managed by the ContinuousVADCapture instance
             pass
             
+    def _is_barge_in_trigger_chunk(self, audio_chunk: bytes) -> tuple[bool, float]:
+        """
+        Whether this one (post-AEC) audio chunk should count toward
+        confirming a barge-in - see always_streaming's gate, the only
+        caller. Returns (triggers, rms) - rms is still returned even
+        when it doesn't trigger, purely for the caller's own log line.
+
+        Requires BOTH a loud chunk (RMS above _barge_in_energy_threshold)
+        AND one WebRTC VAD actually classifies as speech. Energy alone
+        can't tell a person talking apart from any other loud, sustained
+        sound in the room - a dropped book, a dog bark, a door slam -
+        which would false-positive a "barge-in" and cut off the bot's
+        audio for no real reason. Found live: the original implementation
+        was pure energy-thresholding with no speech check at all, despite
+        this same class already using webrtcvad.Vad.is_speech() for every
+        other speech-detection decision in this file (see
+        _capture_one_utterance/stream_audio_chunks) - just not this one.
+        """
+        mic_samples = np.frombuffer(audio_chunk, dtype=np.int16)
+        rms = float(np.sqrt(np.mean(mic_samples.astype(np.float32) ** 2)))
+
+        if rms <= self._barge_in_energy_threshold:
+            return False, rms
+
+        try:
+            is_speech = self.vad.is_speech(audio_chunk, self.sample_rate)
+        except Exception:
+            # Malformed/short frame (e.g. AEC briefly returning an
+            # unexpected length) - fail safe (not a trigger) rather than
+            # let a one-off glitch count toward a false barge-in.
+            is_speech = False
+
+        return bool(is_speech), rms
+
     def always_streaming(self) -> Generator[bytes, None, None]:
         """
-        Continuous generator that yields audio chunks indefinitely 
+        Continuous generator that yields audio chunks indefinitely
         until explicitly stopped or idle timeout is reached.
-        
+
         ECHO DEFENSE (mute-the-pipe):
         While bot is playing back audio, this yields SILENCE to STT.
-        Only switches to real mic audio when a barge-in is detected
-        (high energy for N consecutive chunks after AEC processing).
+        Only switches to real mic audio when a barge-in is detected -
+        both loud AND speech-shaped for N consecutive chunks after AEC
+        processing, see _is_barge_in_trigger_chunk.
         """
         self.ensure_stream_open()
         self._is_monitoring = True
@@ -689,12 +724,10 @@ class ContinuousVADCapture:
                 if self._is_bot_playing:
                     # Bot speaking counts as activity — keep conversation alive
                     self.last_speech_time = time.time()
-                    
-                    # Measure mic energy AFTER AEC to detect user speech above residual echo
-                    mic_samples = np.frombuffer(audio_chunk, dtype=np.int16)
-                    rms = np.sqrt(np.mean(mic_samples.astype(np.float32)**2))
-                    
-                    if rms > self._barge_in_energy_threshold:
+
+                    is_trigger_chunk, rms = self._is_barge_in_trigger_chunk(audio_chunk)
+
+                    if is_trigger_chunk:
                         barge_in_consecutive += 1
                     else:
                         barge_in_consecutive = 0
