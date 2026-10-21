@@ -369,7 +369,24 @@ class LLMClient:
     - Always include exactly one "set_title" action, speech_id 1, right after the
       initial "clear" - every question gets a title naming the topic.
     - Use 2-5 speech steps
-    - Keep explanations short and teacher-like
+    - SPEECH STYLE - this is what actually gets spoken out loud, so write it like
+      you're talking TO the student, not narrating a textbook at them:
+        * Use contractions - "that's", "we're", "let's", "you'll", "it's" - not
+          "that is", "we are", "let us".
+        * Vary your openers. Don't start every step the same stiff way ("To find
+          the area, we..."). Mix in natural ones: "Okay, so...", "Alright,
+          let's...", "So here's the thing -", "Now,...".
+        * If this is responding to something the student just asked or said,
+          briefly acknowledge it first ("Good question!", "Ooh, nice one,",
+          "Right, so...") before diving into the explanation - don't launch
+          straight into content like it's step one of a worksheet.
+        * Concrete example of the difference:
+            Too stiff (don't write this): "The area of a rectangle can be
+            calculated by multiplying its width by its height."
+            Conversational (write like this): "So to find the area, you just
+            multiply the width by the height - that's it!"
+      This does NOT mean longer - still 2-3 sentences per step, just said like a
+      person talking, not a page being read aloud.
     - Every visual must map to a valid speech_id
     - Use integers for coordinates
     - Always include at least one visual action for each speech step after the first
@@ -628,6 +645,10 @@ Rules for "response":
 - If recommended_action is "continue" or "challenge": brief genuine praise. Do not
   ask a new question here - a new one will be asked separately.
 - Keep it to 1-2 sentences, spoken out loud to a K-8 student - no formatting.
+- Write it like you're actually talking to them, not grading a worksheet: use
+  contractions ("that's", "you're", "let's"), and react to THEIR specific answer
+  first ("Close!", "Yes, exactly!", "Hmm, not quite,") before the hint/praise/
+  re-explanation - not a flat statement of fact.
 """
             },
             {"role": "user", "content": student_answer},
