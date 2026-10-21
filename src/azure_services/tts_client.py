@@ -39,6 +39,18 @@ class TextToSpeechClient:
         self.speech_region = speech_region or os.getenv('AZURE_SPEECH_REGION')
         self.voice = voice or os.getenv('TTS_VOICE', 'en-US-JennyNeural')
         self.speech_rate = speech_rate or float(os.getenv('TTS_SPEECH_RATE', 1.0))
+        # Azure neural voices support an mstts:express-as "style" - "chat"
+        # is Microsoft's own description for "a user's queries/comments in
+        # a casual and relaxed tone", which is exactly the gap found live:
+        # most of what Jarvis actually says went through plain speak_text()
+        # with no SSML at all (see synthesize_to_audio), so it never got
+        # ANY prosody/style shaping - completely flat, default delivery,
+        # not just unstyled. An unsupported style name on a given voice
+        # doesn't error - Azure's SSML parser just ignores it and
+        # synthesizes with default delivery instead (confirmed live), so
+        # this is safe to leave on even if TTS_VOICE is swapped to a voice
+        # that doesn't support "chat".
+        self.style = os.getenv('TTS_STYLE', 'chat')
         
         if not self.speech_key or not self.speech_region:
             raise ValueError("Azure Speech credentials not provided")
@@ -103,15 +115,17 @@ class TextToSpeechClient:
         except Exception as e:
             logger.warning(f"TTS warm-up failed (non-critical): {e}")
     
-    def _build_rate_ssml(self, text: str, rate_percent: Optional[int] = None, pitch_percent: Optional[int] = None) -> str:
+    def _build_ssml(self, text: str, rate_percent: Optional[int] = None, pitch_percent: Optional[int] = None) -> str:
         """
-        Wrap text in SSML with <prosody rate="..." pitch="..."> adjustments.
-        speak_text()/speak_text_async() only accept plain text - there's no
-        rate/pitch parameter on those calls, so honoring TTS_SPEECH_RATE (or
-        a per-utterance ExpressionController DeliveryStyle - see
-        expression/controller.py) requires the SSML synthesis path instead.
-        text is XML-escaped since it's LLM-generated and may contain '&',
-        '<', '>', etc.
+        Wrap text in SSML with the conversational mstts:express-as style
+        (self.style, see __init__) plus <prosody rate="..." pitch="...">
+        adjustments. speak_text()/speak_text_async() only accept plain
+        text - there's no style/rate/pitch parameter on those calls, so
+        every call now goes through this SSML path instead (see
+        synthesize_to_audio - previously only delivery/non-default-rate
+        calls used SSML, meaning most actual speech got neither a style
+        NOR any prosody shaping at all). text is XML-escaped since it's
+        LLM-generated and may contain '&', '<', '>', etc.
 
         rate_percent/pitch_percent, when given, override the instance's
         global self.speech_rate for this one call - see synthesize_to_audio's
@@ -123,11 +137,12 @@ class TextToSpeechClient:
         pitch_percent = pitch_percent or 0
         pitch_sign = "+" if pitch_percent >= 0 else ""
         escaped = saxutils.escape(text)
+        prosody = f'<prosody rate="{rate_sign}{rate_percent}%" pitch="{pitch_sign}{pitch_percent}%">{escaped}</prosody>'
+        styled = f'<mstts:express-as style="{self.style}">{prosody}</mstts:express-as>' if self.style else prosody
         return (
-            '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">'
-            f'<voice name="{self.voice}">'
-            f'<prosody rate="{rate_sign}{rate_percent}%" pitch="{pitch_sign}{pitch_percent}%">{escaped}</prosody>'
-            '</voice></speak>'
+            '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+            'xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="en-US">'
+            f'<voice name="{self.voice}">{styled}</voice></speak>'
         )
 
     def synthesize_to_audio(self, text: str, delivery: Optional["DeliveryStyle"] = None) -> bytes:
@@ -146,14 +161,15 @@ class TextToSpeechClient:
         try:
             # Reuse persistent synthesizer instance (no initialization overhead)
             logger.info(f"Synthesizing: {text[:50]}...")
+            # Always through SSML now, not just when delivery/rate differ
+            # from default - see _build_ssml's docstring for why
+            # (speak_text() carries no style at all, which was the actual
+            # gap behind "the voice sounds flat/robotic").
             if delivery is not None:
-                result = self.synthesizer.speak_ssml(
-                    self._build_rate_ssml(text, rate_percent=delivery.rate_percent, pitch_percent=delivery.pitch_percent)
-                )
-            elif self.speech_rate != 1.0:
-                result = self.synthesizer.speak_ssml(self._build_rate_ssml(text))
+                ssml = self._build_ssml(text, rate_percent=delivery.rate_percent, pitch_percent=delivery.pitch_percent)
             else:
-                result = self.synthesizer.speak_text(text)
+                ssml = self._build_ssml(text)
+            result = self.synthesizer.speak_ssml(ssml)
 
             if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
                 logger.info("Speech synthesis completed")
