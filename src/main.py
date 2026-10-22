@@ -1298,6 +1298,13 @@ class JarvisBot:
                         break
                 else:
                     break
+            # Logged AFTER `messages` was already captured above (it's
+            # irrelevant context for THIS generate_teaching_plan call) but
+            # still needs to happen - same gap _speak_system_message had
+            # before it was fixed: real spoken content that left no trace
+            # in history, making a later "what actually happened" log
+            # review (like the one that found this) harder than it should be.
+            self.conversation_manager.add_assistant_message(filler)
 
             # Un-mute for the generation wait itself - only the filler has
             # actually played so far, so there's nothing left to echo-guard
@@ -1539,6 +1546,12 @@ class JarvisBot:
                     if self.audio_player._is_playing:
                         self.audio_player.queue_audio(audio_chunk)
                 self._last_bot_response = apology
+                # Without this, a failed teaching-plan call leaves a
+                # silent gap in history: the student's question is
+                # logged, the apology they actually heard is not, and a
+                # later log review can't tell a failure happened here at
+                # all - confirmed this exact ambiguity live.
+                self.conversation_manager.add_assistant_message(apology)
             except Exception:
                 pass
         finally:
