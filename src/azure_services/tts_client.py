@@ -15,6 +15,53 @@ load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
 
+# Defensive cleanup for markdown/LaTeX artifacts that occasionally slip
+# into an LLM response despite the "no formatting" instructions in every
+# prompt - confirmed live: a generic chat response about circle area
+# came back with literal LaTeX ("\[ \text{Area} = \pi r^2 \]"), which
+# would read as gibberish through TTS instead of plain spoken math. Not
+# a complete LaTeX-to-English converter - just the small set of
+# constructs actually seen in practice. Applied once, right before
+# synthesis in synthesize_stream (see below), so it catches text from
+# ANY caller - generic chat, teaching-plan steps, system messages - not
+# just one code path, and only ever sees a complete buffered sentence
+# (never a partial streamed token), so a delimiter split across chunks
+# is never a concern.
+_LATEX_FRAC = re.compile(r'\\frac\{([^{}]+)\}\{([^{}]+)\}')
+_LATEX_TEXT_CMD = re.compile(r'\\text\{([^{}]*)\}')
+_LATEX_DELIMITERS = re.compile(r'\\[\[\]()]')
+_LATEX_SYMBOLS = (
+    (r'\times', 'times'), (r'\div', 'divided by'), (r'\cdot', 'times'), (r'\pi', 'pi'),
+)
+_LATEX_DOUBLE_DOLLAR = re.compile(r'\$\$')
+# Exponents: specific cases first (so the generic pattern below doesn't
+# also match - and re-mangle - the ^2/^3 it already consumed).
+_EXPONENT_2 = re.compile(r'(\w)\^2\b')
+_EXPONENT_3 = re.compile(r'(\w)\^3\b')
+_EXPONENT_N = re.compile(r'(\w)\^(\d+)\b')
+_MARKDOWN_BOLD = re.compile(r'\*\*([^*]+)\*\*')
+_MARKDOWN_BULLET = re.compile(r'(?m)^\s*[-*]\s+')
+
+
+def _strip_math_notation(text: str) -> str:
+    text = _LATEX_FRAC.sub(r'\1 over \2', text)
+    text = _LATEX_TEXT_CMD.sub(r'\1', text)
+    for symbol, word in _LATEX_SYMBOLS:
+        text = text.replace(symbol, word)
+    text = _LATEX_DELIMITERS.sub('', text)
+    text = _LATEX_DOUBLE_DOLLAR.sub('', text)
+    text = _EXPONENT_2.sub(r'\1 squared', text)
+    text = _EXPONENT_3.sub(r'\1 cubed', text)
+    text = _EXPONENT_N.sub(r'\1 to the power of \2', text)
+    text = _MARKDOWN_BOLD.sub(r'\1', text)
+    text = _MARKDOWN_BULLET.sub('', text)
+    # Removing delimiters (e.g. "\[ \pi r^2 \]" -> " pi r squared ") can
+    # leave behind extra/leading/trailing whitespace - collapse and trim
+    # it so this function always returns clean text on its own, whatever
+    # surrounded the parts it stripped.
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
 
 class TextToSpeechClient:
     """Azure Text-to-Speech client with streaming support."""
@@ -221,14 +268,14 @@ class TextToSpeechClient:
                     
                     if complete_text:
                         # Synthesize the complete sentence(s)
-                        audio_data = self.synthesize_to_audio(complete_text, delivery=delivery)
+                        audio_data = self.synthesize_to_audio(_strip_math_notation(complete_text), delivery=delivery)
                         if audio_data:
                             yield audio_data
             
             # Synthesize any remaining text
             if sentence_buffer.strip():
                 logger.info(f"📝 Synthesizing remaining text buffer ({len(sentence_buffer)} chars): '{sentence_buffer.strip()[:100]}...'")
-                audio_data = self.synthesize_to_audio(sentence_buffer.strip(), delivery=delivery)
+                audio_data = self.synthesize_to_audio(_strip_math_notation(sentence_buffer.strip()), delivery=delivery)
                 if audio_data:
                     logger.info(f"✓ Final buffer synthesized: {len(audio_data)} bytes")
                     yield audio_data

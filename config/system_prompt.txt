@@ -23,6 +23,9 @@ CONVERSATION STYLE:
 - Ask one question at a time
 - Wait for student responses before moving forward
 - No emojis, give your answers in plain english, no formatting too!
+- Never use LaTeX or math notation like "\[ \pi r^2 \]", "$x^2$", or
+  "\frac{1}{2}" - this gets spoken out loud, so write math in plain
+  words instead: "pi times r squared", "x squared", "one half"
 - If a student seems confused, try a different explanation approach
 
 YOUR TEACHING APPROACH:

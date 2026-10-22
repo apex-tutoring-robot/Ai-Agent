@@ -586,6 +586,32 @@ class JarvisBot:
         re.IGNORECASE,
     )
 
+    # A clear signal the student wants to END the conversation NOW -
+    # "I'm done", "let's finish here", "talk later", "bye" - distinct
+    # from _DISCOVERY_DECLINE_PATTERN (declining a specific offer of
+    # help, which can show up in lots of other contexts that aren't "I
+    # want to leave" at all). Found live: with a comprehension-check
+    # question pending, "I'm done" / "let's talk later" / "let's finish
+    # here" each correctly avoided being graded as a wrong answer (see
+    # TutorAction.NOT_AN_ANSWER) but then just got acknowledged with
+    # "that's okay, let me know when you're ready" and left the
+    # conversation open - repeated THREE times in a row in the same
+    # conversation, the student never actually got to leave. Checked
+    # alongside _DISCOVERY_DECLINE_PATTERN wherever that is, and also in
+    # _handle_teaching_answer where a pending check previously had no
+    # exit path at all.
+    _WANTS_TO_END_PATTERN = re.compile(
+        r"\b("
+        r"i(?:'m| am) done|"
+        r"let'?s (?:finish|stop|end)|"
+        r"(?:talk|chat) (?:to you )?later|"
+        r"good ?bye|bye|see you later|"
+        r"i(?:'m| am) (?:going to|gonna|about to) (?:go|leave)|"
+        r"(?:gotta|got to|have to|need to) go"
+        r")\b",
+        re.IGNORECASE,
+    )
+
     def _classify_yes_no(self, text: str) -> Optional[bool]:
         """
         Returns True/False for a clear yes/no, None when neither pattern
@@ -1068,16 +1094,27 @@ class JarvisBot:
             self._request_queue.put(user_text)
             return
 
-        # Use case 3: a clear, explicit decline is respected right away -
-        # see _end_conversation_with_goodbye - rather than still pushing
-        # a proactive suggestion on a student who just said no.
-        if self._DISCOVERY_DECLINE_PATTERN.search(user_text):
+        # Use case 3: a clear, explicit decline (or a direct "I want to
+        # leave" signal) is respected right away - see
+        # _end_conversation_with_goodbye - rather than still pushing a
+        # proactive suggestion on a student who just said no. Logged
+        # here (unlike the re-queued branch above, which gets logged by
+        # whatever processes it next) since this path consumes user_text
+        # directly without ever re-queuing it - found live as a real gap:
+        # neither this reply nor the one that led to a proactive
+        # suggestion below was ever recorded, leaving a silent hole in
+        # history between the discovery question and whatever came next.
+        if self._DISCOVERY_DECLINE_PATTERN.search(user_text) or self._WANTS_TO_END_PATTERN.search(user_text):
+            anonymized = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized)
             self._end_conversation_with_goodbye(continuous_vad, output_device_index)
             return
 
         profile_id = self.profile_manager.get_active_profile_id()
         suggestion = self.proactive_question_engine.suggest(profile_id) if profile_id else None
         if suggestion:
+            anonymized = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized)
             self._speak_fixed_phrase(suggestion["prompt"], continuous_vad, output_device_index)
             self.conversation_manager.add_assistant_message(suggestion["prompt"])
             self._pending_proactive_suggestion = {"concept": suggestion["concept"]}
@@ -1104,7 +1141,13 @@ class JarvisBot:
         if self._YES_PATTERN.search(user_text):
             concept_readable = pending["concept"].replace("_", " ")
             self._run_teaching_turn(f"Can you help me with {concept_readable}?", continuous_vad, output_device_index)
-        elif self._DISCOVERY_DECLINE_PATTERN.search(user_text):
+        elif self._DISCOVERY_DECLINE_PATTERN.search(user_text) or self._WANTS_TO_END_PATTERN.search(user_text):
+            # Logged here - this path consumes user_text directly rather
+            # than re-queuing it (unlike the other two branches, which
+            # get logged downstream), same gap as _handle_warmup_step's
+            # discovery branch had.
+            anonymized = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized)
             self._end_conversation_with_goodbye(continuous_vad, output_device_index)
         else:
             self._request_queue.put(user_text)
@@ -1609,6 +1652,24 @@ class JarvisBot:
             # without touching attempts/mastery or the pending state.
             self._speak_fixed_phrase(pending["question"], continuous_vad, output_device_index)
             continuous_vad.reset_idle_timer()
+            return
+
+        if self._WANTS_TO_END_PATTERN.search(user_text):
+            # A clear "I want to leave" signal, not an answer attempt -
+            # end the conversation right away (use case 3 - see
+            # _end_conversation_with_goodbye) instead of letting this
+            # reach evaluate_answer()'s NOT_AN_ANSWER path, which
+            # correctly avoids grading it wrong but then just
+            # acknowledges it and leaves the question open, waiting for
+            # the student to say so again. Confirmed live: "I'm done" /
+            # "let's talk later" / "let's finish here" each got
+            # acknowledged exactly that way, repeated three times in a
+            # row in the same conversation, without ever actually ending
+            # it. Checked before an LLM round-trip since this is
+            # unambiguous - no need to ask evaluate_answer to judge it.
+            anonymized = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized)
+            self._end_conversation_with_goodbye(continuous_vad, output_device_index)
             return
 
         self._pending_teaching_check = None  # consumed either way below
