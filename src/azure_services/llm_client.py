@@ -624,6 +624,7 @@ class LLMClient:
         concept: str,
         student_answer: str,
         attempts_so_far: int,
+        last_bot_message: Optional[str] = None,
         temperature: float = 0.0,
         max_tokens: int = 300,
     ) -> Dict:
@@ -632,6 +633,18 @@ class LLMClient:
         from a teaching turn (see JarvisBot._handle_teaching_answer).
         Never reduces to exact-string matching - a K-8 student's spoken
         answer ("um, I think it's a half?") needs real judgment.
+
+        last_bot_message: the last thing Jarvis actually said right
+        before this reply (JarvisBot._last_bot_response) - NOT always the
+        pending question itself. Confirmed live as a real gap without
+        this: when a student went off-topic ("let's talk about guitar")
+        and Jarvis's own not-an-answer reply asked a genuine follow-up
+        about THAT ("what do you like most about playing it?"), the
+        student's next reply ("I don't know, explain more") got judged
+        with zero visibility into what it was actually replying to -
+        only the stale pending math question - and came back as a hint
+        about fractions. Optional (None is fine) since not every caller
+        tracks this, but strongly recommended whenever available.
 
         Returns {correctness, misconception, recommended_action} - see the
         schema in the prompt below. Unlike generate_teaching_plan(), this
@@ -647,6 +660,19 @@ class LLMClient:
         consequence here is mild (one redundant hint, not a safety issue),
         so this is an accepted limitation, not something fixed here.
         """
+        context_note = ""
+        if last_bot_message and last_bot_message.strip() != question.strip():
+            context_note = f"""
+IMPORTANT CONTEXT: the LAST thing Jarvis actually said to the student,
+right before their reply below, was: "{last_bot_message}"
+This is NOT the pending question above - the conversation may have
+drifted (e.g. Jarvis itself asked a follow-up about something else the
+student brought up). Judge the student's reply against what was
+ACTUALLY just said/asked, not blindly against the original pending
+question, when they clearly differ. If the reply is clearly answering
+THAT instead, is_answer_attempt is false, same as any other off-topic
+reply."""
+
         full_messages = [
             {
                 "role": "system",
@@ -657,6 +683,7 @@ question, as part of a live tutoring conversation.
 Question asked: "{question}"
 Concept being checked: {concept}
 This is the student's attempt number {attempts_so_far + 1} at this question.
+{context_note}
 
 Return ONLY valid JSON, no markdown, no explanation outside the JSON. This
 applies no matter what the student said - even if they're ending the
@@ -691,6 +718,19 @@ Worked examples (follow these exactly):
 - "I'm done" / "that's okay, bye"    -> false (leaving the conversation, not the question)
 - "can we talk about something else" -> false (changing the subject entirely)
 - "what's for lunch today"           -> false (unrelated to the question)
+
+EXCEPTION to the "I don't know" rule above: if the "IMPORTANT CONTEXT"
+note (below, when present) says Jarvis's last message was something
+OTHER than the pending question, and the student's reply is clearly
+continuing THAT instead - even if it's phrased exactly like "I don't
+know" / "could you explain more" / "I'm not sure" - this is false, not
+true. Those phrases only default to true when there's no such context,
+or when the last thing Jarvis said WAS the pending question itself.
+Example: Jarvis's last message was "What do you like most about guitar?"
+(not the math question) and the student replies "I don't know, could you
+explain more?" -> false (they're asking about guitar, not stuck on the
+math question - responding with a math hint here would be ignoring what
+they actually asked).
 
 If genuinely torn between true and false for a reply that isn't in the
 examples above, choose true and grade it normally - "false" is reserved

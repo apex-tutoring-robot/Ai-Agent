@@ -1220,7 +1220,9 @@ class JarvisBot:
         intro = f"Okay, I can see it - it looks like: \"{problem_text}\". Give it a try - what do you think?"
         self._speak_fixed_phrase(intro, continuous_vad, output_device_index)
         self.conversation_manager.add_assistant_message(intro)
-        self._pending_teaching_check = {"concept": problem_text[:60], "question": problem_text, "attempts": 0}
+        self._pending_teaching_check = {
+            "concept": problem_text[:60], "question": problem_text, "attempts": 0, "off_topic_count": 0,
+        }
         continuous_vad.reset_idle_timer()
 
     # Rotated for variety rather than always saying the exact same line -
@@ -1565,7 +1567,9 @@ class JarvisBot:
                 # _handle_teaching_answer instead of being treated as a
                 # fresh, unrelated question.
                 if check_question:
-                    self._pending_teaching_check = {"concept": concept, "question": check_question, "attempts": 0}
+                    self._pending_teaching_check = {
+                        "concept": concept, "question": check_question, "attempts": 0, "off_topic_count": 0,
+                    }
             else:
                 partial = " ".join(response_parts)
                 if partial:
@@ -1619,6 +1623,14 @@ class JarvisBot:
         re.IGNORECASE,
     )
 
+    # How many CONSECUTIVE non-answer turns a pending comprehension check
+    # tolerates before letting go of it - see _handle_teaching_answer's
+    # "not is_answer_attempt" branch. Confirmed live as a real problem at
+    # the default of "never let go": a student who'd clearly moved on
+    # kept getting pulled back toward a stale question for six turns in
+    # a row before giving up on the conversation entirely.
+    _TEACHING_CHECK_PATIENCE = int(os.getenv('TEACHING_CHECK_PATIENCE', '2'))
+
     def _handle_teaching_answer(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
         Handles the student's answer to a teaching turn's comprehension-
@@ -1641,9 +1653,12 @@ class JarvisBot:
         matter what it actually was - confirmed live with "OK, uh, I'm
         done." (trying to end the conversation) being marked a wrong
         fraction answer. TutorAction.NOT_AN_ANSWER is that escape hatch:
-        it skips grading/mastery/attempt-count entirely and restores the
-        SAME pending check unchanged, so the question stays open instead
-        of being silently consumed by a turn that was never answering it.
+        it skips grading/mastery/attempt-count entirely and keeps the
+        question open instead of being silently consumed by a turn that
+        was never answering it - but only for _TEACHING_CHECK_PATIENCE
+        consecutive non-answers, not forever; see the off_topic_count
+        handling below for why unconditional preservation turned out to
+        be its own real bug.
         """
         pending = self._pending_teaching_check
 
@@ -1682,7 +1697,9 @@ class JarvisBot:
             anonymized_text = self.privacy_manager.anonymize(user_text)
             self.conversation_manager.add_user_message(anonymized_text)
 
-            evaluation = self.llm_client.evaluate_answer(question, concept, user_text, attempts_so_far)
+            evaluation = self.llm_client.evaluate_answer(
+                question, concept, user_text, attempts_so_far, last_bot_message=self._last_bot_response
+            )
             decision = self.tutor_decision_engine.decide(evaluation)
             is_answer_attempt = decision.action != TutorAction.NOT_AN_ANSWER
 
@@ -1734,12 +1751,35 @@ class JarvisBot:
             if not is_answer_attempt:
                 # Leave the SAME pending check in place, attempts
                 # unchanged - the question is still open to come back to,
-                # it just wasn't what this turn was about.
-                self._pending_teaching_check = pending
+                # it just wasn't what this turn was about. But only up to
+                # a point: confirmed live, with no limit here, a student
+                # who'd clearly moved on (guitar, GitHub, plain confused
+                # pushback) kept getting pulled back toward a stale
+                # question for SIX non-answer turns in a row before
+                # giving up on the conversation entirely - evaluate_answer
+                # judges each reply against the pending question in
+                # isolation, so a tangent Jarvis itself started (like
+                # answering a guitar follow-up) can even get misjudged as
+                # "about" the pending question. _TEACHING_CHECK_PATIENCE
+                # consecutive non-answers and the question lets go, same
+                # spirit as "reteach" giving up on re-testing a wrong
+                # answer rather than looping forever - it doesn't need a
+                # separate announcement, the response already spoken
+                # above already engaged with whatever they actually said.
+                off_topic_count = pending.get("off_topic_count", 0) + 1
+                if off_topic_count >= self._TEACHING_CHECK_PATIENCE:
+                    self._pending_teaching_check = None
+                    logger.info(
+                        f"📊 Abandoning pending check on '{concept}' after "
+                        f"{off_topic_count} consecutive non-answers"
+                    )
+                else:
+                    self._pending_teaching_check = {**pending, "off_topic_count": off_topic_count}
             elif decision.action == TutorAction.HINT:
-                # One more attempt at the SAME question.
+                # One more attempt at the SAME question - a real attempt
+                # just happened, so the off-topic streak resets.
                 self._pending_teaching_check = {
-                    "concept": concept, "question": question, "attempts": attempts_so_far + 1,
+                    "concept": concept, "question": question, "attempts": attempts_so_far + 1, "off_topic_count": 0,
                 }
             # "reteach"/"continue"/"challenge" all leave pending state
             # cleared (already done above): reteach stops re-testing this
@@ -1774,7 +1814,7 @@ class JarvisBot:
                     self._speak_fixed_phrase(bridge, continuous_vad, output_device_index)
                     self.conversation_manager.add_assistant_message(bridge)
                     self._pending_teaching_check = {
-                        "concept": review["concept"], "question": review["question"], "attempts": 0,
+                        "concept": review["concept"], "question": review["question"], "attempts": 0, "off_topic_count": 0,
                     }
 
             continuous_vad.reset_idle_timer()
