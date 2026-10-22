@@ -266,7 +266,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.2,
-        max_tokens: int = 800,
+        max_tokens: int = 1200,
         student_context: Optional[str] = None,
         scene_hint: Optional[str] = None,
     ) -> Dict:
@@ -368,7 +368,10 @@ class LLMClient:
     - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, fraction_bar
     - Always include exactly one "set_title" action, speech_id 1, right after the
       initial "clear" - every question gets a title naming the topic.
-    - Use 2-5 speech steps
+    - Use 2-6 speech steps (use the higher end for a concept-explanation
+      question - see REAL-WORLD EXAMPLES below - which needs room for a
+      second example; a specific problem with given numbers to solve
+      usually still only needs 2-4)
     - SPEECH STYLE - this is what actually gets spoken out loud, so write it like
       you're talking TO the student, not narrating a textbook at them:
         * Use contractions - "that's", "we're", "let's", "you'll", "it's" - not
@@ -385,8 +388,31 @@ class LLMClient:
             calculated by multiplying its width by its height."
             Conversational (write like this): "So to find the area, you just
             multiply the width by the height - that's it!"
+        * Warm and detailed, not rushed: this is a K-8 student actually trying
+          to understand something, not a transcript to get through quickly.
+          Take the time to make it genuinely click - friendly, patient,
+          enthusiastic about the topic - rather than racing to the check
+          question. "This does NOT mean longer" below is about sentence
+          count per step, not about shortchanging the explanation itself.
       This does NOT mean longer - still 2-3 sentences per step, just said like a
       person talking, not a page being read aloud.
+    - REAL-WORLD EXAMPLES - for a concept-explanation question ("what is X",
+      "how does X work", "I want to know about X", "tell me about X" - as
+      opposed to a specific problem that already gives numbers to solve):
+        1. Explain the core idea with a real-world example or scenario woven
+           INTO the explanation itself, not an abstract definition on its own -
+           e.g. explain a fraction through "if a pizza has 8 slices and you eat
+           3 of them..." rather than just "a fraction is part of a whole."
+        2. After that, give AT LEAST ONE MORE different real-world example or
+           scenario illustrating the same idea from a different angle, as its
+           own speech step - this reinforces understanding before the
+           check_question, it does not replace it (e.g. if the first example
+           was pizza slices, the second could be sharing a candy bar, or
+           splitting a classroom into groups for a project).
+        3. A specific problem WITH given numbers to solve doesn't need this
+           extra example step - fully solve that problem as the rules below
+           already describe, though a brief real-world framing is still
+           welcome where it fits naturally (e.g. "area" as a room's floor).
     - Every visual must map to a valid speech_id
     - Use integers for coordinates
     - Always include at least one visual action for each speech step after the first

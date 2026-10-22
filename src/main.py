@@ -859,6 +859,52 @@ class JarvisBot:
             self.current_session.record_tool_call(tool_name, args, result)
         return result
 
+    # A general "I want to know about X" / "what is X" / "how does X work"
+    # learning request, for ANY K-8 subject - not just math (see
+    # is_math_query for that one). generate_teaching_plan's system prompt
+    # already supports any subject (math, physics, biology, geography,
+    # history, "anything a student asks about"); without this, a
+    # non-math curiosity question ("I want to know about volcanoes")
+    # fell through to a plain chat answer with no diagram or structured
+    # examples, since is_math_query's keyword list only catches math.
+    # Anchored at the start of the utterance - that's how these
+    # constructions are actually phrased ("what is...", "tell me
+    # about..."), and anchoring avoids matching a "why is" or "how does"
+    # buried mid-sentence in unrelated small talk.
+    #
+    # Each trigger excludes an immediately-following you/your/yourself -
+    # confirmed live this is needed, not theoretical: "what's your name",
+    # "tell me about yourself", "how do you work" all matched before this
+    # exclusion was added, which would have forced an ordinary question
+    # ABOUT Jarvis itself into a teaching-plan turn complete with a
+    # mandatory whiteboard diagram - these are identity small talk, not a
+    # subject lesson request.
+    _CURIOSITY_QUESTION_PATTERN = re.compile(
+        r"^\s*("
+        r"what(?:'s| is| are)(?!\s+(?:you|your|yourself)\b)\b|"
+        r"how (?:does|do|is|are)(?!\s+(?:you|your|yourself)\b)\b|"
+        r"why (?:does|do|is|are)(?!\s+(?:you|your|yourself)\b)\b|"
+        r"tell me about(?!\s+(?:you|your|yourself)\b)\b|"
+        r"(?:can you )?explain(?!\s+(?:you|your|yourself)\b)\b|"
+        r"i(?:'m| am) curious about(?!\s+(?:you|your|yourself)\b)\b|"
+        r"i want to (?:know|learn) about(?!\s+(?:you|your|yourself)\b)\b|"
+        r"teach me about(?!\s+(?:you|your|yourself)\b)\b"
+        r")",
+        re.IGNORECASE,
+    )
+
+    def is_curiosity_question(self, text: str) -> bool:
+        """Detect a general learning/curiosity question on any subject
+        (see _CURIOSITY_QUESTION_PATTERN) that should get the same
+        teaching-plan treatment (explanation + diagram + real-world
+        examples) as a math question does via is_math_query - rather than
+        a plain conversational answer with no structure.
+
+        Doesn't touch `self` (like is_math_query/is_homework_help_request)
+        so it's cheaply testable unbound, without constructing a full
+        JarvisBot."""
+        return bool(JarvisBot._CURIOSITY_QUESTION_PATTERN.search(text.strip()))
+
     def is_homework_help_request(self, text: str) -> bool:
         """Detects a request for help with a PHYSICAL homework paper - see
         the Agent Architecture doc's Homework Help branch (ask to see it,
@@ -983,7 +1029,11 @@ class JarvisBot:
         # open-ended reply ("not really", "I don't know") triggers a
         # proactive suggestion - see tutor/question_engine.py - instead of
         # falling through to a generic chat response with nothing to go on.
-        if self.is_math_query(user_text) or self._EXPLICIT_INTENT_PATTERN.search(user_text):
+        if (
+            self.is_math_query(user_text)
+            or self.is_curiosity_question(user_text)
+            or self._EXPLICIT_INTENT_PATTERN.search(user_text)
+        ):
             self._request_queue.put(user_text)
             return
 
@@ -1626,10 +1676,12 @@ class JarvisBot:
                         self._speaker_busy.clear()
                         continue
 
-                    # Math/geometry questions get a teaching plan (speech
-                    # steps + synchronized whiteboard diagram) instead of a
-                    # plain answer.
-                    if self.is_math_query(user_text):
+                    # Math/geometry questions, and general "I want to know
+                    # about X" curiosity questions on any K-8 subject, get
+                    # a teaching plan (speech steps + synchronized
+                    # whiteboard diagram + real-world examples) instead of
+                    # a plain answer - see is_math_query/is_curiosity_question.
+                    if self.is_math_query(user_text) or self.is_curiosity_question(user_text):
                         self._run_teaching_turn(user_text, continuous_vad, output_device_index)
                         self._speaker_busy.clear()
                         continue
