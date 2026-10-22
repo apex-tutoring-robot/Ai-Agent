@@ -570,6 +570,21 @@ class JarvisBot:
         r"\b(help|learn|teach|practice|work on|curious about|homework|question)\b", re.IGNORECASE
     )
 
+    # Use case 3 of the discovery pivot: a CLEAR decline ("no", "I'm
+    # good", "nothing right now") - as opposed to a merely open-ended
+    # non-answer ("I don't know", "hmm"), which still gets a gentle
+    # proactive suggestion instead (see _handle_warmup_step's discovery
+    # branch). Deliberately checked only AFTER is_math_query/
+    # is_curiosity_question/_EXPLICIT_INTENT_PATTERN at every call site,
+    # so "no, I don't want multiplication, I want fractions instead"
+    # still reaches the real request first, not this.
+    _DISCOVERY_DECLINE_PATTERN = re.compile(
+        r"\b(no|nope|nah|no thanks|not right now|not today|nothing(?: (?:right now|today))?|"
+        r"i'?m good|i'?m okay|i'?m ok|"
+        r"i don'?t (?:need|want) (?:anything|any help|nothing))\b",
+        re.IGNORECASE,
+    )
+
     def _classify_yes_no(self, text: str) -> Optional[bool]:
         """
         Returns True/False for a clear yes/no, None when neither pattern
@@ -1038,6 +1053,13 @@ class JarvisBot:
             self._request_queue.put(user_text)
             return
 
+        # Use case 3: a clear, explicit decline is respected right away -
+        # see _end_conversation_with_goodbye - rather than still pushing
+        # a proactive suggestion on a student who just said no.
+        if self._DISCOVERY_DECLINE_PATTERN.search(user_text):
+            self._end_conversation_with_goodbye(continuous_vad, output_device_index)
+            return
+
         profile_id = self.profile_manager.get_active_profile_id()
         suggestion = self.proactive_question_engine.suggest(profile_id) if profile_id else None
         if suggestion:
@@ -1055,8 +1077,11 @@ class JarvisBot:
         offer into an actual teaching turn on that concept - without this,
         the offer was a dead end: Jarvis would ask "want to work on
         fractions?" and then do nothing with a "yes" beyond letting it hit
-        generic chat. A no (or anything unclear) just lets the reply flow
-        through normal dispatch instead of forcing the suggestion on them.
+        generic chat. A clear decline ends the conversation with a warm
+        goodbye (use case 3 - see _end_conversation_with_goodbye) instead
+        of silently falling through to generic chat with nothing to go
+        on; anything else (unclear, or a pivot to a different request)
+        just lets the reply flow through normal dispatch.
         """
         pending = self._pending_proactive_suggestion
         self._pending_proactive_suggestion = None
@@ -1064,6 +1089,8 @@ class JarvisBot:
         if self._YES_PATTERN.search(user_text):
             concept_readable = pending["concept"].replace("_", " ")
             self._run_teaching_turn(f"Can you help me with {concept_readable}?", continuous_vad, output_device_index)
+        elif self._DISCOVERY_DECLINE_PATTERN.search(user_text):
+            self._end_conversation_with_goodbye(continuous_vad, output_device_index)
         else:
             self._request_queue.put(user_text)
 
@@ -1989,9 +2016,25 @@ class JarvisBot:
         )
         self._speak_system_message(phrase, continuous_vad, output_device_index)
 
+    # Rotated for variety on a casual conversation that never got to any
+    # teaching (no concepts_covered to build a real wrap-up from) - see
+    # _speak_goodbye. Warm and personal rather than purely instructional,
+    # per direct feedback that the goodbye should feel "really friendly
+    # and warm", not just a functional sign-off.
+    _GENERIC_GOODBYE_TEMPLATES = [
+        "Okay, sounds good! It was so nice chatting with you - I'll be right here whenever you want to talk again.",
+        "Alright, no worries at all! I had fun talking with you - just say Hey Jarvis whenever you want to chat.",
+        "Sounds good! Thanks for stopping by - come find me anytime you want to learn something new or just say hi.",
+    ]
+
     def _speak_goodbye(self, continuous_vad, output_device_index: int) -> None:
         """
-        Speak a farewell message when a conversation is about to end.
+        Speak a farewell message when a conversation is about to end -
+        either from the idle-timeout/check-in-grace cycle (see
+        _handle_wake_word), or right away when the student explicitly
+        declines at the discovery pivot (use case 3 - see
+        _end_conversation_with_goodbye). Both paths share this one method
+        so the goodbye is equally warm regardless of why it's happening.
 
         If the conversation included real teaching (current_session.
         concepts_covered is non-empty - see _run_teaching_turn) and no
@@ -1999,9 +2042,9 @@ class JarvisBot:
         wrap-up naming what was covered and one real takeaway, not a
         generic farewell - see LLMClient.generate_session_wrapup(), which
         already fails toward a simple templated summary on its own, so no
-        extra fallback handling is needed here. Falls back to the plain
-        generic goodbye for a casual conversation that never got to any
-        math.
+        extra fallback handling is needed here. Falls back to a warm,
+        rotated generic goodbye for a casual conversation that never got
+        to any teaching.
         """
         override = os.getenv('GOODBYE_MESSAGE')
         concepts = self.current_session.concepts_covered if self.current_session else []
@@ -2011,9 +2054,30 @@ class JarvisBot:
         elif concepts:
             phrase = self.llm_client.generate_session_wrapup(concepts)
         else:
-            phrase = "Okay, talk to you later! Just say Hey Jarvis whenever you want to continue."
+            phrase = random.choice(self._GENERIC_GOODBYE_TEMPLATES)
 
+        if self.ui_signals:
+            self.ui_signals.set_expression.emit(Expression.FRIENDLY.value)
         self._speak_system_message(phrase, continuous_vad, output_device_index)
+
+    def _end_conversation_with_goodbye(self, continuous_vad, output_device_index: int) -> None:
+        """
+        Use case 3 of the discovery pivot: the student explicitly doesn't
+        want anything right now ("no", "I'm good", declining a proactive
+        suggestion). Rather than sitting through the idle-timeout/
+        check-in-grace cycle in silence before _handle_wake_word's own
+        loop would eventually say goodbye, end the conversation right
+        away with that exact same warm goodbye (see _speak_goodbye) -
+        respecting what the student just said instead of waiting it out.
+
+        Clearing _conversation_active here is the same mechanism
+        _handle_wake_word's own idle-timeout path uses to end a
+        conversation - both _speaker_loop (this call's own thread) and
+        the main conversation-loop thread poll it and unwind through
+        their normal teardown/wake-word-restart on their own.
+        """
+        self._speak_goodbye(continuous_vad, output_device_index)
+        self._conversation_active.clear()
 
     def _speak_standalone(self, phrase: str, output_device_index: int) -> None:
         """

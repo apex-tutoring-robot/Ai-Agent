@@ -824,6 +824,9 @@ Write a short, warm spoken goodbye for the student (2-3 sentences):
 - State ONE genuine "big idea" takeaway - something true and specific about what was learned, not a generic platitude
 - End with encouragement and an invitation to come back
 - No formatting, no lists - this is spoken out loud
+- Really friendly and warm, like a parent telling their kid "I'm proud of
+  you" before they head off - not a flat status report. Use contractions
+  ("that's", "you're", "we'll") and genuine warmth, not a formal recap.
 """
                 }
             ]
