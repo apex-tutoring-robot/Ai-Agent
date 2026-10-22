@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer
-from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QFontMetrics, QPolygonF, QColor, QPainterPath
+from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QFontMetrics, QPolygonF, QColor, QPainterPath, QPixmap
 from PyQt5.QtWidgets import QGraphicsObject
 
 from visuals.fraction_bar import build_fraction_bar_layout, FractionBarLayout
@@ -119,6 +119,16 @@ _ICON_DRAW_SECONDS = 1.1     # time to sketch the icon in, stroke by stroke
 _SPARKLE_COLOR = QColor(255, 195, 40)
 _ARRIVAL_GLOW_SECONDS = 1.4  # how long the burst at the destination lingers
 _ICON_ANIM_SECONDS = 2.2     # default move/grow duration, once the sketch is done
+
+# Real-world-example photo frame (see visuals.example_image_library) - a
+# plain white card with a thin border, like a printed photo clipped to
+# the board, deliberately distinct from both the colored geometry shapes
+# and the pencil-sketch icons since it's showing something categorically
+# different: an actual photo, not a drawing.
+_PHOTO_FRAME_COLOR = QColor(255, 255, 255)
+_PHOTO_BORDER_COLOR = QColor(190, 190, 185)
+_PHOTO_FRAME_PADDING = 10
+_PHOTO_FADE_SECONDS = 0.6
 
 # Fraction bar - see visuals.fraction_bar and module docstring. Reuses the
 # same blue outline / warm fill used for the other filled shapes, so a
@@ -202,7 +212,24 @@ class _FractionBar:
     start_time: float
 
 
+@dataclass
+class _Photo:
+    path: str              # absolute file path - resolved by JarvisBot from an LLM-chosen
+                            # tag (see visuals.example_image_library), never from the LLM directly
+    x: float; y: float     # top-left of the frame (the photo itself is centered/scaled within it)
+    w: float; h: float     # frame size - the photo is scaled to fit inside, aspect preserved
+    start_time: float
+
+
 class TeachingCanvas(QGraphicsObject):
+    # Loaded once per path and reused across every turn/photo instance -
+    # the same handful of library images get shown repeatedly, and
+    # decoding a JPEG from disk on every one of this widget's 60fps
+    # paint() calls would be wasteful. Class-level since the images
+    # themselves never change at runtime (a fixed local library, not
+    # user content), so sharing the cache across instances is safe.
+    _pixmap_cache: dict = {}
+
     def __init__(self):
         super().__init__()
         self.lines: List[_Line] = []
@@ -215,6 +242,7 @@ class TeachingCanvas(QGraphicsObject):
         self.title_text: str = ""
         self.icons: List[_Icon] = []
         self.fraction_bar_items: List[_FractionBar] = []
+        self.photo_items: List[_Photo] = []
 
         # Laser-pointer dot state - see module docstring and _retarget_laser.
         self._laser_visible = False
@@ -257,6 +285,8 @@ class TeachingCanvas(QGraphicsObject):
             self._paint_icon(painter, item, now)
         for item in self.fraction_bar_items:
             self._paint_fraction_bar(painter, item, now)
+        for item in self.photo_items:
+            self._paint_photo(painter, item, now)
         for item in self.text_items:
             self._paint_text(painter, item, now)
         for item in self.underline_items:
@@ -826,6 +856,41 @@ class TeachingCanvas(QGraphicsObject):
 
         painter.setOpacity(1.0)
 
+    def _paint_photo(self, painter: QPainter, item: _Photo, now: float) -> None:
+        """A real-world-example photo, fading in as a flat opacity ramp
+        (not the stroke-by-stroke sketch reveal used for lines/shapes/
+        icons above - a photo can't be "sketched in" the same way, and
+        trying would look wrong) inside a plain white card with a thin
+        border, like a printed photo clipped to the board."""
+        alpha = self._progress(item.start_time, now, duration=_PHOTO_FADE_SECONDS)
+        if alpha <= 0:
+            return
+
+        pixmap = self._load_pixmap(item.path)
+        if pixmap is None or pixmap.isNull():
+            return
+
+        painter.save()
+        painter.setOpacity(alpha)
+
+        frame_rect = QRectF(item.x, item.y, item.w, item.h)
+        painter.setPen(QPen(_PHOTO_BORDER_COLOR, 1.5))
+        painter.setBrush(QBrush(_PHOTO_FRAME_COLOR))
+        painter.drawRect(frame_rect)
+
+        inner = QRectF(
+            item.x + _PHOTO_FRAME_PADDING, item.y + _PHOTO_FRAME_PADDING,
+            item.w - 2 * _PHOTO_FRAME_PADDING, item.h - 2 * _PHOTO_FRAME_PADDING,
+        )
+        scaled = pixmap.scaled(
+            int(inner.width()), int(inner.height()), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        draw_x = inner.x() + (inner.width() - scaled.width()) / 2
+        draw_y = inner.y() + (inner.height() - scaled.height()) / 2
+        painter.drawPixmap(int(draw_x), int(draw_y), scaled)
+
+        painter.restore()
+
     def _paint_text(self, painter: QPainter, item: _Text, now: float) -> None:
         # Typewriter reveal - duration scales with length so a short
         # label and a long equation both feel like they're being written
@@ -912,6 +977,7 @@ class TeachingCanvas(QGraphicsObject):
         self.underline_items = []
         self.icons = []
         self.fraction_bar_items = []
+        self.photo_items = []
         self._hide_laser()
         self.update()
 
@@ -974,6 +1040,27 @@ class TeachingCanvas(QGraphicsObject):
             return
         self.fraction_bar_items.append(_FractionBar(layout, x, y, time.monotonic()))
         self.update()
+
+    def add_photo(self, path, x, y, w, h):
+        """A real-world-example photo (see JarvisBot._run_teaching_turn and
+        visuals.example_image_library) - `path` is an absolute file path
+        already resolved from an LLM-chosen tag, never a tag or URL
+        itself. Silently skips a path that doesn't load (missing file,
+        corrupt image), same defensive pattern as add_fraction_bar - a
+        bad path should never crash the turn, just leave that step
+        without a photo."""
+        pixmap = self._load_pixmap(path)
+        if pixmap is None or pixmap.isNull():
+            logger.warning(f"Skipping show_photo action - couldn't load image: {path}")
+            return
+        self.photo_items.append(_Photo(path, x, y, w, h, time.monotonic()))
+        self.update()
+
+    @classmethod
+    def _load_pixmap(cls, path: str):
+        if path not in cls._pixmap_cache:
+            cls._pixmap_cache[path] = QPixmap(path)
+        return cls._pixmap_cache[path]
 
     def animate_icon(self, icon_id, animation, duration, to_x=None, to_scale=None):
         """Moves (animation="move", varies x) or grows (animation="grow",
@@ -1082,6 +1169,13 @@ class TeachingCanvas(QGraphicsObject):
                 self.add_fraction_bar(
                     action.get("fractions", []), action.get("width", 600), action.get("bar_height", 50),
                     action.get("x", 100), action.get("y", 200)
+                )
+
+            elif action_type == "show_photo":
+                self.add_photo(
+                    action.get("path", ""),
+                    action.get("x", 480), action.get("y", 150),
+                    action.get("w", 260), action.get("h", 260),
                 )
 
         if text_positions:

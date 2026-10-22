@@ -20,6 +20,14 @@ from PyQt5.QtWidgets import QApplication
 _app = QApplication.instance() or QApplication([])
 
 from visuals.ui.teaching_canvas import TeachingCanvas, _SHAPE_ANIM_SECONDS
+from visuals.example_image_library import image_path as _example_image_path
+
+
+def _real_example_image_path() -> str:
+    """A guaranteed-valid local image path for show_photo tests - any
+    tag from the real library works equally well here, this test suite
+    doesn't care which."""
+    return _example_image_path("pizza")
 
 
 class TestProgress:
@@ -198,6 +206,30 @@ class TestHandleDrawActions:
         canvas.add_icon("car1", "car", 560, 360)
         canvas.handle_draw_actions([{"action": "clear"}])
         assert canvas.icons == []
+
+    def test_show_photo_action_adds_a_photo(self):
+        canvas = TeachingCanvas()
+        path = _real_example_image_path()
+        canvas.handle_draw_actions([
+            {"action": "show_photo", "path": path, "x": 480, "y": 150, "w": 260, "h": 260}
+        ])
+        photo = canvas.photo_items[0]
+        assert (photo.path, photo.x, photo.y, photo.w, photo.h) == (path, 480, 150, 260, 260)
+
+    def test_show_photo_with_an_unloadable_path_is_a_no_op(self):
+        # A missing/corrupt image file must never crash the turn - same
+        # defensive pattern as add_fraction_bar's invalid-spec handling.
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([
+            {"action": "show_photo", "path": "/no/such/file.jpg", "x": 0, "y": 0, "w": 10, "h": 10}
+        ])
+        assert canvas.photo_items == []
+
+    def test_clear_action_also_clears_photos(self):
+        canvas = TeachingCanvas()
+        canvas.add_photo(_real_example_image_path(), 480, 150, 260, 260)
+        canvas.handle_draw_actions([{"action": "clear"}])
+        assert canvas.photo_items == []
 
 
 class TestIconAnimationState:

@@ -12,6 +12,7 @@ from typing import Callable, Iterator, List, Dict, Optional
 from openai import AzureOpenAI
 from dotenv import load_dotenv
 from azure_services.local_llm_client import LocalLLMClient
+from visuals.example_image_library import available_tags as available_example_image_tags
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -298,7 +299,7 @@ class LLMClient:
     {
       "concept": "short_snake_case_identifier",
       "speech": [
-        {"id": 1, "text": "string"}
+        {"id": 1, "text": "string", "image_tag": "string from the list below, or null"}
       ],
       "check_question": "string or null",
       "visuals": [
@@ -413,6 +414,18 @@ class LLMClient:
            extra example step - fully solve that problem as the rules below
            already describe, though a brief real-world framing is still
            welcome where it fits naturally (e.g. "area" as a room's floor).
+    - EXAMPLE PHOTOS: a speech step's "image_tag" field shows a real photo
+      instead of a sketch for that step's real-world example - see the
+      "AVAILABLE EXAMPLE PHOTOS" list appended at the end of this prompt.
+      Only use a tag from that EXACT list, and only when it's a genuinely
+      strong match for what that step's example is actually about (a step
+      whose example is "a pizza cut into slices" -> image_tag "pizza"; a
+      step about something not in the list, or only a loose/generic match
+      -> image_tag null - never invent a tag that isn't in the list).
+      When you DO use an image_tag, don't also draw a redundant diagram/
+      shape for that same step - the photo IS the illustration - but
+      still include the usual equations/draw_text if that step is also
+      solving a specific problem.
     - Every visual must map to a valid speech_id
     - Use integers for coordinates
     - Always include at least one visual action for each speech step after the first
@@ -564,6 +577,9 @@ class LLMClient:
       label, never both
     """
             system_content = self._with_student_context(plan_system_prompt, student_context)
+            image_tags = available_example_image_tags()
+            if image_tags:
+                system_content = f"{system_content}\n\nAVAILABLE EXAMPLE PHOTOS: {', '.join(image_tags)}"
             if scene_hint:
                 system_content = f"{system_content}\n\nSCENE NOTE: {scene_hint}"
             full_messages = [{"role": "system", "content": system_content}] + messages

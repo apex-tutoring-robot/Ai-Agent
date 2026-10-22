@@ -50,6 +50,7 @@ from expression.controller import Expression, ExpressionController
 from visuals.ui.ui_signals import UISignals
 from visuals.ui.main_window import MainWindow
 from visuals.scene_planner import ScenePlanner
+from visuals.example_image_library import image_path as example_image_path
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -1293,6 +1294,27 @@ class JarvisBot:
                         "speech_id": first_speech_id, "action": "animate_icon",
                         "id": icon_id, "animation": "grow", "to_scale": 1.0, "duration": 2.2,
                     })
+
+            # Real-world-example photos (see visuals.example_image_library
+            # and use case 1's "show real photos for real-world examples"
+            # ask) - a speech step's own "image_tag" field (set by
+            # generate_teaching_plan's prompt, chosen from the exact tag
+            # list the library offers) is resolved to an actual file HERE,
+            # not trusted as a path - the LLM only ever sees tag names.
+            # Appended the same way the scene icon actions above are; an
+            # unrecognized/missing tag just means no photo for that step,
+            # same as today.
+            for step in plan.get("speech", []):
+                image_tag = step.get("image_tag")
+                if not image_tag:
+                    continue
+                photo_path = example_image_path(image_tag)
+                if not photo_path:
+                    continue
+                visuals.append({
+                    "speech_id": step.get("id"), "action": "show_photo",
+                    "path": photo_path, "x": 480, "y": 150, "w": 260, "h": 260,
+                })
 
             fast_blocked = False
             for step in plan.get("speech", []):
