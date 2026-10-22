@@ -1232,6 +1232,20 @@ class JarvisBot:
         ]
         return actions, phrase
 
+    # Rotated for variety - spoken immediately at the start of a teaching
+    # turn, before generate_teaching_plan() even starts (see
+    # _run_teaching_turn). Deliberately "thinking" phrasing, not content
+    # acknowledgment ("Good question!") - the LLM's own first speech step
+    # already tends to open that way per its SPEECH STYLE guidance, so
+    # this would otherwise sound like two separate acknowledgments stacked
+    # back to back once the real explanation starts.
+    _TEACHING_TURN_FILLERS = [
+        "Hmm, let me think about that for a second...",
+        "Okay, give me just a moment to work that out...",
+        "Let me put that together for you...",
+        "One sec, let me think this through...",
+    ]
+
     def _run_teaching_turn(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
         Handle a math/geometry question: generate a teaching plan (speech
@@ -1241,6 +1255,22 @@ class JarvisBot:
         is synthesized/played, using the same streaming TTS pipeline as
         normal turns (one text chunk per step, since each step's text is
         already complete - not token-by-token like a live LLM stream).
+
+        generate_teaching_plan() is a single blocking, NON-streaming call -
+        the whole JSON plan has to come back before anything can be
+        spoken, unlike a normal turn's token-by-token LLM->TTS streaming -
+        and can occasionally take 20-30+ seconds. Confirmed live, and
+        confirmed as the cause of a real repeated-question moment in
+        production logs: a student asked a curiosity question, heard
+        nothing for ~17s, assumed Jarvis hadn't heard them, and asked
+        again. Two fixes for that, both below: an immediate spoken filler
+        so the wait never reads as silence, and un-muting the STT gate
+        for the wait itself (re-muting once real explanation audio
+        starts) - the same "only gate right before real audio actually
+        plays" principle the normal turn path already uses (see its own
+        ECHO GUARD comment), so anything the student says during a slow
+        generation is heard and queued normally instead of needing to
+        fight through the barge-in gate or being silently dropped as echo.
         """
         self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
         if self.ui_signals:
@@ -1257,6 +1287,24 @@ class JarvisBot:
             anonymized_text = self.privacy_manager.anonymize(user_text)
             self.conversation_manager.add_user_message(anonymized_text)
             messages = self.conversation_manager.get_messages()
+
+            filler = random.choice(self._TEACHING_TURN_FILLERS)
+            for audio_chunk in self.tts_client.synthesize_stream(iter([filler])):
+                if self.audio_player._is_playing:
+                    try:
+                        self.audio_player.queue_audio(audio_chunk)
+                    except RuntimeError as e:
+                        logger.warning(f"⚠️ Filler playback queueing failed (likely stopped): {e}")
+                        break
+                else:
+                    break
+
+            # Un-mute for the generation wait itself - only the filler has
+            # actually played so far, so there's nothing left to echo-guard
+            # against until the real explanation starts (re-muted below,
+            # right before that first real audio chunk is queued).
+            self._bot_is_speaking = False
+            continuous_vad.set_playback_state(False)
 
             # Decided up front (not from the LLM's own output) so a hint can
             # be passed INTO generate_teaching_plan telling it to skip its
@@ -1286,6 +1334,11 @@ class JarvisBot:
             visuals = plan.get("visuals", [])
             concept = plan.get("concept") or "general_math"
             check_question = plan.get("check_question")
+
+            # Re-mute now that real explanation audio is about to start
+            # playing again - see the un-mute right after the filler above.
+            self._bot_is_speaking = True
+            continuous_vad.set_playback_state(True)
 
             # Sketches and animates the actual object the problem describes
             # (a car driving, a person walking, a plant growing) rather than
@@ -1475,6 +1528,12 @@ class JarvisBot:
             # Fall back to a spoken apology rather than leaving the student
             # in silence if the LLM didn't return a valid teaching plan.
             try:
+                # Re-mute in case this exception hit during the un-muted
+                # generation wait (see above) - real audio (the apology)
+                # is about to play, so it needs the same echo-guarding as
+                # any other bot speech, regardless of which phase failed.
+                self._bot_is_speaking = True
+                continuous_vad.set_playback_state(True)
                 apology = "Sorry, I had trouble working that one out. Could you try asking again?"
                 for audio_chunk in self.tts_client.synthesize_stream(iter([apology])):
                     if self.audio_player._is_playing:
