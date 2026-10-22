@@ -84,7 +84,27 @@ class WakeWordDetector:
         
         logger.info(f"Wake word detector initialized: model='{self.model_name or 'all'}', "
                    f"threshold={self.threshold}, vad={self.vad_threshold}, speex={self.enable_speex}")
-    
+
+    @staticmethod
+    def _run_callback(callback: Callable[[], None]) -> None:
+        """
+        Runs the wake-word-detected callback (JarvisBot._handle_wake_word -
+        an entire conversation's worth of handling) with the SAME
+        "log and swallow, never let it escape" protection on_ready already
+        gets above - this call site had none before, confirmed live as a
+        real failure mode: an uncaught exception anywhere in a
+        conversation's handling (or its own cleanup/restart logic) used to
+        propagate straight out of this listen loop and kill the whole
+        detection thread silently - the app kept running (Qt's own main
+        thread is untouched), but nothing was listening for "Hey Jarvis"
+        ever again, with no error visible unless someone was watching the
+        console at that exact moment.
+        """
+        try:
+            callback()
+        except Exception as e:
+            logger.error(f"Wake word callback failed (continuing to listen anyway): {e}")
+
     def start(self, callback: Callable[[], None], on_ready: Optional[Callable[[], None]] = None) -> None:
         """
         Start listening for wake word.
@@ -254,7 +274,7 @@ class WakeWordDetector:
                             if current_time - self.last_detection_time >= cooldown_period:
                                 logger.info(f"✓ Wake word detected! (model: {self.model_name}, score: {score:.3f})")
                                 self.last_detection_time = current_time
-                                callback()
+                                self._run_callback(callback)
                 else:
                     # Check all models if no specific model name
                     for model_name, score in predictions.items():
@@ -263,7 +283,7 @@ class WakeWordDetector:
                             if current_time - self.last_detection_time >= cooldown_period:
                                 logger.info(f"✓ Wake word detected! (model: {model_name}, score: {score:.3f})")
                                 self.last_detection_time = current_time
-                                callback()
+                                self._run_callback(callback)
                                 break
         
         except Exception as e:

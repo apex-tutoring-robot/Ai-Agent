@@ -2404,11 +2404,26 @@ class JarvisBot:
             except:
                 pass
             
-            # 4. Always restart wake word detection
+            # 4. Always restart wake word detection - each step isolated
+            # in its own try/except. Confirmed live as a real gap: if
+            # _restart_wake_word() threw, _interaction_lock.release()
+            # below it never ran either, permanently holding the lock and
+            # blocking every future wake-word detection too - not just
+            # this one failing to restart. wake_word.py's own listen loop
+            # now also never lets an exception from this whole method
+            # escape and kill the detection thread outright (see
+            # WakeWordDetector._run_callback), but that alone doesn't
+            # guarantee detection actually resumes - this does.
             logger.info("▶️  Resuming wake word detection...")
             self._standby_since = time.time()
-            self._restart_wake_word()
-            self._interaction_lock.release()
+            try:
+                self._restart_wake_word()
+            except Exception as e:
+                logger.error(f"Failed to restart wake word detection: {e}")
+            try:
+                self._interaction_lock.release()
+            except Exception as e:
+                logger.error(f"Failed to release interaction lock: {e}")
     
     def _process_turn(self, audio_data: bytes, continuous_vad: ContinuousVADCapture) -> bool:
         """
