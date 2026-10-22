@@ -141,7 +141,24 @@ class ContinuousVADCapture:
         self._is_bot_playing = False           # Set by main.py via set_playback_state()
         self._barge_in_event = None            # threading.Event from JarvisBot (set on barge-in)
         self._barge_in_energy_threshold = int(os.getenv('BARGE_IN_ENERGY_THRESHOLD', '1500'))
-        self._barge_in_consecutive_needed = int(os.getenv('BARGE_IN_CHUNKS_NEEDED', '3'))
+        # Lowered from 3 - confirmed live as a real source of lost words:
+        # every chunk spent confirming a barge-in is a chunk of SILENCE
+        # fed to STT instead of the student's real voice (see
+        # always_streaming's mute-the-pipe), so a shorter confirmation
+        # window means less of the interruption's very start is lost
+        # before the gate opens. The pre-roll buffer below (see
+        # always_streaming) recovers what's still lost during that
+        # window regardless, so this is a latency win on top of that,
+        # not the only thing standing between "lost" and "caught."
+        self._barge_in_consecutive_needed = int(os.getenv('BARGE_IN_CHUNKS_NEEDED', '2'))
+        # How much REAL audio to keep buffered, continuously, even while
+        # muted - replayed into STT the instant a barge-in is confirmed
+        # (see always_streaming) so the student's interruption is heard
+        # from where they actually started talking, not from whenever
+        # the gate happened to finish confirming. 500ms comfortably
+        # covers a soft-onset first syllable plus the ~40-60ms
+        # confirmation window itself.
+        self._barge_in_pre_roll_chunks = max(1, int(os.getenv('BARGE_IN_PRE_ROLL_MS', '500')) // self.frame_duration_ms)
         # AEC Ring Buffer (Hardware-Aligned Reference Audio)
         # 1-second circular buffer for reference audio
         self.ref_ring_buffer = np.zeros(self.sample_rate, dtype=np.int16)
@@ -611,18 +628,30 @@ class ContinuousVADCapture:
         Only switches to real mic audio when a barge-in is detected -
         both loud AND speech-shaped for N consecutive chunks after AEC
         processing, see _is_barge_in_trigger_chunk.
+
+        PRE-ROLL: every chunk's real (post-AEC) audio is kept in a short
+        rolling buffer regardless of mute state. The instant a barge-in
+        is confirmed, that buffer is replayed into STT before switching
+        to live chunks - without this, whatever the student said during
+        the confirmation window (and the often-quieter/less-speech-shaped
+        first instant of their interruption before that) was never sent
+        to STT at all, not just discarded after transcription - the very
+        start of what they said was unrecoverably gone. Confirmed live
+        as a real complaint: the listener was missing the beginning of
+        interruptions.
         """
         self.ensure_stream_open()
         self._is_monitoring = True
         self.last_speech_time = time.time()
-        
+
         # Silence chunk for muting (same size as one frame)
         silence_chunk = b'\x00' * (self.chunk_size * 2)  # int16 = 2 bytes per sample
-        
+
         # Barge-in detection state
         barge_in_consecutive = 0
         barge_in_active = False  # Once true, stays true until playback ends
-        
+        pre_roll_buffer = deque(maxlen=self._barge_in_pre_roll_chunks)
+
         logger.info("📡 Continuous audio streaming started")
         
         while self._is_monitoring:
@@ -718,6 +747,13 @@ class ContinuousVADCapture:
                     except Exception as e:
                         logger.error(f"AEC Error: {e}")
 
+                # Keep a short rolling buffer of REAL (post-AEC) audio at
+                # all times, muted or not - see PRE-ROLL in this method's
+                # docstring. Appended before the mute decision below so a
+                # chunk that triggers the gate this same iteration is
+                # already in the buffer when it gets flushed.
+                pre_roll_buffer.append(audio_chunk)
+
                 # ════════════════════════════════════════════════════════
                 # MUTE-THE-PIPE: Decide whether to yield real audio or silence
                 # ════════════════════════════════════════════════════════
@@ -731,14 +767,26 @@ class ContinuousVADCapture:
                         barge_in_consecutive += 1
                     else:
                         barge_in_consecutive = 0
-                    
+
                     if barge_in_consecutive >= self._barge_in_consecutive_needed and not barge_in_active:
                         # BARGE-IN DETECTED! Open the gate.
                         barge_in_active = True
-                        logger.info(f"🎤🔥 BARGE-IN detected! RMS={rms:.0f} for {barge_in_consecutive} chunks — opening STT gate")
+                        logger.info(
+                            f"🎤🔥 BARGE-IN detected! RMS={rms:.0f} for {barge_in_consecutive} chunks — "
+                            f"opening STT gate, replaying {len(pre_roll_buffer)} pre-roll chunks"
+                        )
                         if self._barge_in_event:
                             self._barge_in_event.set()
-                    
+                        # Catch STT up on the audio it missed while the gate
+                        # was confirming - this chunk (already appended
+                        # above) is the newest entry in the buffer, so it
+                        # gets yielded here as part of the replay; skip the
+                        # duplicate yield below for this same iteration.
+                        for buffered_chunk in pre_roll_buffer:
+                            yield buffered_chunk
+                        pre_roll_buffer.clear()
+                        continue
+
                     if barge_in_active:
                         # Gate is open — feed real audio to STT
                         yield audio_chunk
