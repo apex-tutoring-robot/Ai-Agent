@@ -1325,6 +1325,15 @@ class JarvisBot:
         LLMClient.evaluate_answer(); self.tutor_decision_engine turns that
         into a concrete TutorDecision (see tutor/decision_engine.py) -
         this method applies it and updates persistent mastery tracking.
+
+        Regression guard: before evaluate_answer() gained "is_answer_attempt",
+        every utterance here was graded against the pending question no
+        matter what it actually was - confirmed live with "OK, uh, I'm
+        done." (trying to end the conversation) being marked a wrong
+        fraction answer. TutorAction.NOT_AN_ANSWER is that escape hatch:
+        it skips grading/mastery/attempt-count entirely and restores the
+        SAME pending check unchanged, so the question stays open instead
+        of being silently consumed by a turn that was never answering it.
         """
         pending = self._pending_teaching_check
 
@@ -1347,25 +1356,31 @@ class JarvisBot:
 
             evaluation = self.llm_client.evaluate_answer(question, concept, user_text, attempts_so_far)
             decision = self.tutor_decision_engine.decide(evaluation)
+            is_answer_attempt = decision.action != TutorAction.NOT_AN_ANSWER
 
             profile_id = self.profile_manager.get_active_profile_id()
-            if profile_id:
-                self.profile_manager.record_attempt(
-                    profile_id, concept, correct=decision.is_correct, used_hint=decision.used_hint, question=question
+            if is_answer_attempt:
+                if profile_id:
+                    self.profile_manager.record_attempt(
+                        profile_id, concept, correct=decision.is_correct, used_hint=decision.used_hint, question=question
+                    )
+                    self.profile_manager.record_learning_event(
+                        profile_id,
+                        session_id=self.current_session.session_id if self.current_session else None,
+                        concept=concept,
+                        result=evaluation.get("correctness"),
+                        action=decision.action.value,
+                        attempt_number=attempts_so_far + 1,
+                        misconception=evaluation.get("misconception"),
+                    )
+                logger.info(
+                    f"📊 Answer evaluation for '{concept}': {evaluation.get('correctness')} -> {decision.action.value}"
                 )
-                self.profile_manager.record_learning_event(
-                    profile_id,
-                    session_id=self.current_session.session_id if self.current_session else None,
-                    concept=concept,
-                    result=evaluation.get("correctness"),
-                    action=decision.action.value,
-                    attempt_number=attempts_so_far + 1,
-                    misconception=evaluation.get("misconception"),
-                )
-
-            logger.info(
-                f"📊 Answer evaluation for '{concept}': {evaluation.get('correctness')} -> {decision.action.value}"
-            )
+            else:
+                # Not actually an attempt at the question (e.g. trying to
+                # end the conversation, an unrelated question) - don't
+                # grade it, don't burn an attempt, don't touch mastery.
+                logger.info(f"📊 '{user_text[:60]}' wasn't an answer attempt - leaving the question open")
 
             signals = self.interaction_signal_engine.analyze(user_text, attempts_so_far)
 
@@ -1388,7 +1403,12 @@ class JarvisBot:
             self.conversation_manager.add_assistant_message(response_text)
             self._last_bot_response = response_text
 
-            if decision.action == TutorAction.HINT:
+            if not is_answer_attempt:
+                # Leave the SAME pending check in place, attempts
+                # unchanged - the question is still open to come back to,
+                # it just wasn't what this turn was about.
+                self._pending_teaching_check = pending
+            elif decision.action == TutorAction.HINT:
                 # One more attempt at the SAME question.
                 self._pending_teaching_check = {
                     "concept": concept, "question": question, "attempts": attempts_so_far + 1,
@@ -1819,6 +1839,7 @@ class JarvisBot:
 
             self.audio_player.stop_streaming(immediate=False)
             self._last_bot_response = phrase
+            self.conversation_manager.add_assistant_message(phrase)
         except Exception as e:
             logger.error(f"Error speaking system message: {e}")
         finally:

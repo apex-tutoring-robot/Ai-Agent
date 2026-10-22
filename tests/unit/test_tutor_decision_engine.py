@@ -37,6 +37,17 @@ class TestDecide:
         assert decision.is_correct is False
         assert decision.used_hint is True
 
+    def test_not_an_answer_is_not_correct_and_no_hint_used(self):
+        # See LLMClient.evaluate_answer's is_answer_attempt field and
+        # main.py's _handle_teaching_answer - the student wasn't actually
+        # attempting the question (e.g. "I'm done", an unrelated
+        # question), so this must not look like a graded wrong attempt.
+        engine = TutorDecisionEngine()
+        decision = engine.decide({"recommended_action": "not_an_answer", "response": "Okay, no problem!"})
+        assert decision.action == TutorAction.NOT_AN_ANSWER
+        assert decision.is_correct is False
+        assert decision.used_hint is False
+
     def test_unrecognized_action_falls_back_to_hint(self):
         engine = TutorDecisionEngine()
         decision = engine.decide({"recommended_action": "explode", "response": "..."})

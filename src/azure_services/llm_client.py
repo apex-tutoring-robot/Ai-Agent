@@ -616,28 +616,67 @@ Question asked: "{question}"
 Concept being checked: {concept}
 This is the student's attempt number {attempts_so_far + 1} at this question.
 
-Return ONLY valid JSON, no markdown, no explanation outside the JSON.
+Return ONLY valid JSON, no markdown, no explanation outside the JSON. This
+applies no matter what the student said - even if they're ending the
+conversation or asking something unrelated, your ENTIRE reply must still be
+the single JSON object below, with your natural reply inside its
+"response" field. Never reply with plain conversational text by itself.
 
 Schema:
 {{
+  "is_answer_attempt": true | false,
   "correct_answer": "work out the actual correct answer to the question yourself, step by step, BEFORE judging the student - this catches cases where a reflexive judgment would be wrong",
-  "correctness": "correct" | "partial" | "incorrect",
+  "correctness": "correct" | "partial" | "incorrect" | null,
   "misconception": "short description of the specific misunderstanding, or null if none",
-  "recommended_action": "continue" | "hint" | "reteach" | "challenge",
+  "recommended_action": "continue" | "hint" | "reteach" | "challenge" | "not_an_answer",
   "response": "the exact words to say to the student next, 1-2 short sentences, warm and age-appropriate"
 }}
 
-Fill in "correct_answer" FIRST, by actually solving the question yourself -
-only then compare the student's answer against it for "correctness". Do not
-judge correctness from a first impression before you've worked it out.
+First decide "is_answer_attempt". The test is narrow: is the student
+trying to leave the question/conversation, or talking about something
+else entirely, instead of engaging with the question at all? That is the
+ONLY case for "false". Saying "I don't know" / "I'm not sure" / "no idea"
+is the student engaging with THIS question - just reporting they can't
+solve it - so that is "true", not "false".
 
-Rules for recommended_action:
+Worked examples (follow these exactly):
+- "3/8"                              -> true  (names a value)
+- "um, maybe a half?"                -> true  (names a value, even hedging)
+- "is it 3?"                         -> true  (names a value)
+- "I don't know"                     -> true  (engaging with the question, just stuck - grade "incorrect", action "hint")
+- "I'm not sure"                     -> true  (same as above)
+- "no idea"                          -> true  (same as above)
+- "I'm done" / "that's okay, bye"    -> false (leaving the conversation, not the question)
+- "can we talk about something else" -> false (changing the subject entirely)
+- "what's for lunch today"           -> false (unrelated to the question)
+
+If genuinely torn between true and false for a reply that isn't in the
+examples above, choose true and grade it normally - "false" is reserved
+for replies that are not a response to the question in any way at all.
+
+If is_answer_attempt is false: set "correctness" to null, "recommended_action"
+to "not_an_answer", "misconception" to null, and "correct_answer" to null -
+do not judge or grade anything. "response" should address what they
+actually said directly and naturally (acknowledge ending the conversation,
+answer their unrelated question briefly, etc.) - do not mention the pending
+question, do not evaluate it as right or wrong, and do not re-ask it
+yourself (the question stays available to come back to on its own). This
+"response" still goes inside the JSON object exactly like every other case.
+
+If is_answer_attempt is true, fill in "correct_answer" FIRST, by actually
+solving the question yourself - only then compare the student's answer
+against it for "correctness". Do not judge correctness from a first
+impression before you've worked it out.
+
+Rules for recommended_action (only when is_answer_attempt is true):
 - "continue": the answer was correct - move on, maybe offer a harder challenge
 - "hint": the answer was incorrect or partial and this is the student's first attempt - give one small hint, don't re-explain everything
 - "reteach": the answer was incorrect AND this is the student's second or later attempt at this question - stop asking, explain the concept a different way instead
 - "challenge": the answer was correct and shows strong understanding - offer something harder
 
 Rules for "response":
+- If recommended_action is "not_an_answer": see above - respond directly and
+  naturally to what they actually said, nothing about the question.
 - If recommended_action is "hint": give ONE small, specific hint related to their
   specific mistake - do not just repeat the question or give away the answer.
 - If recommended_action is "reteach": briefly explain the concept a different way
