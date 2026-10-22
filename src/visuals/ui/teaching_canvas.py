@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer
-from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QFontMetrics, QPolygonF, QColor, QPainterPath
+from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QFontMetrics, QPolygonF, QColor, QPainterPath, QPixmap
 from PyQt5.QtWidgets import QGraphicsObject
 
 from visuals.fraction_bar import build_fraction_bar_layout, FractionBarLayout
@@ -111,7 +111,24 @@ _LASER_PULSE_HZ = 6.0
 _ICON_COLOR = QColor(70, 70, 70)
 _ICON_STROKE_WIDTH = 2.5
 _ICON_DRAW_SECONDS = 1.1     # time to sketch the icon in, stroke by stroke
+
+# Warm gold sparkle/glow, used only by the brain-to-knowledge-base
+# celebration (see JarvisBot._play_knowledge_celebration) - a deliberately
+# different, brighter color than the pencil-sketch icons themselves so it
+# reads as a magical/celebratory flourish, not another sketch stroke.
+_SPARKLE_COLOR = QColor(255, 195, 40)
+_ARRIVAL_GLOW_SECONDS = 1.4  # how long the burst at the destination lingers
 _ICON_ANIM_SECONDS = 2.2     # default move/grow duration, once the sketch is done
+
+# Real-world-example photo frame (see visuals.example_image_library) - a
+# plain white card with a thin border, like a printed photo clipped to
+# the board, deliberately distinct from both the colored geometry shapes
+# and the pencil-sketch icons since it's showing something categorically
+# different: an actual photo, not a drawing.
+_PHOTO_FRAME_COLOR = QColor(255, 255, 255)
+_PHOTO_BORDER_COLOR = QColor(190, 190, 185)
+_PHOTO_FRAME_PADDING = 10
+_PHOTO_FADE_SECONDS = 0.6
 
 # Fraction bar - see visuals.fraction_bar and module docstring. Reuses the
 # same blue outline / warm fill used for the other filled shapes, so a
@@ -168,7 +185,7 @@ class _Underline:
 @dataclass
 class _Icon:
     icon_id: str          # referenced by a later animate_icon action
-    name: str              # "car", "person", "ball", "plant" - dispatches to a _draw_*_icon method
+    name: str              # "car", "person", "ball", "plant", "brain", "book" - dispatches to a _draw_*_icon method
     x: float; y: float     # anchor point - bottom-center of the sketch
     scale: float
     start_time: float
@@ -181,6 +198,11 @@ class _Icon:
     anim_to_scale: float = 1.0
     anim_start_time: float = 0.0
     anim_duration: float = 0.0
+    # Knowledge-celebration-only flourishes (see _paint_icon's sparkle/glow
+    # section and JarvisBot._play_knowledge_celebration) - False for every
+    # ordinary scene icon (car/person/ball/plant).
+    sparkle_trail: bool = False     # a fading sparkle trail behind a "move" animation
+    glow_on_arrival: bool = False   # a glow+sparkle burst once a "move" animation completes
 
 
 @dataclass
@@ -190,7 +212,24 @@ class _FractionBar:
     start_time: float
 
 
+@dataclass
+class _Photo:
+    path: str              # absolute file path - resolved by JarvisBot from an LLM-chosen
+                            # tag (see visuals.example_image_library), never from the LLM directly
+    x: float; y: float     # top-left of the frame (the photo itself is centered/scaled within it)
+    w: float; h: float     # frame size - the photo is scaled to fit inside, aspect preserved
+    start_time: float
+
+
 class TeachingCanvas(QGraphicsObject):
+    # Loaded once per path and reused across every turn/photo instance -
+    # the same handful of library images get shown repeatedly, and
+    # decoding a JPEG from disk on every one of this widget's 60fps
+    # paint() calls would be wasteful. Class-level since the images
+    # themselves never change at runtime (a fixed local library, not
+    # user content), so sharing the cache across instances is safe.
+    _pixmap_cache: dict = {}
+
     def __init__(self):
         super().__init__()
         self.lines: List[_Line] = []
@@ -203,6 +242,7 @@ class TeachingCanvas(QGraphicsObject):
         self.title_text: str = ""
         self.icons: List[_Icon] = []
         self.fraction_bar_items: List[_FractionBar] = []
+        self.photo_items: List[_Photo] = []
 
         # Laser-pointer dot state - see module docstring and _retarget_laser.
         self._laser_visible = False
@@ -245,6 +285,8 @@ class TeachingCanvas(QGraphicsObject):
             self._paint_icon(painter, item, now)
         for item in self.fraction_bar_items:
             self._paint_fraction_bar(painter, item, now)
+        for item in self.photo_items:
+            self._paint_photo(painter, item, now)
         for item in self.text_items:
             self._paint_text(painter, item, now)
         for item in self.underline_items:
@@ -404,9 +446,83 @@ class TeachingCanvas(QGraphicsObject):
             strokes = self._ball_icon_strokes(x, icon.y, scale)
         elif icon.name == "plant":
             strokes = self._plant_icon_strokes(x, icon.y, scale)
+        elif icon.name == "brain":
+            strokes = self._brain_icon_strokes(x, icon.y, scale)
+        elif icon.name == "book":
+            strokes = self._book_icon_strokes(x, icon.y, scale)
         else:
             return
         self._reveal_strokes(painter, strokes, draw_progress)
+
+        if icon.sparkle_trail or icon.glow_on_arrival:
+            self._paint_celebration_effects(painter, icon, now, scale)
+
+    def _draw_sparkle(self, painter: QPainter, center: QPointF, size: float, alpha: float) -> None:
+        """A small 8-ray sparkle/twinkle mark, built from short strokes
+        radiating out from `center` rather than a filled star polygon -
+        reads as a quick pencil-sketch twinkle, consistent with every
+        other icon stroke in this file, not a solid emoji-style star.
+        Used only by the knowledge-celebration trail/arrival burst below."""
+        if alpha <= 0 or size <= 0:
+            return
+        painter.save()
+        pen = QPen(_SPARKLE_COLOR, 1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.setOpacity(max(0.0, min(1.0, alpha)))
+        for angle_deg in range(0, 360, 45):
+            rad = math.radians(angle_deg)
+            inner, outer = 0.35 * size, size
+            painter.drawLine(
+                QPointF(center.x() + inner * math.cos(rad), center.y() + inner * math.sin(rad)),
+                QPointF(center.x() + outer * math.cos(rad), center.y() + outer * math.sin(rad)),
+            )
+        painter.restore()
+
+    def _paint_celebration_effects(self, painter: QPainter, icon: _Icon, now: float, scale: float) -> None:
+        """
+        The knowledge-celebration's "more wonderful than a plain move"
+        flourish (see JarvisBot._play_knowledge_celebration): a fading
+        sparkle trail behind the brain icon while it travels, then a
+        brief glow + sparkle burst at the book once it arrives. Both are
+        no-ops for every ordinary scene icon (car/person/ball/plant),
+        which never set these flags.
+        """
+        if icon.anim_kind != "move" or icon.anim_duration <= 0:
+            return
+        move_progress = self._progress(icon.anim_start_time, now, duration=icon.anim_duration)
+        center_y = icon.y - 20 * scale
+
+        if icon.sparkle_trail and 0 < move_progress < 1.0:
+            for i, back in enumerate((0.07, 0.14, 0.22)):
+                trail_p = move_progress - back
+                if trail_p <= 0:
+                    continue
+                trail_x = icon.anim_from_x + (icon.anim_to_x - icon.anim_from_x) * trail_p
+                fade = max(0.0, 1.0 - back / 0.22)
+                self._draw_sparkle(painter, QPointF(trail_x, center_y), size=(10 - i * 2) * scale, alpha=0.5 * fade)
+
+        if icon.glow_on_arrival:
+            elapsed = now - (icon.anim_start_time + icon.anim_duration)
+            if 0 <= elapsed <= _ARRIVAL_GLOW_SECONDS:
+                burst_p = elapsed / _ARRIVAL_GLOW_SECONDS
+                center = QPointF(icon.anim_to_x, center_y)
+                for ring in range(2):
+                    ring_p = min(1.0, burst_p + ring * 0.3)
+                    alpha = max(0.0, 0.5 * (1.0 - ring_p))
+                    if alpha > 0:
+                        radius = 10 * scale + ring_p * 50 * scale
+                        painter.save()
+                        painter.setOpacity(alpha)
+                        painter.setPen(QPen(_SPARKLE_COLOR, 2))
+                        painter.setBrush(Qt.NoBrush)
+                        painter.drawEllipse(center, radius, radius)
+                        painter.restore()
+                for angle_deg in range(0, 360, 45):
+                    rad = math.radians(angle_deg)
+                    dist = burst_p * 45 * scale
+                    spark_center = QPointF(center.x() + dist * math.cos(rad), center.y() + dist * math.sin(rad))
+                    self._draw_sparkle(painter, spark_center, size=8 * scale, alpha=max(0.0, 1.0 - burst_p))
 
     @staticmethod
     def _partial_path(path: QPainterPath, t: float) -> QPainterPath:
@@ -599,6 +715,88 @@ class TeachingCanvas(QGraphicsObject):
         strokes.append(("arc", QRectF(cx - 18 * s, ground_y - 4 * s, 36 * s, 10 * s), 0, -180 * 16))
         return strokes
 
+    def _brain_icon_strokes(self, cx: float, ground_y: float, scale: float) -> list:
+        """Pencil-sketch brain for the knowledge-celebration (see
+        JarvisBot._play_knowledge_celebration) - a lumpy rounded
+        silhouette (bumpy top, smoother underside) split by a center
+        seam into two hemispheres, with a couple of short wrinkle
+        strokes on each side - just enough detail to read as "brain" at
+        this icon set's sketch fidelity, not an anatomical diagram."""
+        s = scale
+        r = 34 * s
+        cy = ground_y - r
+
+        outline = QPainterPath()
+        outline.moveTo(cx - r, cy + r * 0.35)
+        outline.quadTo(cx - r * 1.05, cy - r * 0.35, cx - r * 0.55, cy - r * 0.95)
+        outline.quadTo(cx - r * 0.15, cy - r * 1.25, cx, cy - r * 0.85)
+        outline.quadTo(cx + r * 0.15, cy - r * 1.25, cx + r * 0.55, cy - r * 0.95)
+        outline.quadTo(cx + r * 1.05, cy - r * 0.35, cx + r, cy + r * 0.35)
+        outline.quadTo(cx + r * 0.6, cy + r * 1.1, cx, cy + r * 0.95)
+        outline.quadTo(cx - r * 0.6, cy + r * 1.1, cx - r, cy + r * 0.35)
+
+        seam = QPainterPath()
+        seam.moveTo(cx, cy - r * 0.8)
+        seam.quadTo(cx - r * 0.1, cy, cx, cy + r * 0.9)
+
+        def wrinkle(x0, y0, x1, y1, x2, y2):
+            p = QPainterPath()
+            p.moveTo(x0, y0)
+            p.quadTo(x1, y1, x2, y2)
+            return ("path", p)
+
+        return [
+            ("path", outline),
+            ("path", seam),
+            wrinkle(cx - r * 0.75, cy - r * 0.25, cx - r * 0.45, cy - r * 0.55, cx - r * 0.15, cy - r * 0.2),
+            wrinkle(cx - r * 0.7, cy + r * 0.35, cx - r * 0.35, cy + r * 0.15, cx - r * 0.1, cy + r * 0.45),
+            wrinkle(cx + r * 0.75, cy - r * 0.25, cx + r * 0.45, cy - r * 0.55, cx + r * 0.15, cy - r * 0.2),
+            wrinkle(cx + r * 0.7, cy + r * 0.35, cx + r * 0.35, cy + r * 0.15, cx + r * 0.1, cy + r * 0.45),
+        ]
+
+    def _book_icon_strokes(self, cx: float, ground_y: float, scale: float) -> list:
+        """Pencil-sketch open book for the knowledge-celebration's
+        destination icon - two pages meeting at a center spine, each
+        with a couple of short horizontal "text" lines, the clearest
+        universal shorthand for "knowledge" at this icon set's fidelity."""
+        s = scale
+        half_w = 34 * s
+        h = 26 * s
+        top_y = ground_y - h * 1.3
+        bottom_y = ground_y - 2 * s
+
+        left_page = QPainterPath()
+        left_page.moveTo(cx, top_y)
+        left_page.quadTo(cx - half_w * 1.1, top_y - 6 * s, cx - half_w, top_y + h * 0.3)
+        left_page.lineTo(cx - half_w * 0.9, bottom_y)
+        left_page.quadTo(cx - 4 * s, bottom_y - h * 0.15, cx, bottom_y)
+        left_page.lineTo(cx, top_y)
+
+        right_page = QPainterPath()
+        right_page.moveTo(cx, top_y)
+        right_page.quadTo(cx + half_w * 1.1, top_y - 6 * s, cx + half_w, top_y + h * 0.3)
+        right_page.lineTo(cx + half_w * 0.9, bottom_y)
+        right_page.quadTo(cx + 4 * s, bottom_y - h * 0.15, cx, bottom_y)
+        right_page.lineTo(cx, top_y)
+
+        def text_line(side: int, frac: float, width_frac: float):
+            y = top_y + h * (0.55 + frac * 0.55)
+            return (
+                "line",
+                QPointF(cx + side * half_w * 0.2, y),
+                QPointF(cx + side * half_w * width_frac, y),
+            )
+
+        return [
+            ("path", left_page),
+            ("path", right_page),
+            ("line", QPointF(cx, top_y), QPointF(cx, bottom_y)),
+            text_line(-1, 0.0, 0.75),
+            text_line(-1, 0.35, 0.6),
+            text_line(1, 0.0, 0.75),
+            text_line(1, 0.35, 0.6),
+        ]
+
     def _paint_fraction_bar(self, painter: QPainter, item: _FractionBar, now: float) -> None:
         """Reveals each bar in turn (if there's more than one, for a
         comparison) - first its outline/dividers/label (like a rectangle
@@ -657,6 +855,41 @@ class TeachingCanvas(QGraphicsObject):
             row_y += layout.bar_height + _FRACTION_BAR_GAP
 
         painter.setOpacity(1.0)
+
+    def _paint_photo(self, painter: QPainter, item: _Photo, now: float) -> None:
+        """A real-world-example photo, fading in as a flat opacity ramp
+        (not the stroke-by-stroke sketch reveal used for lines/shapes/
+        icons above - a photo can't be "sketched in" the same way, and
+        trying would look wrong) inside a plain white card with a thin
+        border, like a printed photo clipped to the board."""
+        alpha = self._progress(item.start_time, now, duration=_PHOTO_FADE_SECONDS)
+        if alpha <= 0:
+            return
+
+        pixmap = self._load_pixmap(item.path)
+        if pixmap is None or pixmap.isNull():
+            return
+
+        painter.save()
+        painter.setOpacity(alpha)
+
+        frame_rect = QRectF(item.x, item.y, item.w, item.h)
+        painter.setPen(QPen(_PHOTO_BORDER_COLOR, 1.5))
+        painter.setBrush(QBrush(_PHOTO_FRAME_COLOR))
+        painter.drawRect(frame_rect)
+
+        inner = QRectF(
+            item.x + _PHOTO_FRAME_PADDING, item.y + _PHOTO_FRAME_PADDING,
+            item.w - 2 * _PHOTO_FRAME_PADDING, item.h - 2 * _PHOTO_FRAME_PADDING,
+        )
+        scaled = pixmap.scaled(
+            int(inner.width()), int(inner.height()), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        draw_x = inner.x() + (inner.width() - scaled.width()) / 2
+        draw_y = inner.y() + (inner.height() - scaled.height()) / 2
+        painter.drawPixmap(int(draw_x), int(draw_y), scaled)
+
+        painter.restore()
 
     def _paint_text(self, painter: QPainter, item: _Text, now: float) -> None:
         # Typewriter reveal - duration scales with length so a short
@@ -744,6 +977,7 @@ class TeachingCanvas(QGraphicsObject):
         self.underline_items = []
         self.icons = []
         self.fraction_bar_items = []
+        self.photo_items = []
         self._hide_laser()
         self.update()
 
@@ -785,8 +1019,11 @@ class TeachingCanvas(QGraphicsObject):
         self.title_text = text
         self.update()
 
-    def add_icon(self, icon_id, name, x, y, scale=1.0):
-        self.icons.append(_Icon(icon_id=icon_id, name=name, x=x, y=y, scale=scale, start_time=time.monotonic()))
+    def add_icon(self, icon_id, name, x, y, scale=1.0, sparkle_trail=False, glow_on_arrival=False):
+        self.icons.append(_Icon(
+            icon_id=icon_id, name=name, x=x, y=y, scale=scale, start_time=time.monotonic(),
+            sparkle_trail=sparkle_trail, glow_on_arrival=glow_on_arrival,
+        ))
         self.update()
 
     def add_fraction_bar(self, fractions, width, bar_height, x, y):
@@ -803,6 +1040,27 @@ class TeachingCanvas(QGraphicsObject):
             return
         self.fraction_bar_items.append(_FractionBar(layout, x, y, time.monotonic()))
         self.update()
+
+    def add_photo(self, path, x, y, w, h):
+        """A real-world-example photo (see JarvisBot._run_teaching_turn and
+        visuals.example_image_library) - `path` is an absolute file path
+        already resolved from an LLM-chosen tag, never a tag or URL
+        itself. Silently skips a path that doesn't load (missing file,
+        corrupt image), same defensive pattern as add_fraction_bar - a
+        bad path should never crash the turn, just leave that step
+        without a photo."""
+        pixmap = self._load_pixmap(path)
+        if pixmap is None or pixmap.isNull():
+            logger.warning(f"Skipping show_photo action - couldn't load image: {path}")
+            return
+        self.photo_items.append(_Photo(path, x, y, w, h, time.monotonic()))
+        self.update()
+
+    @classmethod
+    def _load_pixmap(cls, path: str):
+        if path not in cls._pixmap_cache:
+            cls._pixmap_cache[path] = QPixmap(path)
+        return cls._pixmap_cache[path]
 
     def animate_icon(self, icon_id, animation, duration, to_x=None, to_scale=None):
         """Moves (animation="move", varies x) or grows (animation="grow",
@@ -895,7 +1153,9 @@ class TeachingCanvas(QGraphicsObject):
                 self.add_icon(
                     action.get("id", ""), action.get("icon", "car"),
                     action.get("x", 620), action.get("y", 340),
-                    action.get("scale", 1.0)
+                    action.get("scale", 1.0),
+                    sparkle_trail=bool(action.get("sparkle_trail", False)),
+                    glow_on_arrival=bool(action.get("glow_on_arrival", False)),
                 )
 
             elif action_type == "animate_icon":
@@ -909,6 +1169,13 @@ class TeachingCanvas(QGraphicsObject):
                 self.add_fraction_bar(
                     action.get("fractions", []), action.get("width", 600), action.get("bar_height", 50),
                     action.get("x", 100), action.get("y", 200)
+                )
+
+            elif action_type == "show_photo":
+                self.add_photo(
+                    action.get("path", ""),
+                    action.get("x", 480), action.get("y", 150),
+                    action.get("w", 260), action.get("h", 260),
                 )
 
         if text_positions:

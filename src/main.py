@@ -1,6 +1,7 @@
 import os
 # Allow the OS to use its default display and QT backend, rather than hardcoding.
 
+import random
 import re
 import subprocess
 import textwrap
@@ -49,6 +50,7 @@ from expression.controller import Expression, ExpressionController
 from visuals.ui.ui_signals import UISignals
 from visuals.ui.main_window import MainWindow
 from visuals.scene_planner import ScenePlanner
+from visuals.example_image_library import image_path as example_image_path
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -569,6 +571,21 @@ class JarvisBot:
         r"\b(help|learn|teach|practice|work on|curious about|homework|question)\b", re.IGNORECASE
     )
 
+    # Use case 3 of the discovery pivot: a CLEAR decline ("no", "I'm
+    # good", "nothing right now") - as opposed to a merely open-ended
+    # non-answer ("I don't know", "hmm"), which still gets a gentle
+    # proactive suggestion instead (see _handle_warmup_step's discovery
+    # branch). Deliberately checked only AFTER is_math_query/
+    # is_curiosity_question/_EXPLICIT_INTENT_PATTERN at every call site,
+    # so "no, I don't want multiplication, I want fractions instead"
+    # still reaches the real request first, not this.
+    _DISCOVERY_DECLINE_PATTERN = re.compile(
+        r"\b(no|nope|nah|no thanks|not right now|not today|nothing(?: (?:right now|today))?|"
+        r"i'?m good|i'?m okay|i'?m ok|"
+        r"i don'?t (?:need|want) (?:anything|any help|nothing))\b",
+        re.IGNORECASE,
+    )
+
     def _classify_yes_no(self, text: str) -> Optional[bool]:
         """
         Returns True/False for a clear yes/no, None when neither pattern
@@ -859,6 +876,52 @@ class JarvisBot:
             self.current_session.record_tool_call(tool_name, args, result)
         return result
 
+    # A general "I want to know about X" / "what is X" / "how does X work"
+    # learning request, for ANY K-8 subject - not just math (see
+    # is_math_query for that one). generate_teaching_plan's system prompt
+    # already supports any subject (math, physics, biology, geography,
+    # history, "anything a student asks about"); without this, a
+    # non-math curiosity question ("I want to know about volcanoes")
+    # fell through to a plain chat answer with no diagram or structured
+    # examples, since is_math_query's keyword list only catches math.
+    # Anchored at the start of the utterance - that's how these
+    # constructions are actually phrased ("what is...", "tell me
+    # about..."), and anchoring avoids matching a "why is" or "how does"
+    # buried mid-sentence in unrelated small talk.
+    #
+    # Each trigger excludes an immediately-following you/your/yourself -
+    # confirmed live this is needed, not theoretical: "what's your name",
+    # "tell me about yourself", "how do you work" all matched before this
+    # exclusion was added, which would have forced an ordinary question
+    # ABOUT Jarvis itself into a teaching-plan turn complete with a
+    # mandatory whiteboard diagram - these are identity small talk, not a
+    # subject lesson request.
+    _CURIOSITY_QUESTION_PATTERN = re.compile(
+        r"^\s*("
+        r"what(?:'s| is| are)(?!\s+(?:you|your|yourself)\b)\b|"
+        r"how (?:does|do|is|are)(?!\s+(?:you|your|yourself)\b)\b|"
+        r"why (?:does|do|is|are)(?!\s+(?:you|your|yourself)\b)\b|"
+        r"tell me about(?!\s+(?:you|your|yourself)\b)\b|"
+        r"(?:can you )?explain(?!\s+(?:you|your|yourself)\b)\b|"
+        r"i(?:'m| am) curious about(?!\s+(?:you|your|yourself)\b)\b|"
+        r"i want to (?:know|learn) about(?!\s+(?:you|your|yourself)\b)\b|"
+        r"teach me about(?!\s+(?:you|your|yourself)\b)\b"
+        r")",
+        re.IGNORECASE,
+    )
+
+    def is_curiosity_question(self, text: str) -> bool:
+        """Detect a general learning/curiosity question on any subject
+        (see _CURIOSITY_QUESTION_PATTERN) that should get the same
+        teaching-plan treatment (explanation + diagram + real-world
+        examples) as a math question does via is_math_query - rather than
+        a plain conversational answer with no structure.
+
+        Doesn't touch `self` (like is_math_query/is_homework_help_request)
+        so it's cheaply testable unbound, without constructing a full
+        JarvisBot."""
+        return bool(JarvisBot._CURIOSITY_QUESTION_PATTERN.search(text.strip()))
+
     def is_homework_help_request(self, text: str) -> bool:
         """Detects a request for help with a PHYSICAL homework paper - see
         the Agent Architecture doc's Homework Help branch (ask to see it,
@@ -997,8 +1060,19 @@ class JarvisBot:
         # open-ended reply ("not really", "I don't know") triggers a
         # proactive suggestion - see tutor/question_engine.py - instead of
         # falling through to a generic chat response with nothing to go on.
-        if self.is_math_query(user_text) or self._EXPLICIT_INTENT_PATTERN.search(user_text):
+        if (
+            self.is_math_query(user_text)
+            or self.is_curiosity_question(user_text)
+            or self._EXPLICIT_INTENT_PATTERN.search(user_text)
+        ):
             self._request_queue.put(user_text)
+            return
+
+        # Use case 3: a clear, explicit decline is respected right away -
+        # see _end_conversation_with_goodbye - rather than still pushing
+        # a proactive suggestion on a student who just said no.
+        if self._DISCOVERY_DECLINE_PATTERN.search(user_text):
+            self._end_conversation_with_goodbye(continuous_vad, output_device_index)
             return
 
         profile_id = self.profile_manager.get_active_profile_id()
@@ -1018,8 +1092,11 @@ class JarvisBot:
         offer into an actual teaching turn on that concept - without this,
         the offer was a dead end: Jarvis would ask "want to work on
         fractions?" and then do nothing with a "yes" beyond letting it hit
-        generic chat. A no (or anything unclear) just lets the reply flow
-        through normal dispatch instead of forcing the suggestion on them.
+        generic chat. A clear decline ends the conversation with a warm
+        goodbye (use case 3 - see _end_conversation_with_goodbye) instead
+        of silently falling through to generic chat with nothing to go
+        on; anything else (unclear, or a pivot to a different request)
+        just lets the reply flow through normal dispatch.
         """
         pending = self._pending_proactive_suggestion
         self._pending_proactive_suggestion = None
@@ -1027,6 +1104,8 @@ class JarvisBot:
         if self._YES_PATTERN.search(user_text):
             concept_readable = pending["concept"].replace("_", " ")
             self._run_teaching_turn(f"Can you help me with {concept_readable}?", continuous_vad, output_device_index)
+        elif self._DISCOVERY_DECLINE_PATTERN.search(user_text):
+            self._end_conversation_with_goodbye(continuous_vad, output_device_index)
         else:
             self._request_queue.put(user_text)
 
@@ -1100,6 +1179,58 @@ class JarvisBot:
         self.conversation_manager.add_assistant_message(intro)
         self._pending_teaching_check = {"concept": problem_text[:60], "question": problem_text, "attempts": 0}
         continuous_vad.reset_idle_timer()
+
+    # Rotated for variety rather than always saying the exact same line -
+    # see _build_knowledge_celebration.
+    _KNOWLEDGE_CELEBRATION_TEMPLATES = [
+        "Congratulations - you just added {concept} to your knowledge base! Great job.",
+        "Nice! {concept_title} just became part of your knowledge base - way to go!",
+        "Awesome work! You've grown your knowledge base with {concept} today.",
+        "Ta-da! {concept_title} is officially in your knowledge base now.",
+    ]
+
+    def _build_knowledge_celebration(self, concept: str) -> tuple:
+        """
+        Visual actions + a spoken line for the "you just learned
+        something new" celebration played right after a curiosity-
+        question teaching turn's explanation (see _run_teaching_turn,
+        gated on is_curiosity_question) - not after a specific math
+        problem, which already ends with its own solved-equation
+        satisfaction. A brain icon sketches in on the left and travels to
+        a book icon already sitting on the right, with a sparkle trail
+        and an arrival glow burst (see visuals/ui/teaching_canvas.py's
+        sparkle_trail/glow_on_arrival), while Jarvis names what was just
+        learned - "I want to know about X" should end with a clear,
+        warm "that's now part of what you know," not just trail off.
+
+        Returns (actions, phrase) rather than speaking/emitting directly,
+        so the caller can stream the phrase through the SAME already-open
+        audio_player session as the rest of the explanation (like
+        check_question does) instead of opening a second one.
+
+        Doesn't touch any OTHER `self` state (like is_math_query), so
+        it's cheaply testable unbound, without constructing a full
+        JarvisBot.
+        """
+        concept_readable = concept.replace("_", " ")
+        template = random.choice(JarvisBot._KNOWLEDGE_CELEBRATION_TEMPLATES)
+        phrase = template.format(concept=concept_readable, concept_title=concept_readable.capitalize())
+
+        actions = [
+            {"action": "clear"},
+            {"action": "set_title", "text": "Great Job!"},
+            {"action": "draw_icon", "id": "celebration_book", "icon": "book", "x": 700, "y": 380, "scale": 1.3},
+            {
+                "action": "draw_icon", "id": "celebration_brain", "icon": "brain",
+                "x": 380, "y": 380, "scale": 1.1,
+                "sparkle_trail": True, "glow_on_arrival": True,
+            },
+            {
+                "action": "animate_icon", "id": "celebration_brain", "animation": "move",
+                "to_x": 620, "duration": 2.0,
+            },
+        ]
+        return actions, phrase
 
     def _run_teaching_turn(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
@@ -1178,6 +1309,27 @@ class JarvisBot:
                         "id": icon_id, "animation": "grow", "to_scale": 1.0, "duration": 2.2,
                     })
 
+            # Real-world-example photos (see visuals.example_image_library
+            # and use case 1's "show real photos for real-world examples"
+            # ask) - a speech step's own "image_tag" field (set by
+            # generate_teaching_plan's prompt, chosen from the exact tag
+            # list the library offers) is resolved to an actual file HERE,
+            # not trusted as a path - the LLM only ever sees tag names.
+            # Appended the same way the scene icon actions above are; an
+            # unrecognized/missing tag just means no photo for that step,
+            # same as today.
+            for step in plan.get("speech", []):
+                image_tag = step.get("image_tag")
+                if not image_tag:
+                    continue
+                photo_path = example_image_path(image_tag)
+                if not photo_path:
+                    continue
+                visuals.append({
+                    "speech_id": step.get("id"), "action": "show_photo",
+                    "path": photo_path, "x": 480, "y": 150, "w": 260, "h": 260,
+                })
+
             fast_blocked = False
             for step in plan.get("speech", []):
                 if self._interruption_event.is_set():
@@ -1231,6 +1383,35 @@ class JarvisBot:
                 self._last_bot_response = fast_refusal
                 continuous_vad.reset_idle_timer()
                 return
+
+            # "I want to know about X" questions get an extra celebratory
+            # beat marking that the new concept is now part of what the
+            # student knows - see _build_knowledge_celebration. Placed
+            # after the explanation but before the check_question, so the
+            # check still reads as "now let's see if it stuck" rather
+            # than interrupting the celebration. Streamed through this
+            # SAME already-open audio_player session (like check_question
+            # below), not _speak_fixed_phrase, which would open a second one.
+            if not self._interruption_event.is_set() and self.is_curiosity_question(user_text):
+                celebration_actions, celebration_phrase = self._build_knowledge_celebration(concept)
+                if self.ui_signals:
+                    self.ui_signals.draw_actions.emit(celebration_actions)
+                    self.ui_signals.set_expression.emit(Expression.EXCITED.value)
+                response_parts.append(celebration_phrase)
+                celebration_stream = self.tts_client.synthesize_stream(
+                    iter([celebration_phrase]), delivery=self.expression_controller.celebration()
+                )
+                for audio_chunk in celebration_stream:
+                    if self._interruption_event.is_set():
+                        break
+                    if self.audio_player._is_playing:
+                        try:
+                            self.audio_player.queue_audio(audio_chunk)
+                        except RuntimeError as e:
+                            logger.warning(f"⚠️ Playback queueing failed (likely stopped): {e}")
+                            break
+                    else:
+                        break
 
             # Ask the comprehension-check question, if the plan included
             # one, right after the explanation - same streaming pattern as
@@ -1640,10 +1821,12 @@ class JarvisBot:
                         self._speaker_busy.clear()
                         continue
 
-                    # Math/geometry questions get a teaching plan (speech
-                    # steps + synchronized whiteboard diagram) instead of a
-                    # plain answer.
-                    if self.is_math_query(user_text):
+                    # Math/geometry questions, and general "I want to know
+                    # about X" curiosity questions on any K-8 subject, get
+                    # a teaching plan (speech steps + synchronized
+                    # whiteboard diagram + real-world examples) instead of
+                    # a plain answer - see is_math_query/is_curiosity_question.
+                    if self.is_math_query(user_text) or self.is_curiosity_question(user_text):
                         self._run_teaching_turn(user_text, continuous_vad, output_device_index)
                         self._speaker_busy.clear()
                         continue
@@ -1869,9 +2052,25 @@ class JarvisBot:
         )
         self._speak_system_message(phrase, continuous_vad, output_device_index)
 
+    # Rotated for variety on a casual conversation that never got to any
+    # teaching (no concepts_covered to build a real wrap-up from) - see
+    # _speak_goodbye. Warm and personal rather than purely instructional,
+    # per direct feedback that the goodbye should feel "really friendly
+    # and warm", not just a functional sign-off.
+    _GENERIC_GOODBYE_TEMPLATES = [
+        "Okay, sounds good! It was so nice chatting with you - I'll be right here whenever you want to talk again.",
+        "Alright, no worries at all! I had fun talking with you - just say Hey Jarvis whenever you want to chat.",
+        "Sounds good! Thanks for stopping by - come find me anytime you want to learn something new or just say hi.",
+    ]
+
     def _speak_goodbye(self, continuous_vad, output_device_index: int) -> None:
         """
-        Speak a farewell message when a conversation is about to end.
+        Speak a farewell message when a conversation is about to end -
+        either from the idle-timeout/check-in-grace cycle (see
+        _handle_wake_word), or right away when the student explicitly
+        declines at the discovery pivot (use case 3 - see
+        _end_conversation_with_goodbye). Both paths share this one method
+        so the goodbye is equally warm regardless of why it's happening.
 
         If the conversation included real teaching (current_session.
         concepts_covered is non-empty - see _run_teaching_turn) and no
@@ -1879,9 +2078,9 @@ class JarvisBot:
         wrap-up naming what was covered and one real takeaway, not a
         generic farewell - see LLMClient.generate_session_wrapup(), which
         already fails toward a simple templated summary on its own, so no
-        extra fallback handling is needed here. Falls back to the plain
-        generic goodbye for a casual conversation that never got to any
-        math.
+        extra fallback handling is needed here. Falls back to a warm,
+        rotated generic goodbye for a casual conversation that never got
+        to any teaching.
         """
         override = os.getenv('GOODBYE_MESSAGE')
         concepts = self.current_session.concepts_covered if self.current_session else []
@@ -1891,9 +2090,30 @@ class JarvisBot:
         elif concepts:
             phrase = self.llm_client.generate_session_wrapup(concepts)
         else:
-            phrase = "Okay, talk to you later! Just say Hey Jarvis whenever you want to continue."
+            phrase = random.choice(self._GENERIC_GOODBYE_TEMPLATES)
 
+        if self.ui_signals:
+            self.ui_signals.set_expression.emit(Expression.FRIENDLY.value)
         self._speak_system_message(phrase, continuous_vad, output_device_index)
+
+    def _end_conversation_with_goodbye(self, continuous_vad, output_device_index: int) -> None:
+        """
+        Use case 3 of the discovery pivot: the student explicitly doesn't
+        want anything right now ("no", "I'm good", declining a proactive
+        suggestion). Rather than sitting through the idle-timeout/
+        check-in-grace cycle in silence before _handle_wake_word's own
+        loop would eventually say goodbye, end the conversation right
+        away with that exact same warm goodbye (see _speak_goodbye) -
+        respecting what the student just said instead of waiting it out.
+
+        Clearing _conversation_active here is the same mechanism
+        _handle_wake_word's own idle-timeout path uses to end a
+        conversation - both _speaker_loop (this call's own thread) and
+        the main conversation-loop thread poll it and unwind through
+        their normal teardown/wake-word-restart on their own.
+        """
+        self._speak_goodbye(continuous_vad, output_device_index)
+        self._conversation_active.clear()
 
     def _speak_standalone(self, phrase: str, output_device_index: int) -> None:
         """

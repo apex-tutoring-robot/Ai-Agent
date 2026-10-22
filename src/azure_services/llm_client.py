@@ -12,6 +12,7 @@ from typing import Callable, Iterator, List, Dict, Optional
 from openai import AzureOpenAI
 from dotenv import load_dotenv
 from azure_services.local_llm_client import LocalLLMClient
+from visuals.example_image_library import available_tags as available_example_image_tags
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -266,7 +267,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.2,
-        max_tokens: int = 800,
+        max_tokens: int = 1200,
         student_context: Optional[str] = None,
         scene_hint: Optional[str] = None,
     ) -> Dict:
@@ -298,7 +299,7 @@ class LLMClient:
     {
       "concept": "short_snake_case_identifier",
       "speech": [
-        {"id": 1, "text": "string"}
+        {"id": 1, "text": "string", "image_tag": "string from the list below, or null"}
       ],
       "check_question": "string or null",
       "visuals": [
@@ -368,7 +369,10 @@ class LLMClient:
     - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, fraction_bar
     - Always include exactly one "set_title" action, speech_id 1, right after the
       initial "clear" - every question gets a title naming the topic.
-    - Use 2-5 speech steps
+    - Use 2-6 speech steps (use the higher end for a concept-explanation
+      question - see REAL-WORLD EXAMPLES below - which needs room for a
+      second example; a specific problem with given numbers to solve
+      usually still only needs 2-4)
     - SPEECH STYLE - this is what actually gets spoken out loud, so write it like
       you're talking TO the student, not narrating a textbook at them:
         * Use contractions - "that's", "we're", "let's", "you'll", "it's" - not
@@ -385,8 +389,43 @@ class LLMClient:
             calculated by multiplying its width by its height."
             Conversational (write like this): "So to find the area, you just
             multiply the width by the height - that's it!"
+        * Warm and detailed, not rushed: this is a K-8 student actually trying
+          to understand something, not a transcript to get through quickly.
+          Take the time to make it genuinely click - friendly, patient,
+          enthusiastic about the topic - rather than racing to the check
+          question. "This does NOT mean longer" below is about sentence
+          count per step, not about shortchanging the explanation itself.
       This does NOT mean longer - still 2-3 sentences per step, just said like a
       person talking, not a page being read aloud.
+    - REAL-WORLD EXAMPLES - for a concept-explanation question ("what is X",
+      "how does X work", "I want to know about X", "tell me about X" - as
+      opposed to a specific problem that already gives numbers to solve):
+        1. Explain the core idea with a real-world example or scenario woven
+           INTO the explanation itself, not an abstract definition on its own -
+           e.g. explain a fraction through "if a pizza has 8 slices and you eat
+           3 of them..." rather than just "a fraction is part of a whole."
+        2. After that, give AT LEAST ONE MORE different real-world example or
+           scenario illustrating the same idea from a different angle, as its
+           own speech step - this reinforces understanding before the
+           check_question, it does not replace it (e.g. if the first example
+           was pizza slices, the second could be sharing a candy bar, or
+           splitting a classroom into groups for a project).
+        3. A specific problem WITH given numbers to solve doesn't need this
+           extra example step - fully solve that problem as the rules below
+           already describe, though a brief real-world framing is still
+           welcome where it fits naturally (e.g. "area" as a room's floor).
+    - EXAMPLE PHOTOS: a speech step's "image_tag" field shows a real photo
+      instead of a sketch for that step's real-world example - see the
+      "AVAILABLE EXAMPLE PHOTOS" list appended at the end of this prompt.
+      Only use a tag from that EXACT list, and only when it's a genuinely
+      strong match for what that step's example is actually about (a step
+      whose example is "a pizza cut into slices" -> image_tag "pizza"; a
+      step about something not in the list, or only a loose/generic match
+      -> image_tag null - never invent a tag that isn't in the list).
+      When you DO use an image_tag, don't also draw a redundant diagram/
+      shape for that same step - the photo IS the illustration - but
+      still include the usual equations/draw_text if that step is also
+      solving a specific problem.
     - Every visual must map to a valid speech_id
     - Use integers for coordinates
     - Always include at least one visual action for each speech step after the first
@@ -538,6 +577,9 @@ class LLMClient:
       label, never both
     """
             system_content = self._with_student_context(plan_system_prompt, student_context)
+            image_tags = available_example_image_tags()
+            if image_tags:
+                system_content = f"{system_content}\n\nAVAILABLE EXAMPLE PHOTOS: {', '.join(image_tags)}"
             if scene_hint:
                 system_content = f"{system_content}\n\nSCENE NOTE: {scene_hint}"
             full_messages = [{"role": "system", "content": system_content}] + messages
@@ -798,6 +840,9 @@ Write a short, warm spoken goodbye for the student (2-3 sentences):
 - State ONE genuine "big idea" takeaway - something true and specific about what was learned, not a generic platitude
 - End with encouragement and an invitation to come back
 - No formatting, no lists - this is spoken out loud
+- Really friendly and warm, like a parent telling their kid "I'm proud of
+  you" before they head off - not a flat status report. Use contractions
+  ("that's", "you're", "we'll") and genuine warmth, not a formal recap.
 """
                 }
             ]
