@@ -845,13 +845,15 @@ Write a short, warm spoken goodbye for the student (2-3 sentences):
             }.get(next_topic, f"Nice! How's {topic_label} going?")
         else:
             instruction = (
-                "Then naturally transition into asking if there's something "
-                "they'd like help with today, or something new they're curious "
-                "about - this is the moment the check-in turns into tutoring."
+                "Then, warmly and sweetly - like a mom checking in with her "
+                "kid, not a neutral assistant - ask if there's something "
+                "they'd love some help with today, or something new they're "
+                "curious to learn about. This is the moment the check-in "
+                "turns into tutoring, so make it feel caring, not clinical."
             )
             fallback = os.getenv(
                 'DISCOVERY_MESSAGE',
-                "Nice. Is there something you'd like help with today, or something new you're curious about?"
+                "Aww, sounds like a good day. Is there something you'd love a little help with today, sweetheart, or something new you're curious to learn about?"
             )
 
         try:
@@ -867,6 +869,12 @@ You just asked about {topic} and the student said: "{student_answer}"
 Write ONE short (1-2 sentence) reply: react genuinely to something
 SPECIFIC they actually mentioned (a name, an event, a feeling) - not a
 generic "that's nice" - then {instruction}
+
+Only react to details that are ACTUALLY in what they said. If their
+answer is short or vague ("nothing much", "it was fine") with nothing
+specific to point to, react warmly to the general feeling instead
+("Sounds like a nice, relaxed one!") - never invent a name, event, or
+detail they didn't actually say.
 
 Use contractions, a warm/casual spoken tone, no markdown, no emojis, no
 quotation marks around your reply. Return ONLY the line itself, nothing else.
