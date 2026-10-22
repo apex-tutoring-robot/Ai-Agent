@@ -813,6 +813,75 @@ Write a short, warm spoken goodbye for the student (2-3 sentences):
             logger.error(f"Error generating session wrap-up ({type(e).__name__}: {e}) - using fallback")
             return fallback
 
+    def generate_warmup_reply(
+        self,
+        topic: str,
+        student_answer: str,
+        next_topic: Optional[str],
+        temperature: float = 0.7,
+        max_tokens: int = 100,
+    ) -> str:
+        """
+        One warm, reactive line for the post-wake-word small-talk check-in
+        (see JarvisBot._handle_warmup_step) - the "how was your day /
+        school / friends" mom-style catch-up before pivoting to tutoring.
+        Reacts to something SPECIFIC the student actually said (a name, an
+        event, a feeling) rather than a flat "that's nice", then either
+        asks about next_topic or, once topics run out (next_topic=None),
+        pivots naturally into asking if there's something they'd like
+        help with or are curious about today.
+
+        Returns plain spoken text, not JSON - this is a single
+        conversational line, nothing to parse beyond the text itself.
+        Falls back to a plain canned line on any failure, so a slow or
+        broken call never leaves the check-in stuck mid-conversation.
+        """
+        topic_label = {"day": "their day", "school": "school", "friends": "their friends"}.get(next_topic, next_topic)
+        if next_topic:
+            instruction = f'Then naturally ask how {topic_label} was/is going.'
+            fallback = {
+                "school": "Nice! How was school today?",
+                "friends": "Good to hear. How are your friends doing?",
+            }.get(next_topic, f"Nice! How's {topic_label} going?")
+        else:
+            instruction = (
+                "Then naturally transition into asking if there's something "
+                "they'd like help with today, or something new they're curious "
+                "about - this is the moment the check-in turns into tutoring."
+            )
+            fallback = os.getenv(
+                'DISCOVERY_MESSAGE',
+                "Nice. Is there something you'd like help with today, or something new you're curious about?"
+            )
+
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": f"""
+You are Jarvis, warmly checking in with a K-8 student right after they
+got home, the way an attentive parent would - not a generic assistant.
+
+You just asked about {topic} and the student said: "{student_answer}"
+
+Write ONE short (1-2 sentence) reply: react genuinely to something
+SPECIFIC they actually mentioned (a name, an event, a feeling) - not a
+generic "that's nice" - then {instruction}
+
+Use contractions, a warm/casual spoken tone, no markdown, no emojis, no
+quotation marks around your reply. Return ONLY the line itself, nothing else.
+"""
+                }
+            ]
+            response = self.client.chat.completions.create(
+                model=self.deployment, messages=messages, temperature=temperature, max_tokens=max_tokens,
+            )
+            text = (response.choices[0].message.content or "").strip().strip('"')
+            return text or fallback
+        except Exception as e:
+            logger.error(f"Error generating warmup reply ({type(e).__name__}: {e}) - using fallback")
+            return fallback
+
     def generate_response(
         self,
         messages: List[Dict[str, str]],

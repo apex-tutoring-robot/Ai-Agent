@@ -918,16 +918,25 @@ class JarvisBot:
 
         return bool(re.search(r"\d", t) and re.search(r"[\+\-\*/=]", t))
 
+    # Mom-style catch-up order asked through _handle_warmup_step, each one
+    # getting a genuine, LLM-generated reaction to what the student
+    # actually said (see LLMClient.generate_warmup_reply) rather than a
+    # flat canned next question, before pivoting to the discovery
+    # question. Kept short (day -> school -> friends, ~3-4 exchanges
+    # total) rather than the original spec's full 1-2 minutes of small
+    # talk - Jarvis is used ambiently, so this still needs to stay brief.
+    _WARMUP_TOPICS = ["day", "school", "friends"]
+
     def _start_warmup_checkin(self, continuous_vad, output_device_index: int) -> None:
         """
         Replaces the old canned self-introduction ("Hi! I'm Jarvis...") at
         the very start of a conversation, for any profile that isn't the
         default placeholder - see _handle_wake_word. A real tutor doesn't
-        open with a scripted pitch; a short, genuine check-in ("how's your
-        day going") reads as someone who's actually paying attention.
-        Two short back-and-forth exchanges, not the original spec's full
-        1-2 minutes of small talk - Jarvis is used ambiently, so the
-        check-in itself needs to stay quick.
+        open with a scripted pitch; a short, genuine catch-up through
+        _WARMUP_TOPICS ("how's your day going", then school, then
+        friends) reads as someone who's actually paying attention, the
+        way a parent asks a kid about their day - see _handle_warmup_step
+        for how each reply gets reacted to before moving to the next topic.
         """
         profile_id = self.profile_manager.get_active_profile_id()
         name = self.profile_manager.get_profile_name(profile_id) if profile_id else None
@@ -937,17 +946,20 @@ class JarvisBot:
 
         self._speak_fixed_phrase(phrase, continuous_vad, output_device_index)
         self.conversation_manager.add_assistant_message(phrase)
-        self._pending_warmup_checkin = {"step": "warmup"}
+        self._pending_warmup_checkin = {"step": self._WARMUP_TOPICS[0]}
         continuous_vad.reset_idle_timer()
 
     def _handle_warmup_step(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
-        Handles the student's reply to either half of the warm-up
-        check-in started by _start_warmup_checkin. The first reply is
-        just recorded (genuinely remembered, not analyzed yet - see the
-        review's InteractionSignals/StudentModel proposals for where that
-        would eventually plug in) and followed by a second, lighter
-        question. The second reply is deliberately NOT consumed here -
+        Handles the student's reply to each leg of the warm-up check-in
+        started by _start_warmup_checkin. Each _WARMUP_TOPICS reply gets a
+        genuine, LLM-generated reaction to something SPECIFIC the student
+        said (a name, an event, a feeling) before naturally moving to the
+        next topic - not a flat canned question, which would feel robotic
+        the moment the student's answer didn't fit the next scripted
+        line. Once topics run out, the LLM's own reaction pivots straight
+        into the discovery question instead of a separate bolted-on line.
+        The discovery reply itself is deliberately NOT consumed here -
         it's put back on the request queue so it flows through the
         normal dispatch chain instead (see _speaker_loop): the student may
         already be answering with their actual request ("help me with
@@ -955,18 +967,20 @@ class JarvisBot:
         make them repeat themselves.
         """
         pending = self._pending_warmup_checkin
+        step = pending["step"]
 
-        if pending["step"] == "warmup":
+        if step in self._WARMUP_TOPICS:
             anonymized = self.privacy_manager.anonymize(user_text)
             self.conversation_manager.add_user_message(anonymized)
 
-            phrase = os.getenv(
-                'DISCOVERY_MESSAGE',
-                "Nice. Is there something you'd like help with today, or something new you're curious about?"
-            )
+            next_index = self._WARMUP_TOPICS.index(step) + 1
+            next_topic = self._WARMUP_TOPICS[next_index] if next_index < len(self._WARMUP_TOPICS) else None
+
+            phrase = self.llm_client.generate_warmup_reply(step, user_text, next_topic)
             self._speak_fixed_phrase(phrase, continuous_vad, output_device_index)
             self.conversation_manager.add_assistant_message(phrase)
-            pending["step"] = "discovery"
+
+            self._pending_warmup_checkin = {"step": next_topic or "discovery"}
             continuous_vad.reset_idle_timer()
             return
 
