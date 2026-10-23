@@ -2494,6 +2494,27 @@ class JarvisBot:
                     logger.warning("♻️  FATAL AUDIO ERROR - Recreating system...")
                     self._recreate_audio_system()
 
+                # Never evaluate (or fire) the idle check-in while a turn is
+                # actively being processed - _speaker_busy spans the WHOLE
+                # turn, including generate_teaching_plan()'s "thinking" gap
+                # (confirmed live: that single blocking call can run
+                # 20-40+s with no audio playing yet, well past idle_timeout,
+                # since it un-mutes/un-marks-speaking for the wait - see
+                # _run_teaching_turn). Without this, this loop - unaware a
+                # real explanation was already on its way - would speak
+                # "Are you still there?" right as the teaching turn's own
+                # TTS started, stepping on it mid-explanation. Confirmed
+                # live as exactly this: a student heard Jarvis's fractions
+                # explanation get cut off by a check-in prompt mid-turn.
+                # Also resets checked_in rather than letting a stale
+                # prompt_finished_at silently blow through check_in_grace
+                # the moment the turn finishes, which would end the
+                # conversation right after a long explanation.
+                if self._speaker_busy.is_set():
+                    checked_in = False
+                    time.sleep(0.5)
+                    continue
+
                 if not checked_in:
                     idle_duration = time.time() - continuous_vad.last_speech_time
                     if idle_duration >= idle_timeout:
