@@ -1428,6 +1428,23 @@ class JarvisBot:
             # Appended the same way the scene icon actions above are; an
             # unrecognized/missing tag just means no photo for that step,
             # same as today.
+            #
+            # Position: confirmed live as a real bug - the old box
+            # (480, 150) sat directly inside the "diagrams in the middle
+            # zone: x 480-750" area that generate_teaching_plan's own
+            # prompt tells the LLM to use for ITS OWN content (equations,
+            # fraction bars, shapes), so any plan that used that zone for
+            # a diagram while also attaching a photo landed the photo
+            # right on top of its own text/diagram. The LLM is told to
+            # never draw past x=780 (that's the face-widget's reserved
+            # column, see tutor_scene.py) - but the face only actually
+            # occupies a small bottom-right bubble there
+            # (x:1060-1250, y:500-690, see TutorScene._BUBBLE_*), so the
+            # rest of that column is free. This code runs AFTER the plan
+            # is generated and isn't bound by the LLM's own layout rule,
+            # so it can safely use that otherwise-empty column instead -
+            # guaranteed clear of both the equation zone (x 60-420) and
+            # diagram zone (x 480-750), and well above the face bubble.
             for step in plan.get("speech", []):
                 image_tag = step.get("image_tag")
                 if not image_tag:
@@ -1437,7 +1454,7 @@ class JarvisBot:
                     continue
                 visuals.append({
                     "speech_id": step.get("id"), "action": "show_photo",
-                    "path": photo_path, "x": 480, "y": 150, "w": 260, "h": 260,
+                    "path": photo_path, "x": 860, "y": 150, "w": 260, "h": 260,
                 })
 
             fast_blocked = False
