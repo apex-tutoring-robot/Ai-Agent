@@ -279,6 +279,18 @@ class LLMClient:
         Returns a dict: {"speech": [{"id": int, "text": str}, ...],
                           "visuals": [{"speech_id": int, "action": str, ...}, ...]}
         """
+        # Trimmed to the most recent messages only - confirmed live as a
+        # real, reproducible failure (0/5 even with the retry above) on
+        # a long conversation history full of plain conversational
+        # assistant turns from OTHER code paths (warmup chat, generic
+        # NOT_AN_ANSWER replies, etc., none of them JSON): the model
+        # pattern-matches to its own prior turns' plain-text style in
+        # the history and drops the JSON format for this call too,
+        # despite the system prompt's instruction. A short history
+        # (tested up to 8 messages, all reliable) still gives enough
+        # immediate context for a real follow-up without enough
+        # plain-text turns to anchor the model away from JSON.
+        messages = messages[-6:]
         try:
             # Deliberately NOT prepending self.system_prompt here - it's the
             # conversational K-8 tutoring persona ("keep responses to 2-4
@@ -438,6 +450,20 @@ class LLMClient:
         2. substituted values
         3. simplified result
         4. final answer
+    NEVER ASK A CLARIFYING QUESTION INSTEAD OF TEACHING - no matter how
+    broad or vague the request sounds ("something about software", "tell
+    me about computers", "I want to know about science"), you must still
+    return a full plan that teaches something, following every rule in
+    this prompt exactly as normal. Pick the single most common/useful
+    specific angle yourself (e.g. for "something about software": what
+    software actually is and the difference between an app and a
+    system) and teach THAT - a real tutor doesn't stop and interview the
+    student before saying anything useful, they start somewhere
+    reasonable and let the student redirect if they want something else
+    (which they can always do in a later turn). This is not optional and
+    has no exception: asking the student to narrow down first, in any
+    form, in or out of the JSON, is never an acceptable response.
+
     DIAGRAM RULES - MANDATORY, NO EXCEPTIONS:
     - You MUST include at least one diagram for EVERY question, regardless of subject.
       A text-only board (just equations or sentences, no picture) is never acceptable -
@@ -582,33 +608,65 @@ class LLMClient:
                 system_content = f"{system_content}\n\nAVAILABLE EXAMPLE PHOTOS: {', '.join(image_tags)}"
             if scene_hint:
                 system_content = f"{system_content}\n\nSCENE NOTE: {scene_hint}"
+            # Repeated here, as the LAST thing before the actual
+            # conversation - confirmed live as a real, reproducible
+            # failure (3/3 attempts): on a long, meandering conversation
+            # history (lots of off-topic back-and-forth), the model
+            # dropped the JSON format entirely and just wrote flowing
+            # prose instead, even after being told at the very top of
+            # this same prompt to return only JSON. A single instruction
+            # at the start, "far" from the actual decision in a long
+            # prompt plus a long history, wasn't enough on its own.
+            system_content = (
+                f"{system_content}\n\nFINAL REMINDER: whatever the conversation above contains - "
+                f"off-topic turns, a meandering history, anything - your reply must be ONLY the "
+                f"JSON object from the schema above. Never reply with plain conversational text, "
+                f"no matter how natural that would feel given the conversation so far."
+            )
             full_messages = [{"role": "system", "content": system_content}] + messages
 
-            response = self.client.chat.completions.create(
-                model=self.deployment,
-                messages=full_messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            # One retry before giving up on a parse failure - confirmed
+            # live as genuinely non-deterministic: on a long, meandering
+            # conversation history, the model dropped JSON for plain
+            # prose on 2 of 3 identical back-to-back attempts, succeeding
+            # on the other. With no local LLM configured in most
+            # deployments (the usual fallback below), a single failure
+            # otherwise goes straight to the student hearing an apology
+            # for something a second attempt would likely have gotten
+            # right - cheap insurance against a flaky single call.
+            parse_error = None
+            for attempt in range(2):
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.deployment,
+                        messages=full_messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
 
-            content = response.choices[0].message.content.strip()
-            logger.info(f"Raw teaching plan: {content[:300]}")
+                    content = response.choices[0].message.content.strip()
+                    logger.info(f"Raw teaching plan: {content[:300]}")
 
-            match = re.search(r"\{.*\}", content, re.DOTALL)
-            if not match:
-                raise ValueError("No JSON object found in response")
+                    match = re.search(r"\{.*\}", content, re.DOTALL)
+                    if not match:
+                        raise ValueError("No JSON object found in response")
 
-            plan = json.loads(match.group(0))
+                    plan = json.loads(match.group(0))
 
-            if "speech" not in plan or "visuals" not in plan:
-                raise ValueError("Invalid teaching plan format")
+                    if "speech" not in plan or "visuals" not in plan:
+                        raise ValueError("Invalid teaching plan format")
 
-            speech_ids = {s["id"] for s in plan["speech"]}
-            for v in plan["visuals"]:
-                if v.get("speech_id") not in speech_ids:
-                    raise ValueError(f"Invalid speech_id in visuals: {v}")
+                    speech_ids = {s["id"] for s in plan["speech"]}
+                    for v in plan["visuals"]:
+                        if v.get("speech_id") not in speech_ids:
+                            raise ValueError(f"Invalid speech_id in visuals: {v}")
 
-            return plan
+                    return plan
+                except Exception as e:
+                    parse_error = e
+                    if attempt == 0:
+                        logger.warning(f"Teaching plan attempt 1 failed ({type(e).__name__}: {e}), retrying once")
+            raise parse_error
 
         except Exception as e:
             logger.warning(f"Azure teaching plan failed ({type(e).__name__}: {e}), trying local model")
