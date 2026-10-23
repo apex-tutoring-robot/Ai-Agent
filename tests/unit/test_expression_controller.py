@@ -47,6 +47,19 @@ class TestForAction:
         assert style.expression == Expression.CONFUSED
         assert style.style == "whispering"
 
+    def test_friendly_accessor_is_friendly(self):
+        # The default delivery for any speech that doesn't have a more
+        # specific mood decided for it - see main.py's
+        # _speak_fixed_phrase/_speak_system_message/_speak_standalone.
+        style = ExpressionController().friendly()
+        assert style.expression == Expression.FRIENDLY
+        assert style.style == "friendly"
+
+    def test_encouraging_accessor_is_encouraging(self):
+        style = ExpressionController().encouraging()
+        assert style.expression == Expression.ENCOURAGING
+        assert style.style == "hopeful"
+
     def test_every_expression_has_its_own_distinct_style(self):
         # Direct requirement: every mood should actually sound different
         # from every other mood, not share a style with one it's meant

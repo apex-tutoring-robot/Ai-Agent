@@ -104,11 +104,36 @@ class ExpressionController:
     def neutral(self) -> DeliveryStyle:
         return _STYLES[Expression.NEUTRAL]
 
+    def friendly(self) -> DeliveryStyle:
+        """
+        Jarvis's baseline conversational mood - for any speech that
+        doesn't have a more specific mood decided for it (ordinary
+        replies, explanations, greetings, confirmations). Used as the
+        default so those lines pick up a real Azure style instead of
+        silently falling through to the TTS client's own flat "chat"
+        style - see main.py's _speak_fixed_phrase/_speak_system_message/
+        _speak_standalone.
+        """
+        return _STYLES[Expression.FRIENDLY]
+
+    def encouraging(self) -> DeliveryStyle:
+        """
+        For inviting the student to try something - e.g. the
+        comprehension-check question asked right after a teaching
+        explanation (see main.py's _run_teaching_turn) - warm and
+        supportive rather than neutral, without the stronger "you got
+        it" energy of EXCITED, which belongs to an actual answer being
+        right (see for_action's CHALLENGE mapping).
+        """
+        return _STYLES[Expression.ENCOURAGING]
+
     def refusal(self) -> DeliveryStyle:
         """
         For a guardrails/fast-filter safety refusal (see main.py's
-        _run_output_safety_check and the FastContentFilter block paths) -
-        CONFUSED reads as "I'm not sure how to answer that", which is a
-        more honest expression for the moment than a flat neutral face.
+        _run_output_safety_check and the FastContentFilter block paths),
+        and for any other "something went wrong, sorry" fallback (e.g.
+        _run_teaching_turn's teaching-plan-failed apology) - CONFUSED
+        reads as "I'm not sure how to answer that", which is a more
+        honest expression for the moment than a flat neutral face.
         """
         return _STYLES[Expression.CONFUSED]

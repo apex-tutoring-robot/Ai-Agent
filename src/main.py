@@ -422,9 +422,13 @@ class JarvisBot:
         turn in _speaker_loop, just with fixed text.
 
         delivery: optional expression.controller.DeliveryStyle - a
-        per-utterance rate/pitch nudge (see ExpressionController), passed
-        straight through to TextToSpeechClient.synthesize_stream(). None
-        (the default) plays at the normal, unadjusted delivery.
+        per-utterance mood (rate/pitch nudge + Azure style/styledegree,
+        see ExpressionController), passed straight through to
+        TextToSpeechClient.synthesize_stream(). None (the default) uses
+        FRIENDLY, Jarvis's baseline conversational mood, rather than the
+        TTS client's own flat "chat" style - callers only need to pass
+        something explicit when a moment calls for a MORE specific mood
+        (e.g. refusal()/for_action()'s result).
         """
         logger.info(f"🗣️  {phrase}")
         try:
@@ -435,7 +439,8 @@ class JarvisBot:
             self._bot_is_speaking = True
             continuous_vad.set_playback_state(True)
 
-            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase]), delivery=delivery):
+            effective_delivery = delivery if delivery is not None else self.expression_controller.friendly()
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase]), delivery=effective_delivery):
                 if self.audio_player._is_playing:
                     self.audio_player.queue_audio(audio_chunk)
                 else:
@@ -1282,7 +1287,7 @@ class JarvisBot:
             messages = self.conversation_manager.get_messages()
 
             filler = random.choice(self._TEACHING_TURN_FILLERS)
-            for audio_chunk in self.tts_client.synthesize_stream(iter([filler])):
+            for audio_chunk in self.tts_client.synthesize_stream(iter([filler]), delivery=self.expression_controller.friendly()):
                 if self.audio_player._is_playing:
                     try:
                         self.audio_player.queue_audio(audio_chunk)
@@ -1425,7 +1430,9 @@ class JarvisBot:
                     self.ui_signals.draw_actions.emit(actions)
 
                 response_parts.append(step_text)
-                for audio_chunk in self.tts_client.synthesize_stream(iter([step_text])):
+                for audio_chunk in self.tts_client.synthesize_stream(
+                    iter([step_text]), delivery=self.expression_controller.friendly()
+                ):
                     if self._interruption_event.is_set():
                         break
                     if self.audio_player._is_playing:
@@ -1460,7 +1467,9 @@ class JarvisBot:
             # checking/history purposes (appended to response_parts).
             if not self._interruption_event.is_set() and check_question:
                 response_parts.append(check_question)
-                for audio_chunk in self.tts_client.synthesize_stream(iter([check_question])):
+                for audio_chunk in self.tts_client.synthesize_stream(
+                    iter([check_question]), delivery=self.expression_controller.encouraging()
+                ):
                     if self._interruption_event.is_set():
                         break
                     if self.audio_player._is_playing:
@@ -1525,7 +1534,9 @@ class JarvisBot:
                 self._bot_is_speaking = True
                 continuous_vad.set_playback_state(True)
                 apology = "Sorry, I had trouble working that one out. Could you try asking again?"
-                for audio_chunk in self.tts_client.synthesize_stream(iter([apology])):
+                for audio_chunk in self.tts_client.synthesize_stream(
+                    iter([apology]), delivery=self.expression_controller.refusal()
+                ):
                     if self.audio_player._is_playing:
                         self.audio_player.queue_audio(audio_chunk)
                 self._last_bot_response = apology
@@ -2032,7 +2043,9 @@ class JarvisBot:
                         student_context=self._build_student_context()
                     )
                     collected_stream = text_collector(llm_stream)
-                    tts_stream = audio_timing(self.tts_client.synthesize_stream(collected_stream))
+                    tts_stream = audio_timing(self.tts_client.synthesize_stream(
+                        collected_stream, delivery=self.expression_controller.friendly()
+                    ))
 
                     for audio_chunk in tts_stream:
                         if self._interruption_event.is_set():
@@ -2159,6 +2172,8 @@ class JarvisBot:
         Speak a fixed, non-LLM-generated phrase (check-in prompt, goodbye,
         etc). Reuses the same TTS/playback/echo-guard pattern as a normal
         turn, just with fixed text instead of an LLM-generated response.
+        Uses FRIENDLY delivery (Jarvis's baseline conversational mood) -
+        see _speak_fixed_phrase's docstring for why, same reasoning here.
         """
         if self._speaker_busy.is_set():
             # Speaker thread is mid-turn (race with the idle-timeout/end firing
@@ -2174,7 +2189,7 @@ class JarvisBot:
             self._bot_is_speaking = True
             continuous_vad.set_playback_state(True)
 
-            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase]), delivery=self.expression_controller.friendly()):
                 if self.audio_player._is_playing:
                     self.audio_player.queue_audio(audio_chunk)
                 else:
@@ -2266,11 +2281,12 @@ class JarvisBot:
         Speak a fixed phrase with no active conversation (e.g. the
         going-to-sleep announcement). No echo-guard/continuous_vad needed
         here since wake-word detection uses its own model, not Azure STT.
+        Uses FRIENDLY delivery - see _speak_fixed_phrase's docstring.
         """
         logger.info(f"🗣️  {phrase}")
         try:
             self.audio_player.start_streaming(output_device_index=output_device_index)
-            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase]), delivery=self.expression_controller.friendly()):
                 if self.audio_player._is_playing:
                     self.audio_player.queue_audio(audio_chunk)
                 else:
