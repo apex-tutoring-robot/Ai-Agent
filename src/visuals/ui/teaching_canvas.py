@@ -111,13 +111,6 @@ _LASER_PULSE_HZ = 6.0
 _ICON_COLOR = QColor(70, 70, 70)
 _ICON_STROKE_WIDTH = 2.5
 _ICON_DRAW_SECONDS = 1.1     # time to sketch the icon in, stroke by stroke
-
-# Warm gold sparkle/glow, used only by the brain-to-knowledge-base
-# celebration (see JarvisBot._play_knowledge_celebration) - a deliberately
-# different, brighter color than the pencil-sketch icons themselves so it
-# reads as a magical/celebratory flourish, not another sketch stroke.
-_SPARKLE_COLOR = QColor(255, 195, 40)
-_ARRIVAL_GLOW_SECONDS = 1.4  # how long the burst at the destination lingers
 _ICON_ANIM_SECONDS = 2.2     # default move/grow duration, once the sketch is done
 
 # Real-world-example photo frame (see visuals.example_image_library) - a
@@ -185,7 +178,7 @@ class _Underline:
 @dataclass
 class _Icon:
     icon_id: str          # referenced by a later animate_icon action
-    name: str              # "car", "person", "ball", "plant", "brain", "book" - dispatches to a _draw_*_icon method
+    name: str              # "car", "person", "ball", "plant" - dispatches to a _draw_*_icon method
     x: float; y: float     # anchor point - bottom-center of the sketch
     scale: float
     start_time: float
@@ -198,11 +191,6 @@ class _Icon:
     anim_to_scale: float = 1.0
     anim_start_time: float = 0.0
     anim_duration: float = 0.0
-    # Knowledge-celebration-only flourishes (see _paint_icon's sparkle/glow
-    # section and JarvisBot._play_knowledge_celebration) - False for every
-    # ordinary scene icon (car/person/ball/plant).
-    sparkle_trail: bool = False     # a fading sparkle trail behind a "move" animation
-    glow_on_arrival: bool = False   # a glow+sparkle burst once a "move" animation completes
 
 
 @dataclass
@@ -457,87 +445,9 @@ class TeachingCanvas(QGraphicsObject):
             strokes = self._ball_icon_strokes(x, icon.y, scale)
         elif icon.name == "plant":
             strokes = self._plant_icon_strokes(x, icon.y, scale)
-        elif icon.name == "brain":
-            strokes = self._brain_icon_strokes(x, icon.y, scale)
-        elif icon.name == "book":
-            strokes = self._book_icon_strokes(x, icon.y, scale)
         else:
             return
         self._reveal_strokes(painter, strokes, draw_progress)
-
-        if icon.sparkle_trail or icon.glow_on_arrival:
-            self._paint_celebration_effects(painter, icon, now, scale)
-
-    def _draw_sparkle(self, painter: QPainter, center: QPointF, size: float, alpha: float) -> None:
-        """A small 8-ray sparkle/twinkle mark, built from short strokes
-        radiating out from `center` rather than a filled star polygon -
-        reads as a quick pencil-sketch twinkle, consistent with every
-        other icon stroke in this file, not a solid emoji-style star.
-        Used only by the knowledge-celebration trail/arrival burst below."""
-        if alpha <= 0 or size <= 0:
-            return
-        painter.save()
-        pen = QPen(_SPARKLE_COLOR, 1.6)
-        pen.setCapStyle(Qt.RoundCap)
-        painter.setPen(pen)
-        painter.setOpacity(max(0.0, min(1.0, alpha)))
-        for angle_deg in range(0, 360, 45):
-            rad = math.radians(angle_deg)
-            inner, outer = 0.35 * size, size
-            painter.drawLine(
-                QPointF(center.x() + inner * math.cos(rad), center.y() + inner * math.sin(rad)),
-                QPointF(center.x() + outer * math.cos(rad), center.y() + outer * math.sin(rad)),
-            )
-        painter.restore()
-
-    def _paint_celebration_effects(self, painter: QPainter, icon: _Icon, now: float, scale: float) -> None:
-        """
-        The knowledge-celebration's "more wonderful than a plain move"
-        flourish (see JarvisBot._play_knowledge_celebration): a fading
-        sparkle trail behind the brain icon while it travels, then a
-        brief glow + sparkle burst at the book once it arrives. Both are
-        no-ops for every ordinary scene icon (car/person/ball/plant),
-        which never set these flags.
-        """
-        if icon.anim_kind != "move" or icon.anim_duration <= 0:
-            return
-        move_progress = self._progress(icon.anim_start_time, now, duration=icon.anim_duration)
-        center_y = icon.y - 20 * scale
-
-        if icon.sparkle_trail and 0 < move_progress < 1.0:
-            for i, back in enumerate((0.07, 0.14, 0.22)):
-                trail_p = move_progress - back
-                if trail_p <= 0:
-                    continue
-                # Eased the same way _current_icon_state positions the
-                # icon itself, so the trail traces where the brain
-                # actually was, not its old straight-line path.
-                eased_trail_p = self._ease_out_cubic(max(0.0, min(1.0, trail_p)))
-                trail_x = icon.anim_from_x + (icon.anim_to_x - icon.anim_from_x) * eased_trail_p
-                fade = max(0.0, 1.0 - back / 0.22)
-                self._draw_sparkle(painter, QPointF(trail_x, center_y), size=(10 - i * 2) * scale, alpha=0.5 * fade)
-
-        if icon.glow_on_arrival:
-            elapsed = now - (icon.anim_start_time + icon.anim_duration)
-            if 0 <= elapsed <= _ARRIVAL_GLOW_SECONDS:
-                burst_p = elapsed / _ARRIVAL_GLOW_SECONDS
-                center = QPointF(icon.anim_to_x, center_y)
-                for ring in range(2):
-                    ring_p = min(1.0, burst_p + ring * 0.3)
-                    alpha = max(0.0, 0.5 * (1.0 - ring_p))
-                    if alpha > 0:
-                        radius = 10 * scale + ring_p * 50 * scale
-                        painter.save()
-                        painter.setOpacity(alpha)
-                        painter.setPen(QPen(_SPARKLE_COLOR, 2))
-                        painter.setBrush(Qt.NoBrush)
-                        painter.drawEllipse(center, radius, radius)
-                        painter.restore()
-                for angle_deg in range(0, 360, 45):
-                    rad = math.radians(angle_deg)
-                    dist = burst_p * 45 * scale
-                    spark_center = QPointF(center.x() + dist * math.cos(rad), center.y() + dist * math.sin(rad))
-                    self._draw_sparkle(painter, spark_center, size=8 * scale, alpha=max(0.0, 1.0 - burst_p))
 
     @staticmethod
     def _partial_path(path: QPainterPath, t: float) -> QPainterPath:
@@ -729,91 +639,6 @@ class TeachingCanvas(QGraphicsObject):
         strokes.append(("ellipse", QPointF(cx, top_y), petal_r * 0.7, petal_r * 0.7))
         strokes.append(("arc", QRectF(cx - 18 * s, ground_y - 4 * s, 36 * s, 10 * s), 0, -180 * 16))
         return strokes
-
-    def _brain_icon_strokes(self, cx: float, ground_y: float, scale: float) -> list:
-        """Pencil-sketch brain for the knowledge-celebration (see
-        JarvisBot._play_knowledge_celebration) - a bumpy, "cauliflower"
-        cortex outline (alternating small bumps and valleys, the classic
-        cartoon-brain silhouette) rather than a smooth oval, which read
-        as more of a kidney-bean/egg shape and was flagged live as not
-        looking good - the bumps alone read as "brain" even at a glance,
-        before the seam/wrinkle detail strokes are even visible."""
-        s = scale
-        r = 34 * s
-        cy = ground_y - r
-
-        outline = QPainterPath()
-        outline.moveTo(cx - r, cy + r * 0.30)
-        outline.quadTo(cx - r * 1.08, cy - r * 0.15, cx - r * 0.82, cy - r * 0.55)
-        outline.quadTo(cx - r * 0.62, cy - r * 0.85, cx - r * 0.38, cy - r * 0.58)
-        outline.quadTo(cx - r * 0.22, cy - r * 1.18, cx, cy - r * 0.88)
-        outline.quadTo(cx + r * 0.22, cy - r * 1.18, cx + r * 0.38, cy - r * 0.58)
-        outline.quadTo(cx + r * 0.62, cy - r * 0.85, cx + r * 0.82, cy - r * 0.55)
-        outline.quadTo(cx + r * 1.08, cy - r * 0.15, cx + r, cy + r * 0.30)
-        outline.quadTo(cx + r * 0.65, cy + r * 1.08, cx, cy + r * 0.92)
-        outline.quadTo(cx - r * 0.65, cy + r * 1.08, cx - r, cy + r * 0.30)
-
-        seam = QPainterPath()
-        seam.moveTo(cx, cy - r * 0.85)
-        seam.quadTo(cx - r * 0.12, cy, cx, cy + r * 0.88)
-
-        def wrinkle(x0, y0, x1, y1, x2, y2):
-            p = QPainterPath()
-            p.moveTo(x0, y0)
-            p.quadTo(x1, y1, x2, y2)
-            return ("path", p)
-
-        return [
-            ("path", outline),
-            ("path", seam),
-            wrinkle(cx - r * 0.72, cy - r * 0.15, cx - r * 0.5, cy - r * 0.42, cx - r * 0.22, cy - r * 0.15),
-            wrinkle(cx - r * 0.68, cy + r * 0.40, cx - r * 0.35, cy + r * 0.18, cx - r * 0.08, cy + r * 0.48),
-            wrinkle(cx + r * 0.72, cy - r * 0.15, cx + r * 0.5, cy - r * 0.42, cx + r * 0.22, cy - r * 0.15),
-            wrinkle(cx + r * 0.68, cy + r * 0.40, cx + r * 0.35, cy + r * 0.18, cx + r * 0.08, cy + r * 0.48),
-        ]
-
-    def _book_icon_strokes(self, cx: float, ground_y: float, scale: float) -> list:
-        """Pencil-sketch open book for the knowledge-celebration's
-        destination icon - two pages meeting at a center spine, each
-        with a couple of short horizontal "text" lines, the clearest
-        universal shorthand for "knowledge" at this icon set's fidelity."""
-        s = scale
-        half_w = 34 * s
-        h = 26 * s
-        top_y = ground_y - h * 1.3
-        bottom_y = ground_y - 2 * s
-
-        left_page = QPainterPath()
-        left_page.moveTo(cx, top_y)
-        left_page.quadTo(cx - half_w * 1.1, top_y - 6 * s, cx - half_w, top_y + h * 0.3)
-        left_page.lineTo(cx - half_w * 0.9, bottom_y)
-        left_page.quadTo(cx - 4 * s, bottom_y - h * 0.15, cx, bottom_y)
-        left_page.lineTo(cx, top_y)
-
-        right_page = QPainterPath()
-        right_page.moveTo(cx, top_y)
-        right_page.quadTo(cx + half_w * 1.1, top_y - 6 * s, cx + half_w, top_y + h * 0.3)
-        right_page.lineTo(cx + half_w * 0.9, bottom_y)
-        right_page.quadTo(cx + 4 * s, bottom_y - h * 0.15, cx, bottom_y)
-        right_page.lineTo(cx, top_y)
-
-        def text_line(side: int, frac: float, width_frac: float):
-            y = top_y + h * (0.55 + frac * 0.55)
-            return (
-                "line",
-                QPointF(cx + side * half_w * 0.2, y),
-                QPointF(cx + side * half_w * width_frac, y),
-            )
-
-        return [
-            ("path", left_page),
-            ("path", right_page),
-            ("line", QPointF(cx, top_y), QPointF(cx, bottom_y)),
-            text_line(-1, 0.0, 0.75),
-            text_line(-1, 0.35, 0.6),
-            text_line(1, 0.0, 0.75),
-            text_line(1, 0.35, 0.6),
-        ]
 
     def _paint_fraction_bar(self, painter: QPainter, item: _FractionBar, now: float) -> None:
         """Reveals each bar in turn (if there's more than one, for a
@@ -1037,10 +862,9 @@ class TeachingCanvas(QGraphicsObject):
         self.title_text = text
         self.update()
 
-    def add_icon(self, icon_id, name, x, y, scale=1.0, sparkle_trail=False, glow_on_arrival=False):
+    def add_icon(self, icon_id, name, x, y, scale=1.0):
         self.icons.append(_Icon(
             icon_id=icon_id, name=name, x=x, y=y, scale=scale, start_time=time.monotonic(),
-            sparkle_trail=sparkle_trail, glow_on_arrival=glow_on_arrival,
         ))
         self.update()
 
@@ -1182,8 +1006,6 @@ class TeachingCanvas(QGraphicsObject):
                     action.get("id", ""), action.get("icon", "car"),
                     action.get("x", 620), action.get("y", 340),
                     action.get("scale", 1.0),
-                    sparkle_trail=bool(action.get("sparkle_trail", False)),
-                    glow_on_arrival=bool(action.get("glow_on_arrival", False)),
                 )
 
             elif action_type == "animate_icon":

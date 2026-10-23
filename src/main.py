@@ -1225,63 +1225,6 @@ class JarvisBot:
         }
         continuous_vad.reset_idle_timer()
 
-    # Rotated for variety rather than always saying the exact same line -
-    # see _build_knowledge_celebration.
-    _KNOWLEDGE_CELEBRATION_TEMPLATES = [
-        "Congratulations - you just added {concept} to your knowledge base! Great job.",
-        "Nice! {concept_title} just became part of your knowledge base - way to go!",
-        "Awesome work! You've grown your knowledge base with {concept} today.",
-        "Ta-da! {concept_title} is officially in your knowledge base now.",
-    ]
-
-    def _build_knowledge_celebration(self, concept: str) -> tuple:
-        """
-        Visual actions + a spoken line for the "you just learned
-        something new" celebration played right after a curiosity-
-        question teaching turn's explanation (see _run_teaching_turn,
-        gated on is_curiosity_question) - not after a specific math
-        problem, which already ends with its own solved-equation
-        satisfaction. A brain icon sketches in on the left and travels to
-        a book icon already sitting on the right, with a sparkle trail
-        and an arrival glow burst (see visuals/ui/teaching_canvas.py's
-        sparkle_trail/glow_on_arrival), while Jarvis names what was just
-        learned - "I want to know about X" should end with a clear,
-        warm "that's now part of what you know," not just trail off.
-
-        Returns (actions, phrase) rather than speaking/emitting directly,
-        so the caller can stream the phrase through the SAME already-open
-        audio_player session as the rest of the explanation (like
-        check_question does) instead of opening a second one.
-
-        Doesn't touch any OTHER `self` state (like is_math_query), so
-        it's cheaply testable unbound, without constructing a full
-        JarvisBot.
-        """
-        concept_readable = concept.replace("_", " ")
-        template = random.choice(JarvisBot._KNOWLEDGE_CELEBRATION_TEMPLATES)
-        phrase = template.format(concept=concept_readable, concept_title=concept_readable.capitalize())
-
-        actions = [
-            {"action": "clear"},
-            {"action": "set_title", "text": "Great Job!"},
-            # Sized up meaningfully from the original 1.1/1.3 - confirmed
-            # live as a real complaint: both icons read as too small and
-            # lost in a huge mostly-empty board. x positions widened to
-            # match (book kept clear of the x>780 face-widget zone, brain
-            # given more travel distance).
-            {"action": "draw_icon", "id": "celebration_book", "icon": "book", "x": 680, "y": 380, "scale": 2.0},
-            {
-                "action": "draw_icon", "id": "celebration_brain", "icon": "brain",
-                "x": 340, "y": 380, "scale": 1.8,
-                "sparkle_trail": True, "glow_on_arrival": True,
-            },
-            {
-                "action": "animate_icon", "id": "celebration_brain", "animation": "move",
-                "to_x": 600, "duration": 2.0,
-            },
-        ]
-        return actions, phrase
-
     # Rotated for variety - spoken immediately at the start of a teaching
     # turn, before generate_teaching_plan() even starts (see
     # _run_teaching_turn). Deliberately "thinking" phrasing, not content
@@ -1510,35 +1453,6 @@ class JarvisBot:
                 self._last_bot_response = fast_refusal
                 continuous_vad.reset_idle_timer()
                 return
-
-            # "I want to know about X" questions get an extra celebratory
-            # beat marking that the new concept is now part of what the
-            # student knows - see _build_knowledge_celebration. Placed
-            # after the explanation but before the check_question, so the
-            # check still reads as "now let's see if it stuck" rather
-            # than interrupting the celebration. Streamed through this
-            # SAME already-open audio_player session (like check_question
-            # below), not _speak_fixed_phrase, which would open a second one.
-            if not self._interruption_event.is_set() and self.is_curiosity_question(user_text):
-                celebration_actions, celebration_phrase = self._build_knowledge_celebration(concept)
-                if self.ui_signals:
-                    self.ui_signals.draw_actions.emit(celebration_actions)
-                    self.ui_signals.set_expression.emit(Expression.EXCITED.value)
-                response_parts.append(celebration_phrase)
-                celebration_stream = self.tts_client.synthesize_stream(
-                    iter([celebration_phrase]), delivery=self.expression_controller.celebration()
-                )
-                for audio_chunk in celebration_stream:
-                    if self._interruption_event.is_set():
-                        break
-                    if self.audio_player._is_playing:
-                        try:
-                            self.audio_player.queue_audio(audio_chunk)
-                        except RuntimeError as e:
-                            logger.warning(f"⚠️ Playback queueing failed (likely stopped): {e}")
-                            break
-                    else:
-                        break
 
             # Ask the comprehension-check question, if the plan included
             # one, right after the explanation - same streaming pattern as

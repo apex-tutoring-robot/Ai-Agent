@@ -92,12 +92,3 @@ class ExpressionController:
         more honest expression for the moment than a flat neutral face.
         """
         return _STYLES[Expression.CONFUSED]
-
-    def celebration(self) -> DeliveryStyle:
-        """
-        For the brain-to-knowledge-base celebration played right after a
-        curiosity-question teaching turn's explanation (see main.py's
-        _play_knowledge_celebration) - the same big, upbeat energy as a
-        CHALLENGE moment, just not tied to a graded answer.
-        """
-        return _STYLES[Expression.EXCITED]
