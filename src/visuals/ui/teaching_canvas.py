@@ -414,11 +414,22 @@ class TeachingCanvas(QGraphicsObject):
             my = cy - ry * math.sin(angle_rad)
             self._draw_marker(painter, mx, my)
 
+    @staticmethod
+    def _ease_out_cubic(p: float) -> float:
+        """Starts fast, decelerates into the finish - reads as a real
+        object arriving somewhere and settling, not a constant-velocity
+        slide. Confirmed live as a real quality complaint: the plain
+        linear interpolation this replaces looked stiff/mechanical,
+        especially for the knowledge-celebration's brain travelling to
+        the book - a purely cosmetic curve applied to the same 0..1
+        progress value, used for every icon move/grow animation."""
+        return 1.0 - (1.0 - p) ** 3
+
     def _current_icon_state(self, icon: _Icon, now: float) -> Tuple[float, float]:
         """Returns (x, scale) - animated if animate_icon() was called, static otherwise."""
         if icon.anim_kind == "none" or icon.anim_duration <= 0:
             return icon.x, icon.scale
-        p = self._progress(icon.anim_start_time, now, duration=icon.anim_duration)
+        p = self._ease_out_cubic(self._progress(icon.anim_start_time, now, duration=icon.anim_duration))
         x = icon.anim_from_x + (icon.anim_to_x - icon.anim_from_x) * p
         scale = icon.anim_from_scale + (icon.anim_to_scale - icon.anim_from_scale) * p
         return x, scale
@@ -498,7 +509,11 @@ class TeachingCanvas(QGraphicsObject):
                 trail_p = move_progress - back
                 if trail_p <= 0:
                     continue
-                trail_x = icon.anim_from_x + (icon.anim_to_x - icon.anim_from_x) * trail_p
+                # Eased the same way _current_icon_state positions the
+                # icon itself, so the trail traces where the brain
+                # actually was, not its old straight-line path.
+                eased_trail_p = self._ease_out_cubic(max(0.0, min(1.0, trail_p)))
+                trail_x = icon.anim_from_x + (icon.anim_to_x - icon.anim_from_x) * eased_trail_p
                 fade = max(0.0, 1.0 - back / 0.22)
                 self._draw_sparkle(painter, QPointF(trail_x, center_y), size=(10 - i * 2) * scale, alpha=0.5 * fade)
 
@@ -717,27 +732,30 @@ class TeachingCanvas(QGraphicsObject):
 
     def _brain_icon_strokes(self, cx: float, ground_y: float, scale: float) -> list:
         """Pencil-sketch brain for the knowledge-celebration (see
-        JarvisBot._play_knowledge_celebration) - a lumpy rounded
-        silhouette (bumpy top, smoother underside) split by a center
-        seam into two hemispheres, with a couple of short wrinkle
-        strokes on each side - just enough detail to read as "brain" at
-        this icon set's sketch fidelity, not an anatomical diagram."""
+        JarvisBot._play_knowledge_celebration) - a bumpy, "cauliflower"
+        cortex outline (alternating small bumps and valleys, the classic
+        cartoon-brain silhouette) rather than a smooth oval, which read
+        as more of a kidney-bean/egg shape and was flagged live as not
+        looking good - the bumps alone read as "brain" even at a glance,
+        before the seam/wrinkle detail strokes are even visible."""
         s = scale
         r = 34 * s
         cy = ground_y - r
 
         outline = QPainterPath()
-        outline.moveTo(cx - r, cy + r * 0.35)
-        outline.quadTo(cx - r * 1.05, cy - r * 0.35, cx - r * 0.55, cy - r * 0.95)
-        outline.quadTo(cx - r * 0.15, cy - r * 1.25, cx, cy - r * 0.85)
-        outline.quadTo(cx + r * 0.15, cy - r * 1.25, cx + r * 0.55, cy - r * 0.95)
-        outline.quadTo(cx + r * 1.05, cy - r * 0.35, cx + r, cy + r * 0.35)
-        outline.quadTo(cx + r * 0.6, cy + r * 1.1, cx, cy + r * 0.95)
-        outline.quadTo(cx - r * 0.6, cy + r * 1.1, cx - r, cy + r * 0.35)
+        outline.moveTo(cx - r, cy + r * 0.30)
+        outline.quadTo(cx - r * 1.08, cy - r * 0.15, cx - r * 0.82, cy - r * 0.55)
+        outline.quadTo(cx - r * 0.62, cy - r * 0.85, cx - r * 0.38, cy - r * 0.58)
+        outline.quadTo(cx - r * 0.22, cy - r * 1.18, cx, cy - r * 0.88)
+        outline.quadTo(cx + r * 0.22, cy - r * 1.18, cx + r * 0.38, cy - r * 0.58)
+        outline.quadTo(cx + r * 0.62, cy - r * 0.85, cx + r * 0.82, cy - r * 0.55)
+        outline.quadTo(cx + r * 1.08, cy - r * 0.15, cx + r, cy + r * 0.30)
+        outline.quadTo(cx + r * 0.65, cy + r * 1.08, cx, cy + r * 0.92)
+        outline.quadTo(cx - r * 0.65, cy + r * 1.08, cx - r, cy + r * 0.30)
 
         seam = QPainterPath()
-        seam.moveTo(cx, cy - r * 0.8)
-        seam.quadTo(cx - r * 0.1, cy, cx, cy + r * 0.9)
+        seam.moveTo(cx, cy - r * 0.85)
+        seam.quadTo(cx - r * 0.12, cy, cx, cy + r * 0.88)
 
         def wrinkle(x0, y0, x1, y1, x2, y2):
             p = QPainterPath()
@@ -748,10 +766,10 @@ class TeachingCanvas(QGraphicsObject):
         return [
             ("path", outline),
             ("path", seam),
-            wrinkle(cx - r * 0.75, cy - r * 0.25, cx - r * 0.45, cy - r * 0.55, cx - r * 0.15, cy - r * 0.2),
-            wrinkle(cx - r * 0.7, cy + r * 0.35, cx - r * 0.35, cy + r * 0.15, cx - r * 0.1, cy + r * 0.45),
-            wrinkle(cx + r * 0.75, cy - r * 0.25, cx + r * 0.45, cy - r * 0.55, cx + r * 0.15, cy - r * 0.2),
-            wrinkle(cx + r * 0.7, cy + r * 0.35, cx + r * 0.35, cy + r * 0.15, cx + r * 0.1, cy + r * 0.45),
+            wrinkle(cx - r * 0.72, cy - r * 0.15, cx - r * 0.5, cy - r * 0.42, cx - r * 0.22, cy - r * 0.15),
+            wrinkle(cx - r * 0.68, cy + r * 0.40, cx - r * 0.35, cy + r * 0.18, cx - r * 0.08, cy + r * 0.48),
+            wrinkle(cx + r * 0.72, cy - r * 0.15, cx + r * 0.5, cy - r * 0.42, cx + r * 0.22, cy - r * 0.15),
+            wrinkle(cx + r * 0.68, cy + r * 0.40, cx + r * 0.35, cy + r * 0.18, cx + r * 0.08, cy + r * 0.48),
         ]
 
     def _book_icon_strokes(self, cx: float, ground_y: float, scale: float) -> list:
@@ -1048,12 +1066,22 @@ class TeachingCanvas(QGraphicsObject):
         itself. Silently skips a path that doesn't load (missing file,
         corrupt image), same defensive pattern as add_fraction_bar - a
         bad path should never crash the turn, just leave that step
-        without a photo."""
+        without a photo.
+
+        REPLACES any existing photo rather than accumulating - confirmed
+        live as a real bug: a curiosity-question explanation routinely
+        has TWO real-world examples in separate speech steps, and if both
+        happen to match a library tag, both photos were being appended
+        and drawn at the SAME fixed position main.py always uses,
+        stacking directly on top of each other. Each photo illustrates
+        whatever's being discussed RIGHT NOW, like a teacher holding up
+        one picture at a time, not a growing collage - showing only the
+        latest is correct, not a workaround."""
         pixmap = self._load_pixmap(path)
         if pixmap is None or pixmap.isNull():
             logger.warning(f"Skipping show_photo action - couldn't load image: {path}")
             return
-        self.photo_items.append(_Photo(path, x, y, w, h, time.monotonic()))
+        self.photo_items = [_Photo(path, x, y, w, h, time.monotonic())]
         self.update()
 
     @classmethod

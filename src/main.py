@@ -1264,15 +1264,20 @@ class JarvisBot:
         actions = [
             {"action": "clear"},
             {"action": "set_title", "text": "Great Job!"},
-            {"action": "draw_icon", "id": "celebration_book", "icon": "book", "x": 700, "y": 380, "scale": 1.3},
+            # Sized up meaningfully from the original 1.1/1.3 - confirmed
+            # live as a real complaint: both icons read as too small and
+            # lost in a huge mostly-empty board. x positions widened to
+            # match (book kept clear of the x>780 face-widget zone, brain
+            # given more travel distance).
+            {"action": "draw_icon", "id": "celebration_book", "icon": "book", "x": 680, "y": 380, "scale": 2.0},
             {
                 "action": "draw_icon", "id": "celebration_brain", "icon": "brain",
-                "x": 380, "y": 380, "scale": 1.1,
+                "x": 340, "y": 380, "scale": 1.8,
                 "sparkle_trail": True, "glow_on_arrival": True,
             },
             {
                 "action": "animate_icon", "id": "celebration_brain", "animation": "move",
-                "to_x": 620, "duration": 2.0,
+                "to_x": 600, "duration": 2.0,
             },
         ]
         return actions, phrase
