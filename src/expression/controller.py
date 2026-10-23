@@ -35,16 +35,36 @@ class DeliveryStyle:
     expression: Expression
     rate_percent: int   # SSML prosody rate nudge, e.g. -10 for 10% slower
     pitch_percent: int  # SSML prosody pitch nudge, e.g. +5 for 5% higher
+    # Azure mstts:express-as style - the actual vocal-performance lever
+    # (word stress, breathiness, pacing contour), as opposed to the
+    # rate/pitch nudges above which just speed up/slow down and
+    # raise/lower the SAME flat delivery. Defaults to "chat" (the
+    # client's own global default, see tts_client.py's TTS_STYLE) so a
+    # DeliveryStyle built without naming one still produces valid SSML.
+    # Only styles confirmed supported by en-US-JennyNeural (the
+    # configured voice) are used here - an unsupported style name isn't
+    # an error, Azure just silently ignores it and falls back to default
+    # delivery (see tts_client.py's _build_ssml docstring), so a wrong
+    # guess would fail silently rather than loudly.
+    style: str = "chat"
+    styledegree: float = 1.0  # style intensity, Azure's own 0.01-2.0 range (1.0 = default)
 
 
 _STYLES = {
-    Expression.FRIENDLY: DeliveryStyle(Expression.FRIENDLY, rate_percent=0, pitch_percent=0),
-    Expression.ENCOURAGING: DeliveryStyle(Expression.ENCOURAGING, rate_percent=-10, pitch_percent=0),
-    Expression.CALM: DeliveryStyle(Expression.CALM, rate_percent=-15, pitch_percent=-3),
-    Expression.EXCITED: DeliveryStyle(Expression.EXCITED, rate_percent=8, pitch_percent=5),
-    Expression.CONFUSED: DeliveryStyle(Expression.CONFUSED, rate_percent=-8, pitch_percent=-2),
-    Expression.SAD: DeliveryStyle(Expression.SAD, rate_percent=-12, pitch_percent=-4),
-    Expression.NEUTRAL: DeliveryStyle(Expression.NEUTRAL, rate_percent=0, pitch_percent=0),
+    Expression.FRIENDLY: DeliveryStyle(Expression.FRIENDLY, rate_percent=0, pitch_percent=0, style="friendly", styledegree=1.0),
+    Expression.ENCOURAGING: DeliveryStyle(Expression.ENCOURAGING, rate_percent=-10, pitch_percent=0, style="hopeful", styledegree=1.0),
+    Expression.CALM: DeliveryStyle(Expression.CALM, rate_percent=-15, pitch_percent=-3, style="assistant", styledegree=1.0),
+    Expression.EXCITED: DeliveryStyle(Expression.EXCITED, rate_percent=8, pitch_percent=5, style="excited", styledegree=1.3),
+    # No "confused" style exists on this voice, and the nearest-sounding
+    # named styles (unfriendly/terrified) would send the wrong emotional
+    # signal on a safety refusal - a cold or scared Jarvis is worse than
+    # a flat one. "whispering" reads as a gentle, soft-spoken "hmm, I'm
+    # not sure about that" instead, which fits a refusal without being
+    # dramatic - and keeps every Expression on its own distinct style
+    # (NEUTRAL is the only other one on the base "chat").
+    Expression.CONFUSED: DeliveryStyle(Expression.CONFUSED, rate_percent=-8, pitch_percent=-2, style="whispering", styledegree=0.7),
+    Expression.SAD: DeliveryStyle(Expression.SAD, rate_percent=-12, pitch_percent=-4, style="sad", styledegree=0.8),
+    Expression.NEUTRAL: DeliveryStyle(Expression.NEUTRAL, rate_percent=0, pitch_percent=0, style="chat", styledegree=1.0),
 }
 
 # Default mapping from a tutoring decision to an expression - not yet

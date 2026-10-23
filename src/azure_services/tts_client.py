@@ -162,21 +162,34 @@ class TextToSpeechClient:
         except Exception as e:
             logger.warning(f"TTS warm-up failed (non-critical): {e}")
     
-    def _build_ssml(self, text: str, rate_percent: Optional[int] = None, pitch_percent: Optional[int] = None) -> str:
+    def _build_ssml(
+        self, text: str, rate_percent: Optional[int] = None, pitch_percent: Optional[int] = None,
+        style: Optional[str] = None, styledegree: Optional[float] = None,
+    ) -> str:
         """
-        Wrap text in SSML with the conversational mstts:express-as style
-        (self.style, see __init__) plus <prosody rate="..." pitch="...">
-        adjustments. speak_text()/speak_text_async() only accept plain
-        text - there's no style/rate/pitch parameter on those calls, so
-        every call now goes through this SSML path instead (see
-        synthesize_to_audio - previously only delivery/non-default-rate
-        calls used SSML, meaning most actual speech got neither a style
-        NOR any prosody shaping at all). text is XML-escaped since it's
-        LLM-generated and may contain '&', '<', '>', etc.
+        Wrap text in SSML with an mstts:express-as style plus
+        <prosody rate="..." pitch="..."> adjustments. speak_text()/
+        speak_text_async() only accept plain text - there's no style/
+        rate/pitch parameter on those calls, so every call now goes
+        through this SSML path instead (see synthesize_to_audio -
+        previously only delivery/non-default-rate calls used SSML,
+        meaning most actual speech got neither a style NOR any prosody
+        shaping at all). text is XML-escaped since it's LLM-generated
+        and may contain '&', '<', '>', etc.
 
         rate_percent/pitch_percent, when given, override the instance's
         global self.speech_rate for this one call - see synthesize_to_audio's
         `delivery` parameter.
+
+        style, when given (including ""), overrides the instance's
+        global self.style for this one call the same way - this is what
+        lets a mood (ExpressionController's DeliveryStyle) actually
+        change HOW the voice performs the line (word stress, breathiness,
+        pacing contour), not just speed it up/slow it down. styledegree
+        sets that style's intensity (Azure's own 0.01-2.0 range, default
+        1) via a styledegree attribute alongside it - omitted entirely
+        when not given, same as leaving it out of the SSML lets Azure
+        use its own default.
         """
         if rate_percent is None:
             rate_percent = int(round((self.speech_rate - 1.0) * 100))
@@ -185,7 +198,12 @@ class TextToSpeechClient:
         pitch_sign = "+" if pitch_percent >= 0 else ""
         escaped = saxutils.escape(text)
         prosody = f'<prosody rate="{rate_sign}{rate_percent}%" pitch="{pitch_sign}{pitch_percent}%">{escaped}</prosody>'
-        styled = f'<mstts:express-as style="{self.style}">{prosody}</mstts:express-as>' if self.style else prosody
+        effective_style = self.style if style is None else style
+        if effective_style:
+            degree_attr = f' styledegree="{styledegree}"' if styledegree is not None else ""
+            styled = f'<mstts:express-as style="{effective_style}"{degree_attr}>{prosody}</mstts:express-as>'
+        else:
+            styled = prosody
         return (
             '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
             'xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="en-US">'
@@ -199,8 +217,9 @@ class TextToSpeechClient:
         Args:
             text: Text to synthesize
             delivery: Optional per-utterance ExpressionController DeliveryStyle
-                (rate/pitch nudge) - overrides the instance's global
-                speech_rate for this call only. See expression/controller.py.
+                (rate/pitch nudge AND Azure express-as style/styledegree) -
+                overrides the instance's global speech_rate/style for this
+                call only. See expression/controller.py.
 
         Returns:
             Raw audio bytes (PCM 16-bit, 16kHz, mono)
@@ -213,7 +232,10 @@ class TextToSpeechClient:
             # (speak_text() carries no style at all, which was the actual
             # gap behind "the voice sounds flat/robotic").
             if delivery is not None:
-                ssml = self._build_ssml(text, rate_percent=delivery.rate_percent, pitch_percent=delivery.pitch_percent)
+                ssml = self._build_ssml(
+                    text, rate_percent=delivery.rate_percent, pitch_percent=delivery.pitch_percent,
+                    style=delivery.style, styledegree=delivery.styledegree,
+                )
             else:
                 ssml = self._build_ssml(text)
             result = self.synthesizer.speak_ssml(ssml)

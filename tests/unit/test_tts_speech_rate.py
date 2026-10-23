@@ -113,3 +113,39 @@ class TestBuildSsmlConversationalStyle:
         ssml = client._build_ssml("hello there")
         assert "mstts:express-as" not in ssml
         assert "<prosody" in ssml
+
+
+class TestBuildSsmlPerCallStyleOverride:
+    """_build_ssml's style/styledegree params - what lets a mood
+    (ExpressionController's DeliveryStyle) actually change the Azure
+    express-as style per utterance, not just the instance-wide default
+    set at TTS client construction (self.style)."""
+
+    def test_per_call_style_overrides_the_instance_default(self):
+        client = make_client(speech_rate=1.0, style="chat")
+        ssml = client._build_ssml("hello there", style="excited")
+        assert 'style="excited"' in ssml
+        assert 'style="chat"' not in ssml
+
+    def test_no_style_override_falls_back_to_instance_default(self):
+        client = make_client(speech_rate=1.0, style="chat")
+        ssml = client._build_ssml("hello there")
+        assert 'style="chat"' in ssml
+
+    def test_empty_string_override_omits_the_wrapper_even_with_an_instance_default(self):
+        client = make_client(speech_rate=1.0, style="chat")
+        ssml = client._build_ssml("hello there", style="")
+        assert "mstts:express-as" not in ssml
+
+    def test_styledegree_is_included_when_given(self):
+        client = make_client(speech_rate=1.0, style="chat")
+        ssml = client._build_ssml("hello there", style="excited", styledegree=1.3)
+        assert 'styledegree="1.3"' in ssml
+
+    def test_styledegree_is_omitted_when_not_given(self):
+        # Letting Azure fall back to its own default (1.0) rather than
+        # always forcing the attribute - matches _build_ssml's existing
+        # "omit rather than force a value" pattern for optional SSML bits.
+        client = make_client(speech_rate=1.0, style="chat")
+        ssml = client._build_ssml("hello there", style="excited")
+        assert "styledegree" not in ssml
