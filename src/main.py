@@ -1896,6 +1896,41 @@ class JarvisBot:
             logger.error(f"Listener error: {e}")
             self._conversation_active.clear()
 
+    def _drain_to_latest_request(self, first: str) -> str:
+        """
+        Given the oldest queued utterance `first` (already pulled off
+        _request_queue), checks for any NEWER ones that already arrived
+        and returns the latest instead - see _speaker_loop. Without this,
+        several utterances queued up while a previous turn was still
+        working (e.g. during generate_teaching_plan's long "thinking"
+        wait, now un-muted - see _run_teaching_turn) each got their own
+        full response, processed one at a time in order, even when the
+        student was really just clarifying or redirecting themselves.
+        Confirmed live as direct feedback: an interruption should mean
+        "stop and work on the latest part," not "queue it and get to it
+        eventually."
+
+        A None sentinel (termination) found while draining is put back
+        on the queue rather than consumed, so the caller's own
+        termination check catches it on its next iteration instead of
+        shutdown being silently swallowed while chasing a newer utterance.
+        """
+        latest = first
+        drained = 0
+        while True:
+            try:
+                newer = self._request_queue.get_nowait()
+            except queue.Empty:
+                break
+            if newer is None:
+                self._request_queue.put(None)
+                break
+            latest = newer
+            drained += 1
+        if drained:
+            logger.info(f"⏭️  Skipped {drained} superseded utterance(s), acting on the latest: '{latest[:60]}'")
+        return latest
+
     def _speaker_loop(self, continuous_vad, output_device_index):
         """Consumer: Processes requests and speaks."""
         logger.info("🔊 Speaker worker started")
@@ -1906,10 +1941,12 @@ class JarvisBot:
                     user_text = self._request_queue.get(timeout=1.0)
                 except queue.Empty:
                     continue
-                    
+
                 if user_text is None: # Termination sentinel
                     break
-                    
+
+                user_text = self._drain_to_latest_request(user_text)
+
                 # Signal we are busy
                 self._speaker_busy.set()
                 self._interruption_event.clear()
