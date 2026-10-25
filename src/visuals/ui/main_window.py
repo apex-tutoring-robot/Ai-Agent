@@ -7,7 +7,9 @@ the main thread instead of FaceAnimator.render_forever()'s blocking cv2 loop
 
 import os
 from PyQt5.QtWidgets import QMainWindow, QWidget
+from utils.version_info import get_current_commit
 from visuals.ui.audio_device_indicator import AudioDeviceIndicator
+from visuals.ui.commit_indicator import CommitIndicator
 from visuals.ui.face_widget import FaceWidget
 from visuals.ui.teaching_canvas import TeachingCanvas
 from visuals.ui.tutor_scene import TutorScene
@@ -42,6 +44,15 @@ class MainWindow(QMainWindow):
         # actually picked, see audio_device_indicator.py's own docstring.
         self.audio_device_indicator = AudioDeviceIndicator(self)
 
+        # Same corner as the volume indicator, stacked below it - a
+        # persistent readout of which commit is actually running, see
+        # commit_indicator.py's own docstring. Populated once at startup
+        # (the running commit doesn't change mid-session) rather than
+        # via a ui_signals round-trip like the mic/speaker readout,
+        # which genuinely can change after _recreate_audio_system.
+        self.commit_indicator = CommitIndicator(self)
+        self.commit_indicator.show_commit(get_current_commit())
+
         # Plain black overlay shown during the display-sleep cycle (after
         # prolonged idle - see JarvisBot's run() loop). Qt-side equivalent
         # of the old cv2 FaceAnimator's blanked frame; paired with an actual
@@ -61,6 +72,7 @@ class MainWindow(QMainWindow):
 
         self._position_volume_indicator()
         self._position_audio_device_indicator()
+        self._position_commit_indicator()
         self._position_sleep_overlay()
         self._connect_signals()
         self.show_idle_mode()
@@ -108,6 +120,18 @@ class MainWindow(QMainWindow):
         margin = 24
         self.audio_device_indicator.move(margin, margin)
 
+    def _position_commit_indicator(self) -> None:
+        # Directly below the volume indicator's slot, with a gap wide
+        # enough that a transient volume pop-up never overlaps it even
+        # though the two aren't both visible at the same time in the
+        # common case.
+        margin = 24
+        gap = 8
+        self.commit_indicator.move(
+            self.width() - self.commit_indicator.width() - margin,
+            margin + self.volume_indicator.height() + gap,
+        )
+
     def _position_sleep_overlay(self) -> None:
         self.sleep_overlay.setGeometry(0, 0, self.width(), self.height())
 
@@ -115,6 +139,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._position_volume_indicator()
         self._position_audio_device_indicator()
+        self._position_commit_indicator()
         self._position_sleep_overlay()
 
     def show_idle_mode(self):
