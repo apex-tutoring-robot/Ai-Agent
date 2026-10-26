@@ -167,6 +167,7 @@ class JarvisBot:
         # a conversation actually starts and needs Azure STT/TTS.
         wake_word_input_index = resolve_device_index(self.pa, 'input', 'AUDIO_INPUT_DEVICE_INDEX')
         self.wake_word_detector = WakeWordDetector(pa=self.pa, input_device_index=wake_word_input_index)
+        self.wake_word_detector.on_level = self.ui_signals.mic_level_changed.emit if self.ui_signals else None
 
         # Output isn't actually needed yet at this point (AudioPlayer
         # below takes its own device index per-call, resolved fresh when
@@ -373,6 +374,7 @@ class JarvisBot:
             
             # Re-init components with shared callbacks
             self.continuous_vad = ContinuousVADCapture(pa=self.pa)
+            self.continuous_vad.on_input_level = self.ui_signals.mic_level_changed.emit if self.ui_signals else None
             self.audio_player = AudioPlayer(
                 pa=self.pa,
                 on_audio_played=self.continuous_vad.on_audio_played
@@ -380,6 +382,7 @@ class JarvisBot:
             # Same validated resolution as __init__ - see the comment there.
             wake_word_input_index = resolve_device_index(self.pa, 'input', 'AUDIO_INPUT_DEVICE_INDEX')
             self.wake_word_detector = WakeWordDetector(pa=self.pa, input_device_index=wake_word_input_index)
+            self.wake_word_detector.on_level = self.ui_signals.mic_level_changed.emit if self.ui_signals else None
             wake_word_output_index = resolve_device_index(self.pa, 'output', 'AUDIO_OUTPUT_DEVICE_INDEX')
             self._announce_resolved_audio_devices(wake_word_input_index, wake_word_output_index)
 
@@ -2368,7 +2371,8 @@ class JarvisBot:
                 input_device_index=pulse_input_index,
                 player=self.audio_player
             )
-            
+            continuous_vad.on_input_level = self.ui_signals.mic_level_changed.emit if self.ui_signals else None
+
             # Wire callback so VAD knows when bot is speaking (for AEC/Duck)
             self.audio_player.on_audio_played = continuous_vad.on_audio_played
             

@@ -77,6 +77,20 @@ class WakeWordDetector:
         self._owns_pa = (pa is None)
         self._is_running = False
         self.last_detection_time = 0  # For debouncing multiple detections
+
+        # Optional callback(rms: float), fired on every captured chunk
+        # regardless of whether it scores as a wake word - lets the UI
+        # show a live "is the mic actually picking anything up" meter
+        # (see visuals/ui/mic_level_indicator.py). Added after a remote
+        # deployment where device detection, output audio, and the UI
+        # labels were all confirmed working, but the wake word itself
+        # never fired - with no console access to the physical device,
+        # there was no way to tell apart "no real audio is reaching the
+        # app" (hardware/driver/gain problem) from "audio is fine but
+        # the wake-word model/VAD threshold isn't matching it" (a
+        # tunable config problem) without someone able to run a
+        # diagnostic script, which wasn't an option here.
+        self.on_level: Optional[Callable[[float], None]] = None
         
         # openWakeWord requirements: 16kHz, 16-bit PCM, mono
         self.sample_rate = 16000
@@ -257,7 +271,16 @@ class WakeWordDetector:
                 # Mix down to mono if device is stereo
                 if self._actual_channels == 2:
                     audio_array = audio_array.reshape(-1, 2)[:, 0]
-                
+
+                # Fired on every chunk, independent of prediction score -
+                # see self.on_level's own docstring above.
+                if self.on_level is not None:
+                    try:
+                        rms = float(np.sqrt(np.mean(audio_array.astype(np.float32) ** 2))) if len(audio_array) else 0.0
+                        self.on_level(rms)
+                    except Exception:
+                        pass
+
                 # Get predictions from model
                 predictions = self.model.predict(audio_array)
                 

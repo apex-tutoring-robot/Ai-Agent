@@ -11,6 +11,7 @@ from utils.version_info import get_current_commit
 from visuals.ui.audio_device_indicator import AudioDeviceIndicator
 from visuals.ui.commit_indicator import CommitIndicator
 from visuals.ui.face_widget import FaceWidget
+from visuals.ui.mic_level_indicator import MicLevelIndicator
 from visuals.ui.teaching_canvas import TeachingCanvas
 from visuals.ui.tutor_scene import TutorScene
 from visuals.ui.tutor_view import TutorView
@@ -53,6 +54,12 @@ class MainWindow(QMainWindow):
         self.commit_indicator = CommitIndicator(self)
         self.commit_indicator.show_commit(get_current_commit())
 
+        # Bottom-left (clear of the bottom-right face bubble used in
+        # teaching layout - see TutorScene) - a live "is the mic actually
+        # picking anything up" meter, see mic_level_indicator.py's own
+        # docstring for why this exists.
+        self.mic_level_indicator = MicLevelIndicator(self)
+
         # Plain black overlay shown during the display-sleep cycle (after
         # prolonged idle - see JarvisBot's run() loop). Qt-side equivalent
         # of the old cv2 FaceAnimator's blanked frame; paired with an actual
@@ -73,6 +80,7 @@ class MainWindow(QMainWindow):
         self._position_volume_indicator()
         self._position_audio_device_indicator()
         self._position_commit_indicator()
+        self._position_mic_level_indicator()
         self._position_sleep_overlay()
         self._connect_signals()
         self.show_idle_mode()
@@ -93,6 +101,7 @@ class MainWindow(QMainWindow):
         self.signals.show_teaching_layout.connect(self._show_teaching_layout)
         self.signals.volume_changed.connect(self.volume_indicator.show_level)
         self.signals.audio_devices_resolved.connect(self.audio_device_indicator.show_devices)
+        self.signals.mic_level_changed.connect(self.mic_level_indicator.show_level)
         self.signals.enter_sleep.connect(self.show_sleep_mode)
         self.signals.wake_up.connect(self.show_wake_mode)
 
@@ -132,6 +141,15 @@ class MainWindow(QMainWindow):
             margin + self.volume_indicator.height() + gap,
         )
 
+    def _position_mic_level_indicator(self) -> None:
+        # Bottom-left, mirroring the audio device indicator's side but
+        # at the opposite vertical edge - clear of the bottom-right face
+        # bubble used in teaching layout (see TutorScene).
+        margin = 24
+        self.mic_level_indicator.move(
+            margin, self.height() - self.mic_level_indicator.height() - margin
+        )
+
     def _position_sleep_overlay(self) -> None:
         self.sleep_overlay.setGeometry(0, 0, self.width(), self.height())
 
@@ -140,6 +158,7 @@ class MainWindow(QMainWindow):
         self._position_volume_indicator()
         self._position_audio_device_indicator()
         self._position_commit_indicator()
+        self._position_mic_level_indicator()
         self._position_sleep_overlay()
 
     def show_idle_mode(self):

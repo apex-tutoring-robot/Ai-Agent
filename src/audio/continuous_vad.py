@@ -11,7 +11,7 @@ import logging
 from collections import deque
 import queue
 import threading
-from typing import Generator, Optional, Dict
+from typing import Callable, Generator, Optional, Dict
 from dotenv import load_dotenv
 import webrtcvad
 import pyaudio
@@ -137,6 +137,14 @@ class ContinuousVADCapture:
         self._interrupted_this_turn = False
         self.interruption_buffer = []
         
+        # Optional callback(rms: float), fired on every captured chunk in
+        # always_streaming() regardless of mute/speech state - the same
+        # "is the mic actually picking anything up" live meter hook as
+        # WakeWordDetector.on_level (see that attribute's docstring for
+        # why this exists), kept live through the rest of a conversation
+        # too, not just the pre-wake-word phase.
+        self.on_input_level: Optional[Callable[[float], None]] = None
+
         # ── Playback-aware gating (mute-the-pipe) ──
         self._is_bot_playing = False           # Set by main.py via set_playback_state()
         self._barge_in_event = None            # threading.Event from JarvisBot (set on barge-in)
@@ -753,6 +761,14 @@ class ContinuousVADCapture:
                 # chunk that triggers the gate this same iteration is
                 # already in the buffer when it gets flushed.
                 pre_roll_buffer.append(audio_chunk)
+
+                if self.on_input_level is not None:
+                    try:
+                        mic_samples = np.frombuffer(audio_chunk, dtype=np.int16)
+                        mic_rms = float(np.sqrt(np.mean(mic_samples.astype(np.float32) ** 2))) if len(mic_samples) else 0.0
+                        self.on_input_level(mic_rms)
+                    except Exception:
+                        pass
 
                 # ════════════════════════════════════════════════════════
                 # MUTE-THE-PIPE: Decide whether to yield real audio or silence

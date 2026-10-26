@@ -41,6 +41,13 @@ class UISignals(QObject):
     # can show which devices were picked, as a visible health check.
     audio_devices_resolved = pyqtSignal(str, str)
 
+    # Raw mic input RMS level, emitted continuously from both
+    # WakeWordDetector.on_level and ContinuousVADCapture.on_input_level -
+    # a live "is the mic actually picking anything up" meter (see
+    # visuals/ui/mic_level_indicator.py), for diagnosing a remote device
+    # when nobody there can run a terminal diagnostic script.
+    mic_level_changed = pyqtSignal(float)
+
     # Display-sleep cycle after prolonged idle (see JarvisBot.run()'s main
     # loop) - Qt-side equivalent of the old cv2 FaceAnimator's
     # enter_sleep()/wake_up(), paired with an actual HDMI power toggle via
