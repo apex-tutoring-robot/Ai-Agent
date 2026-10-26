@@ -21,7 +21,17 @@ class AudioDeviceIndicator(QWidget):
     _WIDTH = 320
     _HEIGHT = 70
     _PADDING = 14
-    _MAX_NAME_CHARS = 28  # keeps a long device name from overflowing the pill
+    _MAX_NAME_CHARS = 22  # keeps a long device name from overflowing the pill
+    # Padded to the same width so both lines' device names start at the
+    # same x position, not relying on an emoji glyph to tell them apart -
+    # confirmed live on the actual Pi hardware that the mic emoji
+    # (U+1F3A4) silently failed to render in whatever font Qt fell back
+    # to there (no "Comic Sans MS" on Linux), while the speaker one
+    # (U+1F50A) happened to render fine, making the mic line look blank/
+    # unlabeled even though the device name itself was right there -
+    # a plain text label can't have that kind of per-glyph font gap.
+    _MIC_LABEL = "Mic:     "
+    _SPEAKER_LABEL = "Speaker: "
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -64,5 +74,5 @@ class AudioDeviceIndicator(QWidget):
         mic_y = self._PADDING + metrics.ascent()
         speaker_y = mic_y + metrics.height() + 4
 
-        painter.drawText(self._PADDING, int(mic_y), f"\U0001f3a4 {self._mic_name}")
-        painter.drawText(self._PADDING, int(speaker_y), f"\U0001f50a {self._speaker_name}")
+        painter.drawText(self._PADDING, int(mic_y), f"{self._MIC_LABEL}{self._mic_name}")
+        painter.drawText(self._PADDING, int(speaker_y), f"{self._SPEAKER_LABEL}{self._speaker_name}")

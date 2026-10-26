@@ -39,3 +39,21 @@ class TestTruncate:
 
     def test_none_shows_a_placeholder(self):
         assert AudioDeviceIndicator._truncate(None) == "(none found)"
+
+
+class TestMicSpeakerLabels:
+    """Confirmed live on real Pi hardware: the mic line's emoji (🎤,
+    U+1F3A4) silently failed to render in whatever font Qt fell back to
+    there (no "Comic Sans MS" on Linux), while the speaker one (🔊,
+    U+1F50A) happened to render fine - making the mic line look blank/
+    unlabeled even though the device name itself was right there. Text
+    labels can't have that kind of per-glyph font gap, so the line
+    itself must say which is which in plain text, not rely on an icon."""
+
+    def test_mic_and_speaker_lines_are_distinguishable_by_text_alone(self):
+        assert "mic" in AudioDeviceIndicator._MIC_LABEL.lower()
+        assert "speaker" in AudioDeviceIndicator._SPEAKER_LABEL.lower()
+
+    def test_labels_do_not_rely_on_an_emoji_glyph(self):
+        for label in (AudioDeviceIndicator._MIC_LABEL, AudioDeviceIndicator._SPEAKER_LABEL):
+            assert all(ord(ch) < 0x2000 for ch in label)
