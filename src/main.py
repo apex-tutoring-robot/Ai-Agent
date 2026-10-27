@@ -312,6 +312,15 @@ class JarvisBot:
         # _handle_proactive_suggestion_reply.
         self._pending_proactive_suggestion: Optional[dict] = None
 
+        # Set right after Jarvis is asked to shut down or restart - "shutdown"
+        # or "restart". The next utterance is a yes/no confirmation of THAT
+        # specific action, not a fresh turn - deliberately requires an
+        # explicit confirmation rather than acting on the first phrase, since
+        # this triggers a real system command on physical hardware (see
+        # _try_handle_system_command/_handle_system_command_confirmation).
+        # None when nothing is pending.
+        self._pending_system_command: Optional[str] = None
+
         # ── Current conversation session (see session.py) ──
         # None outside of an active conversation; a fresh Session is created
         # each time the wake word fires.
@@ -564,6 +573,110 @@ class JarvisBot:
             return True
 
         return False
+
+    # Voice commands that trigger a real system shutdown/restart on the
+    # physical hardware (see _try_handle_system_command) - deliberately
+    # narrow. "restart"/"turn off" alone are too close to ordinary
+    # tutoring language ("let's restart this problem", "turn off the
+    # lights" in a word problem) to trigger on by themselves, so those
+    # two require being paired with a word that makes "the robot
+    # itself" the clear target; "shut down"/"power off"/"reboot" are
+    # specific enough to stand alone.
+    _SHUTDOWN_PATTERN = re.compile(
+        r"\b(shut\s?down|power\s?off|turn\s?off\s+(?:yourself|your\s?self|jarvis|the\s?robot))\b",
+        re.IGNORECASE,
+    )
+    _RESTART_PATTERN = re.compile(
+        r"\b(reboot|restart\s+(?:yourself|your\s?self|jarvis|the\s?robot|the\s?system))\b",
+        re.IGNORECASE,
+    )
+
+    def _try_handle_system_command(self, user_text: str, continuous_vad, output_device_index: int) -> bool:
+        """
+        Intercepts "shut down"/"restart" voice commands before they'd
+        otherwise reach the LLM as a normal question - these trigger a
+        REAL system command on the physical hardware (x728off / sudo
+        reboot, see _execute_system_command), so matching is
+        deliberately narrow (see _SHUTDOWN_PATTERN/_RESTART_PATTERN) and
+        nothing actually runs until a separate explicit "yes" confirms
+        it (see _handle_system_command_confirmation) - a stray remark
+        mid-conversation shouldn't be able to power off hardware that
+        then needs someone physically there to press the button again.
+        Returns True if user_text matched (already handled here -
+        caller should skip the normal LLM turn for it), False otherwise.
+        """
+        normalized = user_text.strip().lower()
+
+        if self._SHUTDOWN_PATTERN.search(normalized):
+            self._pending_system_command = "shutdown"
+            self._speak_fixed_phrase(
+                "Are you sure you want me to shut down? Say yes to confirm.",
+                continuous_vad, output_device_index,
+            )
+            return True
+
+        if self._RESTART_PATTERN.search(normalized):
+            self._pending_system_command = "restart"
+            self._speak_fixed_phrase(
+                "Are you sure you want me to restart? Say yes to confirm.",
+                continuous_vad, output_device_index,
+            )
+            return True
+
+        return False
+
+    def _handle_system_command_confirmation(self, user_text: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Handles the yes/no reply to _try_handle_system_command's
+        confirmation question. Anything other than a clear "yes"
+        cancels - same fail-safe-by-default reasoning as
+        _classify_yes_no's own docstring, just with a more consequential
+        default this time around.
+        """
+        command = self._pending_system_command
+        self._pending_system_command = None  # consumed either way below
+
+        if self._classify_yes_no(user_text) is not True:
+            action = "shut down" if command == "shutdown" else "restart"
+            self._speak_fixed_phrase(f"Okay, I won't {action}.", continuous_vad, output_device_index)
+            return
+
+        if command == "shutdown":
+            self._speak_fixed_phrase("Okay, shutting down now. Goodbye!", continuous_vad, output_device_index)
+        else:
+            self._speak_fixed_phrase("Okay, restarting now. Be right back!", continuous_vad, output_device_index)
+
+        # _speak_fixed_phrase above already blocks until playback fully
+        # drains (see its own docstring / stop_streaming(immediate=False)),
+        # so the system command only runs once the goodbye has actually
+        # finished playing out loud, not just been queued.
+        self._execute_system_command(command)
+
+    def _execute_system_command(self, command: str) -> None:
+        """
+        Actually runs the shutdown/restart command - x728off (the X728
+        UPS/power HAT's own safe-shutdown script; per the team's own
+        hardware lead, "you cannot use any other command as the BMS
+        will not turn off with [a plain] shutdown command") or
+        `sudo reboot`. Fixed argv lists, never shell=True and never any
+        user-provided text folded into the command itself - the voice
+        trigger only SELECTS which of these two fixed commands runs, it
+        never contributes to their content.
+
+        Logs and swallows failure rather than raising - if this fails
+        (e.g. x728off isn't installed, or sudo isn't configured
+        passwordless for this command on this particular device), the
+        right behavior is a log line for whoever's debugging the
+        deployment, not an unhandled exception taking down the speaker
+        thread for the rest of the conversation.
+        """
+        try:
+            if command == "shutdown":
+                subprocess.run(["x728off"], check=True, timeout=30)
+            else:
+                subprocess.run(["sudo", "reboot"], check=True, timeout=30)
+        except Exception as e:
+            logger.error(f"Failed to execute system command '{command}': {e}")
 
     # Keyword classification for the "is that you?" confirmation in
     # _handle_identity_checkin_step - a plain regex, not an LLM call, since
@@ -1912,6 +2025,27 @@ class JarvisBot:
                 # session (the normal-turn path below already has its own
                 # try/except and doesn't need this - only these four didn't).
                 try:
+                    # This turn is the yes/no answer to a pending shut-
+                    # down/restart confirmation - checked FIRST, ahead of
+                    # every other dispatch branch, since this is the one
+                    # path that can power off or reboot the physical
+                    # hardware. See _try_handle_system_command/
+                    # _handle_system_command_confirmation.
+                    if self._pending_system_command is not None:
+                        self._handle_system_command_confirmation(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
+                    # "shut down" / "restart" - never reach the LLM, not
+                    # real tutoring questions, and never executed on this
+                    # turn alone (see _try_handle_system_command - it only
+                    # asks for confirmation, handled above on the NEXT turn).
+                    if self._try_handle_system_command(user_text, continuous_vad, output_device_index):
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
                     # "Jarvis Voice Recognition <name>", "go back to your
                     # last session" - never reach the LLM, not real
                     # tutoring questions.
