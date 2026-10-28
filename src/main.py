@@ -2105,6 +2105,25 @@ class JarvisBot:
                         self._speaker_busy.clear()
                         continue
 
+                    # A clear "I'm done"/"goodbye" said with NO pending
+                    # sub-flow active (plain free-flowing conversation) -
+                    # the narrower _WANTS_TO_END_PATTERN checks above/below
+                    # only fire from inside a specific pending state
+                    # (warmup/discovery, a comprehension check), so this is
+                    # the catch-all for everywhere else. Confirmed live as a
+                    # real gap: a student saying "goodbye, bye, bye" mid
+                    # ordinary conversation got pleasant-sounding but
+                    # functionally inert replies from the normal LLM path
+                    # below (which has no way to actually end anything),
+                    # and the conversation only really ended much later via
+                    # the unrelated idle-timeout/check-in-grace cycle -
+                    # reading as "it just stayed there awake" even though
+                    # the student had already said goodbye several times.
+                    if self._WANTS_TO_END_PATTERN.search(user_text):
+                        self._end_conversation_with_goodbye(continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continue
+
                     # A request to help with a physical homework paper gets
                     # its own flow (capture a photo, read it via vision,
                     # let the student try it) - checked before is_math_query
