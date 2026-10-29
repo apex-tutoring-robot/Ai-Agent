@@ -3064,48 +3064,53 @@ class JarvisBot:
 
 def main():
     import sys
+    import time  # Ensure time is imported for sleep
 
     is_windows = sys.platform == "win32"
 
+    # ── Wait for Updates / Splash Screen to Complete ──────────────────────────
+    logger.info("Checking for active loading/update splash screen...")
+    while os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, "r") as f:
+                target_pid = int(f.read().strip())
+            
+            # Check if the process with target_pid is still alive (signal 0 is a no-op check)
+            os.kill(target_pid, 0)
+            logger.info("Updates still in progress, waiting...")
+        except (ProcessLookupError, ValueError):
+            # Process is already dead, or PID file is stale/malformed
+            logger.warning("Stale splash PID found. Cleaning up...")
+            if os.path.exists(PID_FILE):
+                try:
+                    os.remove(PID_FILE)
+                except Exception:
+                    pass
+            break
+        except PermissionError:
+            # Process is running under another user (e.g. root/sudo vs tutor), meaning it's still alive
+            pass
+        except FileNotFoundError:
+            break
+        
+        time.sleep(1)
+    
+    logger.info("Updates complete. Proceeding with Jarvis startup...")
+
     # ── Display configuration ──────────────────────────────────────────────────
-    # FACE_ENABLED=true          → show the face/teaching-canvas window
-    # FACE_ENABLED=false         → headless, no GUI (default when DISPLAY not set)
-    # unset                      → auto: on Windows, on (normal desktop session,
-    #                              Qt opens its own native window, no DISPLAY
-    #                              needed); on Linux/Pi, on only if DISPLAY/
-    #                              WAYLAND_DISPLAY is already set (matches a
-    #                              headless-SSH-session default)
-    #
-    # DISPLAY_BACKEND=physical   → HDMI monitor          (DISPLAY=:0)
-    # DISPLAY_BACKEND=vnc        → TigerVNC session      (DISPLAY=:1)
-    # DISPLAY_BACKEND=auto       → pick first available X11 socket (:1 then :0)
-    #
-    # You can also skip DISPLAY_BACKEND and set DISPLAY directly, e.g. DISPLAY=:0
-    #
-    # None of the above (DISPLAY/XAUTHORITY/X11 sockets) is a Linux/X11 concept
-    # that applies on native Windows — Qt opens a normal Win32 window directly
-    # there, so Windows gets its own simpler default/path below. On Linux, Qt
-    # still needs a real X11 DISPLAY the same way the old cv2-based face did.
-    # ──────────────────────────────────────────────────────────────────────────
     face_env = os.getenv("FACE_ENABLED", "").strip().lower()
     if face_env in ("true", "1", "yes"):
         face_enabled = True
     elif face_env in ("false", "0", "no"):
         face_enabled = False
     elif is_windows:
-        # No DISPLAY-style signal exists on Windows to auto-detect from -
-        # a normal interactive session always has a GUI available.
         face_enabled = True
     else:
-        # Linux/Pi auto: enable face only when DISPLAY is already set
         face_enabled = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
     if face_enabled and is_windows:
         logger.info("Face animation enabled (native Windows GUI, no X11 needed)")
     elif face_enabled:
-        # DISPLAY_BACKEND always wins when explicitly set — it overrides whatever
-        # DISPLAY was loaded from .env so that a single knob controls the display.
-        # Priority: DISPLAY_BACKEND (explicit) > DISPLAY (env/shell) > default :0
         backend = os.getenv("DISPLAY_BACKEND", "").strip().lower()
 
         if backend == "vnc":
@@ -3113,7 +3118,6 @@ def main():
         elif backend == "physical":
             os.environ["DISPLAY"] = ":0"
         elif backend == "auto":
-            # Pick the first X11 socket that actually exists
             for candidate in (":1", ":0"):
                 if os.path.exists(f"/tmp/.X11-unix/X{candidate[1:]}"):
                     os.environ["DISPLAY"] = candidate
@@ -3121,19 +3125,13 @@ def main():
             else:
                 os.environ["DISPLAY"] = ":0"
         elif not os.environ.get("DISPLAY"):
-            # No DISPLAY_BACKEND and no DISPLAY — last resort default
             os.environ["DISPLAY"] = ":0"
 
-        # Ensure X authentication is available.
-        # TigerVNC stores its cookie in the same ~/.Xauthority file as the
-        # physical display, just under a different display entry (:1 vs :0).
         if not os.environ.get("XAUTHORITY"):
             xauth_path = os.path.expanduser("~/.Xauthority")
             if os.path.exists(xauth_path):
                 os.environ["XAUTHORITY"] = xauth_path
 
-        # Pre-check: verify the X11 socket actually exists before letting Qt try.
-        # Qt calls abort() on a missing display — that can't be caught by Python.
         display = os.environ.get("DISPLAY", "")
         display_num = display.lstrip(":").split(".")[0]
         socket_path = f"/tmp/.X11-unix/X{display_num}"
@@ -3154,27 +3152,12 @@ def main():
     if face_enabled:
         try:
             from PyQt5.QtWidgets import QApplication
-            # QApplication must exist before any other Qt object (UISignals,
-            # MainWindow) is constructed, and must live on the main thread.
             app = QApplication(sys.argv)
             ui_signals = UISignals()
 
-            # Resolve relative to this file's own location, not the process's
-            # CWD - "./visuals/faces" only works if launched as `cd src &&
-            # python main.py`, but breaks under `python3 src/main.py` from
-            # the repo root (the convention actually used to run this on the
-            # Pi), silently falling back to headless instead of erroring loudly.
             faces_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visuals", "faces")
             window = MainWindow(ui_signals, faces_dir, fullscreen=not is_windows)
             window.show()
-
-            try:
-                with open(PID_FILE, "r") as f:
-                    target_pid = int(f.read().strip())
-                os.kill(target_pid, signal.SIGTERM)
-        
-            except FileNotFoundError:
-                logger.warning(f"Loading screen not found")
 
             logger.info(
                 "Face animation enabled (native Windows GUI)" if is_windows
@@ -3190,10 +3173,9 @@ def main():
     if app:
         worker = threading.Thread(target=jarvis.run, daemon=True)
         worker.start()
-        # Qt's event loop must run on the main thread
         sys.exit(app.exec_())
     else:
         jarvis.run()
-
+        
 if __name__ == "__main__":
     main()
