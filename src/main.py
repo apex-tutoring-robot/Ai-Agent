@@ -13,6 +13,7 @@ from typing import Dict, Optional
 from difflib import SequenceMatcher
 from dotenv import load_dotenv
 import numpy as np
+import signal
 
 # audio.wake_word (openwakeword -> onnxruntime) MUST be imported before any
 # PyQt5 import (visuals.ui.*, below) - onnxruntime and PyQt5 each bundle
@@ -52,6 +53,8 @@ from visuals.ui.main_window import MainWindow
 from visuals.scene_planner import ScenePlanner
 from visuals.example_image_library import image_path as example_image_path
 import logging
+
+PID_FILE = "splash.pid"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -3164,6 +3167,14 @@ def main():
             faces_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visuals", "faces")
             window = MainWindow(ui_signals, faces_dir, fullscreen=not is_windows)
             window.show()
+
+            try:
+                with open(PID_FILE, "r") as f:
+                    target_pid = int(f.read().strip())
+                os.kill(target_pid, signal.SIGTERM)
+        
+            except FileNotFoundError:
+                logger.warning(f"Loading screen not found")
 
             logger.info(
                 "Face animation enabled (native Windows GUI)" if is_windows
