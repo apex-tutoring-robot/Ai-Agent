@@ -56,3 +56,26 @@ class TestShowLevel:
         widget = MicLevelIndicator()
         widget.show_level(MicLevelIndicator._MAX_RMS)
         assert widget._level < 1.0
+
+
+class TestShowBargeInState:
+    def test_defaults_to_inactive(self):
+        widget = MicLevelIndicator()
+        assert widget._barge_in_active is False
+
+    def test_true_sets_active(self):
+        widget = MicLevelIndicator()
+        widget.show_barge_in_state(True)
+        assert widget._barge_in_active is True
+
+    def test_false_clears_active(self):
+        widget = MicLevelIndicator()
+        widget.show_barge_in_state(True)
+        widget.show_barge_in_state(False)
+        assert widget._barge_in_active is False
+
+    def test_first_call_shows_the_widget(self):
+        widget = MicLevelIndicator()
+        assert not widget.isVisible()
+        widget.show_barge_in_state(True)
+        assert widget.isVisible()

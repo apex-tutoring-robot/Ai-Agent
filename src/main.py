@@ -387,6 +387,7 @@ class JarvisBot:
             # Re-init components with shared callbacks
             self.continuous_vad = ContinuousVADCapture(pa=self.pa)
             self.continuous_vad.on_input_level = self.ui_signals.mic_level_changed.emit if self.ui_signals else None
+            self.continuous_vad.on_barge_in_state = self.ui_signals.barge_in_state_changed.emit if self.ui_signals else None
             self.audio_player = AudioPlayer(
                 pa=self.pa,
                 on_audio_played=self.continuous_vad.on_audio_played
@@ -2528,6 +2529,7 @@ class JarvisBot:
                 player=self.audio_player
             )
             continuous_vad.on_input_level = self.ui_signals.mic_level_changed.emit if self.ui_signals else None
+            continuous_vad.on_barge_in_state = self.ui_signals.barge_in_state_changed.emit if self.ui_signals else None
 
             # Wire callback so VAD knows when bot is speaking (for AEC/Duck)
             self.audio_player.on_audio_played = continuous_vad.on_audio_played

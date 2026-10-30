@@ -18,6 +18,20 @@ needed.
 Always visible once started (same as AudioDeviceIndicator/
 CommitIndicator), not a transient popup like VolumeIndicator - the
 whole point is being able to watch it continuously while testing.
+
+Also shows barge-in GATE state (show_barge_in_state, fed by
+ContinuousVADCapture.on_barge_in_state via ui_signals.
+barge_in_state_changed) as a distinct, unmistakable visual - a bright
+orange pill reading "INTERRUPTED!" instead of the normal level bar.
+Added after a remote report that the raw level bar alone was
+ambiguous for diagnosing a "robot never gets interrupted" complaint:
+the mic picks up the bot's OWN voice continuously through imperfect
+echo cancellation, so the level bar reads "loud" throughout ordinary
+playback regardless of whether a real interruption is happening, with
+no way to tell the two apart by eye. This reflects the actual
+post-AEC-and-VAD gate decision instead, which isn't fooled by that
+ambient echo - it only lights up when the barge-in logic itself
+actually opens the gate.
 """
 
 from PyQt5.QtCore import Qt
@@ -50,6 +64,7 @@ class MicLevelIndicator(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground)
 
         self._level = 0.0  # 0.0-1.0, smoothed
+        self._barge_in_active = False
         self.hide()
 
     def show_level(self, rms: float) -> None:
@@ -60,21 +75,35 @@ class MicLevelIndicator(QWidget):
             self.show()
             self.raise_()
 
+    def show_barge_in_state(self, active: bool) -> None:
+        self._barge_in_active = active
+        self.update()
+        if not self.isVisible():
+            self.show()
+            self.raise_()
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
         bg_path = QPainterPath()
+        bg_color = QColor(200, 90, 20, 230) if self._barge_in_active else QColor(20, 20, 25, 210)
         bg_path.addRoundedRect(0, 0, self._WIDTH, self._HEIGHT, 16, 16)
-        painter.fillPath(bg_path, QColor(20, 20, 25, 210))
+        painter.fillPath(bg_path, bg_color)
 
         font = QFont("Comic Sans MS", 11)
+        font.setBold(self._barge_in_active)
         painter.setFont(font)
         painter.setPen(QColor(255, 255, 255))
         metrics = QFontMetrics(font)
-        label = "Mic:"
+        label = "INTERRUPTED!" if self._barge_in_active else "Mic:"
         label_y = self._PADDING + metrics.ascent()
         painter.drawText(self._PADDING, int(label_y), label)
+
+        if self._barge_in_active:
+            # Gate is open right now - the state itself is the signal,
+            # no need for the ordinary level bar underneath it too.
+            return
 
         bar_y = label_y + 6
         bar_h = self._HEIGHT - bar_y - 10

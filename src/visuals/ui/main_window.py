@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
         self.signals.volume_changed.connect(self.volume_indicator.show_level)
         self.signals.audio_devices_resolved.connect(self.audio_device_indicator.show_devices)
         self.signals.mic_level_changed.connect(self.mic_level_indicator.show_level)
+        self.signals.barge_in_state_changed.connect(self.mic_level_indicator.show_barge_in_state)
         self.signals.enter_sleep.connect(self.show_sleep_mode)
         self.signals.wake_up.connect(self.show_wake_mode)
 

@@ -145,6 +145,20 @@ class ContinuousVADCapture:
         # too, not just the pre-wake-word phase.
         self.on_input_level: Optional[Callable[[float], None]] = None
 
+        # Optional callback(active: bool), fired whenever the barge-in
+        # gate actually opens/closes (see always_streaming's MUTE-THE-PIPE
+        # section) - a precise "did an interruption actually register"
+        # signal, distinct from on_input_level's raw RMS. Added after a
+        # remote report that the raw level meter was ambiguous for
+        # diagnosing a stuck "robot never gets interrupted" complaint -
+        # the mic picks up the bot's OWN voice continuously through
+        # imperfect echo cancellation, so the raw bar reads "loud" during
+        # ordinary playback regardless of whether a real interruption is
+        # happening, with no way to tell the two apart by eye. This
+        # callback reflects the actual post-AEC-and-VAD gate decision
+        # instead, which is unaffected by that ambiguity.
+        self.on_barge_in_state: Optional[Callable[[bool], None]] = None
+
         # ── Playback-aware gating (mute-the-pipe) ──
         self._is_bot_playing = False           # Set by main.py via set_playback_state()
         self._barge_in_event = None            # threading.Event from JarvisBot (set on barge-in)
@@ -793,6 +807,11 @@ class ContinuousVADCapture:
                         )
                         if self._barge_in_event:
                             self._barge_in_event.set()
+                        if self.on_barge_in_state is not None:
+                            try:
+                                self.on_barge_in_state(True)
+                            except Exception:
+                                pass
                         # Catch STT up on the audio it missed while the gate
                         # was confirming - this chunk (already appended
                         # above) is the newest entry in the buffer, so it
@@ -816,7 +835,12 @@ class ContinuousVADCapture:
                     if barge_in_active:
                         barge_in_active = False
                         barge_in_consecutive = 0
-                    
+                        if self.on_barge_in_state is not None:
+                            try:
+                                self.on_barge_in_state(False)
+                            except Exception:
+                                pass
+
                     # VAD check to update idle timer
                     try:
                         is_speech = self.vad.is_speech(audio_chunk, self.sample_rate)
