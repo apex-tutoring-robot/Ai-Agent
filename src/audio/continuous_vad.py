@@ -181,6 +181,17 @@ class ContinuousVADCapture:
         # covers a soft-onset first syllable plus the ~40-60ms
         # confirmation window itself.
         self._barge_in_pre_roll_chunks = max(1, int(os.getenv('BARGE_IN_PRE_ROLL_MS', '500')) // self.frame_duration_ms)
+        # Throttle for _barge_in_near_miss_reason's log line (see
+        # always_streaming) - a failed interruption attempt on a remote
+        # device otherwise leaves no record of WHY it failed (too quiet
+        # vs loud-but-not-speech-shaped), since the existing BARGE-IN log
+        # line only fires once the gate actually opens. 0.25s keeps this
+        # readable instead of one line per 20ms chunk.
+        self._last_barge_in_debug_time = 0.0
+        # Below this, a chunk is ordinary silence/room noise between
+        # words, not a failed attempt worth logging - same floor used by
+        # _barge_in_near_miss_reason.
+        self._BARGE_IN_SILENCE_FLOOR_RMS = 300.0
         # AEC Ring Buffer (Hardware-Aligned Reference Audio)
         # 1-second circular buffer for reference audio
         self.ref_ring_buffer = np.zeros(self.sample_rate, dtype=np.int16)
@@ -640,6 +651,30 @@ class ContinuousVADCapture:
 
         return bool(is_speech), rms
 
+    def _barge_in_near_miss_reason(self, is_trigger_chunk: bool, rms: float) -> Optional[str]:
+        """
+        Classifies WHY a chunk during bot playback didn't trigger a
+        barge-in - "too_quiet" (never cleared the energy threshold, so
+        WebRTC VAD was never even consulted - see
+        _is_barge_in_trigger_chunk's short-circuit) or "not_speech"
+        (cleared it, but VAD didn't classify it as speech) - or None for
+        an actual trigger or ordinary silence between words, neither of
+        which is worth logging.
+
+        Built to answer a real remote-device complaint ("wait"/"excuse
+        me" don't interrupt playback, but a longer/louder phrase does)
+        without live telemetry access - the existing BARGE-IN log line
+        only fires once the gate opens, so a failed attempt previously
+        left no trace of which half of the AND (see
+        _is_barge_in_trigger_chunk) actually failed. Pure classification
+        with no logging/timing of its own, so it's unit-testable without
+        mocking always_streaming's live audio stream - see
+        always_streaming for the throttled log line that uses this.
+        """
+        if is_trigger_chunk or rms <= self._BARGE_IN_SILENCE_FLOOR_RMS:
+            return None
+        return "too_quiet" if rms <= self._barge_in_energy_threshold else "not_speech"
+
     def always_streaming(self) -> Generator[bytes, None, None]:
         """
         Continuous generator that yields audio chunks indefinitely
@@ -792,6 +827,22 @@ class ContinuousVADCapture:
                     self.last_speech_time = time.time()
 
                     is_trigger_chunk, rms = self._is_barge_in_trigger_chunk(audio_chunk)
+
+                    near_miss = self._barge_in_near_miss_reason(is_trigger_chunk, rms)
+                    if near_miss is not None:
+                        now_dbg = time.time()
+                        if now_dbg - self._last_barge_in_debug_time > 0.25:
+                            self._last_barge_in_debug_time = now_dbg
+                            if near_miss == "too_quiet":
+                                logger.info(
+                                    f"🔎 barge-in watch: rms={rms:.0f} below threshold "
+                                    f"({self._barge_in_energy_threshold:.0f}) — too quiet"
+                                )
+                            else:
+                                logger.info(
+                                    f"🔎 barge-in watch: rms={rms:.0f} cleared threshold "
+                                    f"({self._barge_in_energy_threshold:.0f}) but VAD says not-speech"
+                                )
 
                     if is_trigger_chunk:
                         barge_in_consecutive += 1

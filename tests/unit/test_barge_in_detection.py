@@ -89,3 +89,49 @@ class TestIsBargeInTriggerChunk:
         loud = _pcm16_chunk(vad_capture.chunk_size, amplitude=vad_capture._barge_in_energy_threshold + 500)
         triggers, rms = vad_capture._is_barge_in_trigger_chunk(loud)
         assert triggers is False  # a VAD glitch must never count toward a false barge-in
+
+
+class TestBargeInNearMissReason:
+    """
+    _barge_in_near_miss_reason() - classifies why a non-triggering chunk
+    during playback failed, for always_streaming's diagnostic log line.
+    See that method's own docstring for why this exists (a remote report
+    that short interjections don't interrupt playback but a longer/
+    louder phrase does, with no way to see actual RMS/VAD numbers from a
+    device nobody can run a terminal command on).
+    """
+
+    def test_an_actual_trigger_is_not_a_near_miss(self, vad_capture):
+        reason = vad_capture._barge_in_near_miss_reason(
+            is_trigger_chunk=True, rms=vad_capture._barge_in_energy_threshold + 500
+        )
+        assert reason is None
+
+    def test_ordinary_silence_is_not_a_near_miss(self, vad_capture):
+        reason = vad_capture._barge_in_near_miss_reason(
+            is_trigger_chunk=False, rms=vad_capture._BARGE_IN_SILENCE_FLOOR_RMS - 1
+        )
+        assert reason is None
+
+    def test_above_silence_floor_but_below_threshold_is_too_quiet(self, vad_capture):
+        reason = vad_capture._barge_in_near_miss_reason(
+            is_trigger_chunk=False,
+            rms=(vad_capture._BARGE_IN_SILENCE_FLOOR_RMS + vad_capture._barge_in_energy_threshold) / 2,
+        )
+        assert reason == "too_quiet"
+
+    def test_above_threshold_but_not_triggered_is_not_speech(self, vad_capture):
+        # Loud enough to clear the energy bar - the only way this still
+        # isn't a trigger is VAD having rejected it as not speech-shaped.
+        reason = vad_capture._barge_in_near_miss_reason(
+            is_trigger_chunk=False, rms=vad_capture._barge_in_energy_threshold + 500
+        )
+        assert reason == "not_speech"
+
+    def test_exactly_at_threshold_counts_as_too_quiet(self, vad_capture):
+        # Matches _is_barge_in_trigger_chunk's own boundary (rms <=
+        # threshold fails to trigger) - consistent classification.
+        reason = vad_capture._barge_in_near_miss_reason(
+            is_trigger_chunk=False, rms=vad_capture._barge_in_energy_threshold
+        )
+        assert reason == "too_quiet"
