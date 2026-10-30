@@ -1,6 +1,7 @@
 import os
 # Allow the OS to use its default display and QT backend, rather than hardcoding.
 
+import random
 import re
 import subprocess
 import textwrap
@@ -12,6 +13,7 @@ from typing import Dict, Optional
 from difflib import SequenceMatcher
 from dotenv import load_dotenv
 import numpy as np
+import signal
 
 # audio.wake_word (openwakeword -> onnxruntime) MUST be imported before any
 # PyQt5 import (visuals.ui.*, below) - onnxruntime and PyQt5 each bundle
@@ -22,13 +24,14 @@ import numpy as np
 from audio.wake_word import WakeWordDetector
 from audio.continuous_vad import ContinuousVADCapture
 from audio.playback import AudioPlayer
+from audio.device_detection import resolve_device_index, describe_devices
 from azure_services.stt_client import SpeechToTextClient
 from azure_services.llm_client import LLMClient
 from azure_services.tts_client import TextToSpeechClient
 from azure_services.interfaces import SpeechToTextProvider, LLMProvider, TextToSpeechProvider
 from privacy.privacy_manager import PrivacyManager
 from profiles.profile_manager import ProfileManager
-from profiles.camera_capture import capture_avatar_photo
+from profiles.camera_capture import capture_avatar_photo, detect_camera
 from session import Session
 from knowledge.textbook_search import TextbookSearch, normalize_grade
 from guardrails.guardrails_manager import GuardrailsManager
@@ -48,7 +51,10 @@ from expression.controller import Expression, ExpressionController
 from visuals.ui.ui_signals import UISignals
 from visuals.ui.main_window import MainWindow
 from visuals.scene_planner import ScenePlanner
+from visuals.example_image_library import image_path as example_image_path
 import logging
+
+PID_FILE = "splash.pid"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -140,8 +146,41 @@ class JarvisBot:
         import pyaudio
         self.pa = pyaudio.PyAudio()
 
+        # Logged once up front so a wrong/missing device is visible
+        # immediately on startup instead of only discovered later as
+        # unexplained silence (see audio/device_detection.py's docstring
+        # for the two real bugs - a stale Windows .env index and a
+        # Raspberry Pi where PulseAudio auto-detection silently
+        # overrode an already-correct .env index - that motivated this).
+        logger.info(f"Available audio devices:\n{describe_devices(self.pa)}")
+        detect_camera()
+
         # Initialize components with shared PyAudio
-        self.wake_word_detector = WakeWordDetector(pa=self.pa)
+        #
+        # Resolved via the same validated path as every other input/output
+        # stream (see resolve_device_index's priority order) - NOT left to
+        # WakeWordDetector's own fallback (a raw os.getenv(..., 1) with no
+        # validation), which was the real bug behind "robot never responds
+        # to 'Hey Jarvis', even on a WiFi network that works fine for
+        # everything else": wake-word matching runs entirely locally
+        # (openWakeWord, no network call at all), so a listener silently
+        # reading from the wrong-but-still-openable input device would
+        # explain total unresponsiveness with zero errors far better than
+        # a connectivity issue would - that failure mode only kicks in once
+        # a conversation actually starts and needs Azure STT/TTS.
+        wake_word_input_index = resolve_device_index(self.pa, 'input', 'AUDIO_INPUT_DEVICE_INDEX')
+        self.wake_word_detector = WakeWordDetector(pa=self.pa, input_device_index=wake_word_input_index)
+        self.wake_word_detector.on_level = self.ui_signals.mic_level_changed.emit if self.ui_signals else None
+
+        # Output isn't actually needed yet at this point (AudioPlayer
+        # below takes its own device index per-call, resolved fresh when
+        # a conversation starts - see _handle_wake_word) - resolved here
+        # too, cheaply, purely so the on-screen health-check indicator
+        # has both names to show from the moment the app starts, not
+        # only once the first conversation begins.
+        wake_word_output_index = resolve_device_index(self.pa, 'output', 'AUDIO_OUTPUT_DEVICE_INDEX')
+        self._announce_resolved_audio_devices(wake_word_input_index, wake_word_output_index)
+
         self.audio_player = AudioPlayer(
             pa=self.pa,
             # Qt signal emission is thread-safe (queued to the GUI thread)
@@ -276,6 +315,15 @@ class JarvisBot:
         # _handle_proactive_suggestion_reply.
         self._pending_proactive_suggestion: Optional[dict] = None
 
+        # Set right after Jarvis is asked to shut down or restart - "shutdown"
+        # or "restart". The next utterance is a yes/no confirmation of THAT
+        # specific action, not a fresh turn - deliberately requires an
+        # explicit confirmation rather than acting on the first phrase, since
+        # this triggers a real system command on physical hardware (see
+        # _try_handle_system_command/_handle_system_command_confirmation).
+        # None when nothing is pending.
+        self._pending_system_command: Optional[str] = None
+
         # ── Current conversation session (see session.py) ──
         # None outside of an active conversation; a fresh Session is created
         # each time the wake word fires.
@@ -338,15 +386,38 @@ class JarvisBot:
             
             # Re-init components with shared callbacks
             self.continuous_vad = ContinuousVADCapture(pa=self.pa)
+            self.continuous_vad.on_input_level = self.ui_signals.mic_level_changed.emit if self.ui_signals else None
+            self.continuous_vad.on_barge_in_state = self.ui_signals.barge_in_state_changed.emit if self.ui_signals else None
             self.audio_player = AudioPlayer(
                 pa=self.pa,
                 on_audio_played=self.continuous_vad.on_audio_played
             )
-            self.wake_word_detector = WakeWordDetector(pa=self.pa)
-            
+            # Same validated resolution as __init__ - see the comment there.
+            wake_word_input_index = resolve_device_index(self.pa, 'input', 'AUDIO_INPUT_DEVICE_INDEX')
+            self.wake_word_detector = WakeWordDetector(pa=self.pa, input_device_index=wake_word_input_index)
+            self.wake_word_detector.on_level = self.ui_signals.mic_level_changed.emit if self.ui_signals else None
+            wake_word_output_index = resolve_device_index(self.pa, 'output', 'AUDIO_OUTPUT_DEVICE_INDEX')
+            self._announce_resolved_audio_devices(wake_word_input_index, wake_word_output_index)
+
             logger.info("✅ Audio system fully recreated and re-wired")
         except Exception as e:
             logger.error(f"Failed to recreate audio system: {e}")
+
+    def _announce_resolved_audio_devices(self, input_index: int, output_index: int) -> None:
+        """Pushes the resolved mic/speaker names to the on-screen health-
+        check indicator (see ui_signals.audio_devices_resolved and
+        visuals/ui/audio_device_indicator.py) - a no-op headless (no
+        ui_signals) or if either index somehow doesn't resolve to a real
+        device (defensive only; resolve_device_index always returns SOME
+        int, but this never needs to be fatal either way)."""
+        if not self.ui_signals:
+            return
+        try:
+            mic_name = self.pa.get_device_info_by_index(input_index).get('name', '?')
+            speaker_name = self.pa.get_device_info_by_index(output_index).get('name', '?')
+            self.ui_signals.audio_devices_resolved.emit(mic_name, speaker_name)
+        except Exception as e:
+            logger.warning(f"Could not announce resolved audio devices to the UI: {e}")
 
     @staticmethod
     def _text_similarity(a: str, b: str) -> float:
@@ -367,9 +438,13 @@ class JarvisBot:
         turn in _speaker_loop, just with fixed text.
 
         delivery: optional expression.controller.DeliveryStyle - a
-        per-utterance rate/pitch nudge (see ExpressionController), passed
-        straight through to TextToSpeechClient.synthesize_stream(). None
-        (the default) plays at the normal, unadjusted delivery.
+        per-utterance mood (rate/pitch nudge + Azure style/styledegree,
+        see ExpressionController), passed straight through to
+        TextToSpeechClient.synthesize_stream(). None (the default) uses
+        FRIENDLY, Jarvis's baseline conversational mood, rather than the
+        TTS client's own flat "chat" style - callers only need to pass
+        something explicit when a moment calls for a MORE specific mood
+        (e.g. refusal()/for_action()'s result).
         """
         logger.info(f"🗣️  {phrase}")
         try:
@@ -380,7 +455,8 @@ class JarvisBot:
             self._bot_is_speaking = True
             continuous_vad.set_playback_state(True)
 
-            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase]), delivery=delivery):
+            effective_delivery = delivery if delivery is not None else self.expression_controller.friendly()
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase]), delivery=effective_delivery):
                 if self.audio_player._is_playing:
                     self.audio_player.queue_audio(audio_chunk)
                 else:
@@ -502,6 +578,110 @@ class JarvisBot:
 
         return False
 
+    # Voice commands that trigger a real system shutdown/restart on the
+    # physical hardware (see _try_handle_system_command) - deliberately
+    # narrow. "restart"/"turn off" alone are too close to ordinary
+    # tutoring language ("let's restart this problem", "turn off the
+    # lights" in a word problem) to trigger on by themselves, so those
+    # two require being paired with a word that makes "the robot
+    # itself" the clear target; "shut down"/"power off"/"reboot" are
+    # specific enough to stand alone.
+    _SHUTDOWN_PATTERN = re.compile(
+        r"\b(shut\s?down|power\s?off|turn\s?off\s+(?:yourself|your\s?self|jarvis|the\s?robot))\b",
+        re.IGNORECASE,
+    )
+    _RESTART_PATTERN = re.compile(
+        r"\b(reboot|restart\s+(?:yourself|your\s?self|jarvis|the\s?robot|the\s?system))\b",
+        re.IGNORECASE,
+    )
+
+    def _try_handle_system_command(self, user_text: str, continuous_vad, output_device_index: int) -> bool:
+        """
+        Intercepts "shut down"/"restart" voice commands before they'd
+        otherwise reach the LLM as a normal question - these trigger a
+        REAL system command on the physical hardware (x728off / sudo
+        reboot, see _execute_system_command), so matching is
+        deliberately narrow (see _SHUTDOWN_PATTERN/_RESTART_PATTERN) and
+        nothing actually runs until a separate explicit "yes" confirms
+        it (see _handle_system_command_confirmation) - a stray remark
+        mid-conversation shouldn't be able to power off hardware that
+        then needs someone physically there to press the button again.
+        Returns True if user_text matched (already handled here -
+        caller should skip the normal LLM turn for it), False otherwise.
+        """
+        normalized = user_text.strip().lower()
+
+        if self._SHUTDOWN_PATTERN.search(normalized):
+            self._pending_system_command = "shutdown"
+            self._speak_fixed_phrase(
+                "Are you sure you want me to shut down? Say yes to confirm.",
+                continuous_vad, output_device_index,
+            )
+            return True
+
+        if self._RESTART_PATTERN.search(normalized):
+            self._pending_system_command = "restart"
+            self._speak_fixed_phrase(
+                "Are you sure you want me to restart? Say yes to confirm.",
+                continuous_vad, output_device_index,
+            )
+            return True
+
+        return False
+
+    def _handle_system_command_confirmation(self, user_text: str, continuous_vad, output_device_index: int) -> None:
+        """
+        Handles the yes/no reply to _try_handle_system_command's
+        confirmation question. Anything other than a clear "yes"
+        cancels - same fail-safe-by-default reasoning as
+        _classify_yes_no's own docstring, just with a more consequential
+        default this time around.
+        """
+        command = self._pending_system_command
+        self._pending_system_command = None  # consumed either way below
+
+        if self._classify_yes_no(user_text) is not True:
+            action = "shut down" if command == "shutdown" else "restart"
+            self._speak_fixed_phrase(f"Okay, I won't {action}.", continuous_vad, output_device_index)
+            return
+
+        if command == "shutdown":
+            self._speak_fixed_phrase("Okay, shutting down now. Goodbye!", continuous_vad, output_device_index)
+        else:
+            self._speak_fixed_phrase("Okay, restarting now. Be right back!", continuous_vad, output_device_index)
+
+        # _speak_fixed_phrase above already blocks until playback fully
+        # drains (see its own docstring / stop_streaming(immediate=False)),
+        # so the system command only runs once the goodbye has actually
+        # finished playing out loud, not just been queued.
+        self._execute_system_command(command)
+
+    def _execute_system_command(self, command: str) -> None:
+        """
+        Actually runs the shutdown/restart command - x728off (the X728
+        UPS/power HAT's own safe-shutdown script; per the team's own
+        hardware lead, "you cannot use any other command as the BMS
+        will not turn off with [a plain] shutdown command") or
+        `sudo reboot`. Fixed argv lists, never shell=True and never any
+        user-provided text folded into the command itself - the voice
+        trigger only SELECTS which of these two fixed commands runs, it
+        never contributes to their content.
+
+        Logs and swallows failure rather than raising - if this fails
+        (e.g. x728off isn't installed, or sudo isn't configured
+        passwordless for this command on this particular device), the
+        right behavior is a log line for whoever's debugging the
+        deployment, not an unhandled exception taking down the speaker
+        thread for the rest of the conversation.
+        """
+        try:
+            if command == "shutdown":
+                subprocess.run(["x728off"], check=True, timeout=30)
+            else:
+                subprocess.run(["sudo", "reboot"], check=True, timeout=30)
+        except Exception as e:
+            logger.error(f"Failed to execute system command '{command}': {e}")
+
     # Keyword classification for the "is that you?" confirmation in
     # _handle_identity_checkin_step - a plain regex, not an LLM call, since
     # this only needs to gate a binary decision and the LLM round-trip
@@ -514,6 +694,47 @@ class JarvisBot:
     # _handle_warmup_step's discovery branch.
     _EXPLICIT_INTENT_PATTERN = re.compile(
         r"\b(help|learn|teach|practice|work on|curious about|homework|question)\b", re.IGNORECASE
+    )
+
+    # Use case 3 of the discovery pivot: a CLEAR decline ("no", "I'm
+    # good", "nothing right now") - as opposed to a merely open-ended
+    # non-answer ("I don't know", "hmm"), which still gets a gentle
+    # proactive suggestion instead (see _handle_warmup_step's discovery
+    # branch). Deliberately checked only AFTER is_math_query/
+    # is_curiosity_question/_EXPLICIT_INTENT_PATTERN at every call site,
+    # so "no, I don't want multiplication, I want fractions instead"
+    # still reaches the real request first, not this.
+    _DISCOVERY_DECLINE_PATTERN = re.compile(
+        r"\b(no|nope|nah|no thanks|not right now|not today|nothing(?: (?:right now|today))?|"
+        r"i'?m good|i'?m okay|i'?m ok|"
+        r"i don'?t (?:need|want) (?:anything|any help|nothing))\b",
+        re.IGNORECASE,
+    )
+
+    # A clear signal the student wants to END the conversation NOW -
+    # "I'm done", "let's finish here", "talk later", "bye" - distinct
+    # from _DISCOVERY_DECLINE_PATTERN (declining a specific offer of
+    # help, which can show up in lots of other contexts that aren't "I
+    # want to leave" at all). Found live: with a comprehension-check
+    # question pending, "I'm done" / "let's talk later" / "let's finish
+    # here" each correctly avoided being graded as a wrong answer (see
+    # TutorAction.NOT_AN_ANSWER) but then just got acknowledged with
+    # "that's okay, let me know when you're ready" and left the
+    # conversation open - repeated THREE times in a row in the same
+    # conversation, the student never actually got to leave. Checked
+    # alongside _DISCOVERY_DECLINE_PATTERN wherever that is, and also in
+    # _handle_teaching_answer where a pending check previously had no
+    # exit path at all.
+    _WANTS_TO_END_PATTERN = re.compile(
+        r"\b("
+        r"i(?:'m| am) done|"
+        r"let'?s (?:finish|stop|end)|"
+        r"(?:talk|chat) (?:to you )?later|"
+        r"good ?bye|bye|see you later|"
+        r"i(?:'m| am) (?:going to|gonna|about to) (?:go|leave)|"
+        r"(?:gotta|got to|have to|need to) go"
+        r")\b",
+        re.IGNORECASE,
     )
 
     def _classify_yes_no(self, text: str) -> Optional[bool]:
@@ -806,6 +1027,52 @@ class JarvisBot:
             self.current_session.record_tool_call(tool_name, args, result)
         return result
 
+    # A general "I want to know about X" / "what is X" / "how does X work"
+    # learning request, for ANY K-8 subject - not just math (see
+    # is_math_query for that one). generate_teaching_plan's system prompt
+    # already supports any subject (math, physics, biology, geography,
+    # history, "anything a student asks about"); without this, a
+    # non-math curiosity question ("I want to know about volcanoes")
+    # fell through to a plain chat answer with no diagram or structured
+    # examples, since is_math_query's keyword list only catches math.
+    # Anchored at the start of the utterance - that's how these
+    # constructions are actually phrased ("what is...", "tell me
+    # about..."), and anchoring avoids matching a "why is" or "how does"
+    # buried mid-sentence in unrelated small talk.
+    #
+    # Each trigger excludes an immediately-following you/your/yourself -
+    # confirmed live this is needed, not theoretical: "what's your name",
+    # "tell me about yourself", "how do you work" all matched before this
+    # exclusion was added, which would have forced an ordinary question
+    # ABOUT Jarvis itself into a teaching-plan turn complete with a
+    # mandatory whiteboard diagram - these are identity small talk, not a
+    # subject lesson request.
+    _CURIOSITY_QUESTION_PATTERN = re.compile(
+        r"^\s*("
+        r"what(?:'s| is| are)(?!\s+(?:you|your|yourself)\b)\b|"
+        r"how (?:does|do|is|are)(?!\s+(?:you|your|yourself)\b)\b|"
+        r"why (?:does|do|is|are)(?!\s+(?:you|your|yourself)\b)\b|"
+        r"tell me about(?!\s+(?:you|your|yourself)\b)\b|"
+        r"(?:can you )?explain(?!\s+(?:you|your|yourself)\b)\b|"
+        r"i(?:'m| am) curious about(?!\s+(?:you|your|yourself)\b)\b|"
+        r"i want to (?:know|learn) about(?!\s+(?:you|your|yourself)\b)\b|"
+        r"teach me about(?!\s+(?:you|your|yourself)\b)\b"
+        r")",
+        re.IGNORECASE,
+    )
+
+    def is_curiosity_question(self, text: str) -> bool:
+        """Detect a general learning/curiosity question on any subject
+        (see _CURIOSITY_QUESTION_PATTERN) that should get the same
+        teaching-plan treatment (explanation + diagram + real-world
+        examples) as a math question does via is_math_query - rather than
+        a plain conversational answer with no structure.
+
+        Doesn't touch `self` (like is_math_query/is_homework_help_request)
+        so it's cheaply testable unbound, without constructing a full
+        JarvisBot."""
+        return bool(JarvisBot._CURIOSITY_QUESTION_PATTERN.search(text.strip()))
+
     def is_homework_help_request(self, text: str) -> bool:
         """Detects a request for help with a PHYSICAL homework paper - see
         the Agent Architecture doc's Homework Help branch (ask to see it,
@@ -865,16 +1132,25 @@ class JarvisBot:
 
         return bool(re.search(r"\d", t) and re.search(r"[\+\-\*/=]", t))
 
+    # Mom-style catch-up order asked through _handle_warmup_step, each one
+    # getting a genuine, LLM-generated reaction to what the student
+    # actually said (see LLMClient.generate_warmup_reply) rather than a
+    # flat canned next question, before pivoting to the discovery
+    # question. Kept short (day -> school -> friends, ~3-4 exchanges
+    # total) rather than the original spec's full 1-2 minutes of small
+    # talk - Jarvis is used ambiently, so this still needs to stay brief.
+    _WARMUP_TOPICS = ["day", "school", "friends"]
+
     def _start_warmup_checkin(self, continuous_vad, output_device_index: int) -> None:
         """
         Replaces the old canned self-introduction ("Hi! I'm Jarvis...") at
         the very start of a conversation, for any profile that isn't the
         default placeholder - see _handle_wake_word. A real tutor doesn't
-        open with a scripted pitch; a short, genuine check-in ("how's your
-        day going") reads as someone who's actually paying attention.
-        Two short back-and-forth exchanges, not the original spec's full
-        1-2 minutes of small talk - Jarvis is used ambiently, so the
-        check-in itself needs to stay quick.
+        open with a scripted pitch; a short, genuine catch-up through
+        _WARMUP_TOPICS ("how's your day going", then school, then
+        friends) reads as someone who's actually paying attention, the
+        way a parent asks a kid about their day - see _handle_warmup_step
+        for how each reply gets reacted to before moving to the next topic.
         """
         profile_id = self.profile_manager.get_active_profile_id()
         name = self.profile_manager.get_profile_name(profile_id) if profile_id else None
@@ -884,17 +1160,20 @@ class JarvisBot:
 
         self._speak_fixed_phrase(phrase, continuous_vad, output_device_index)
         self.conversation_manager.add_assistant_message(phrase)
-        self._pending_warmup_checkin = {"step": "warmup"}
+        self._pending_warmup_checkin = {"step": self._WARMUP_TOPICS[0]}
         continuous_vad.reset_idle_timer()
 
     def _handle_warmup_step(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
-        Handles the student's reply to either half of the warm-up
-        check-in started by _start_warmup_checkin. The first reply is
-        just recorded (genuinely remembered, not analyzed yet - see the
-        review's InteractionSignals/StudentModel proposals for where that
-        would eventually plug in) and followed by a second, lighter
-        question. The second reply is deliberately NOT consumed here -
+        Handles the student's reply to each leg of the warm-up check-in
+        started by _start_warmup_checkin. Each _WARMUP_TOPICS reply gets a
+        genuine, LLM-generated reaction to something SPECIFIC the student
+        said (a name, an event, a feeling) before naturally moving to the
+        next topic - not a flat canned question, which would feel robotic
+        the moment the student's answer didn't fit the next scripted
+        line. Once topics run out, the LLM's own reaction pivots straight
+        into the discovery question instead of a separate bolted-on line.
+        The discovery reply itself is deliberately NOT consumed here -
         it's put back on the request queue so it flows through the
         normal dispatch chain instead (see _speaker_loop): the student may
         already be answering with their actual request ("help me with
@@ -902,18 +1181,20 @@ class JarvisBot:
         make them repeat themselves.
         """
         pending = self._pending_warmup_checkin
+        step = pending["step"]
 
-        if pending["step"] == "warmup":
+        if step in self._WARMUP_TOPICS:
             anonymized = self.privacy_manager.anonymize(user_text)
             self.conversation_manager.add_user_message(anonymized)
 
-            phrase = os.getenv(
-                'DISCOVERY_MESSAGE',
-                "Nice. Is there something you'd like help with today, or something new you're curious about?"
-            )
+            next_index = self._WARMUP_TOPICS.index(step) + 1
+            next_topic = self._WARMUP_TOPICS[next_index] if next_index < len(self._WARMUP_TOPICS) else None
+
+            phrase = self.llm_client.generate_warmup_reply(step, user_text, next_topic)
             self._speak_fixed_phrase(phrase, continuous_vad, output_device_index)
             self.conversation_manager.add_assistant_message(phrase)
-            pending["step"] = "discovery"
+
+            self._pending_warmup_checkin = {"step": next_topic or "discovery"}
             continuous_vad.reset_idle_timer()
             return
 
@@ -930,13 +1211,35 @@ class JarvisBot:
         # open-ended reply ("not really", "I don't know") triggers a
         # proactive suggestion - see tutor/question_engine.py - instead of
         # falling through to a generic chat response with nothing to go on.
-        if self.is_math_query(user_text) or self._EXPLICIT_INTENT_PATTERN.search(user_text):
+        if (
+            self.is_math_query(user_text)
+            or self.is_curiosity_question(user_text)
+            or self._EXPLICIT_INTENT_PATTERN.search(user_text)
+        ):
             self._request_queue.put(user_text)
+            return
+
+        # Use case 3: a clear, explicit decline (or a direct "I want to
+        # leave" signal) is respected right away - see
+        # _end_conversation_with_goodbye - rather than still pushing a
+        # proactive suggestion on a student who just said no. Logged
+        # here (unlike the re-queued branch above, which gets logged by
+        # whatever processes it next) since this path consumes user_text
+        # directly without ever re-queuing it - found live as a real gap:
+        # neither this reply nor the one that led to a proactive
+        # suggestion below was ever recorded, leaving a silent hole in
+        # history between the discovery question and whatever came next.
+        if self._DISCOVERY_DECLINE_PATTERN.search(user_text) or self._WANTS_TO_END_PATTERN.search(user_text):
+            anonymized = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized)
+            self._end_conversation_with_goodbye(continuous_vad, output_device_index)
             return
 
         profile_id = self.profile_manager.get_active_profile_id()
         suggestion = self.proactive_question_engine.suggest(profile_id) if profile_id else None
         if suggestion:
+            anonymized = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized)
             self._speak_fixed_phrase(suggestion["prompt"], continuous_vad, output_device_index)
             self.conversation_manager.add_assistant_message(suggestion["prompt"])
             self._pending_proactive_suggestion = {"concept": suggestion["concept"]}
@@ -951,8 +1254,11 @@ class JarvisBot:
         offer into an actual teaching turn on that concept - without this,
         the offer was a dead end: Jarvis would ask "want to work on
         fractions?" and then do nothing with a "yes" beyond letting it hit
-        generic chat. A no (or anything unclear) just lets the reply flow
-        through normal dispatch instead of forcing the suggestion on them.
+        generic chat. A clear decline ends the conversation with a warm
+        goodbye (use case 3 - see _end_conversation_with_goodbye) instead
+        of silently falling through to generic chat with nothing to go
+        on; anything else (unclear, or a pivot to a different request)
+        just lets the reply flow through normal dispatch.
         """
         pending = self._pending_proactive_suggestion
         self._pending_proactive_suggestion = None
@@ -960,6 +1266,14 @@ class JarvisBot:
         if self._YES_PATTERN.search(user_text):
             concept_readable = pending["concept"].replace("_", " ")
             self._run_teaching_turn(f"Can you help me with {concept_readable}?", continuous_vad, output_device_index)
+        elif self._DISCOVERY_DECLINE_PATTERN.search(user_text) or self._WANTS_TO_END_PATTERN.search(user_text):
+            # Logged here - this path consumes user_text directly rather
+            # than re-queuing it (unlike the other two branches, which
+            # get logged downstream), same gap as _handle_warmup_step's
+            # discovery branch had.
+            anonymized = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized)
+            self._end_conversation_with_goodbye(continuous_vad, output_device_index)
         else:
             self._request_queue.put(user_text)
 
@@ -1031,8 +1345,24 @@ class JarvisBot:
         intro = f"Okay, I can see it - it looks like: \"{problem_text}\". Give it a try - what do you think?"
         self._speak_fixed_phrase(intro, continuous_vad, output_device_index)
         self.conversation_manager.add_assistant_message(intro)
-        self._pending_teaching_check = {"concept": problem_text[:60], "question": problem_text, "attempts": 0}
+        self._pending_teaching_check = {
+            "concept": problem_text[:60], "question": problem_text, "attempts": 0, "off_topic_count": 0,
+        }
         continuous_vad.reset_idle_timer()
+
+    # Rotated for variety - spoken immediately at the start of a teaching
+    # turn, before generate_teaching_plan() even starts (see
+    # _run_teaching_turn). Deliberately "thinking" phrasing, not content
+    # acknowledgment ("Good question!") - the LLM's own first speech step
+    # already tends to open that way per its SPEECH STYLE guidance, so
+    # this would otherwise sound like two separate acknowledgments stacked
+    # back to back once the real explanation starts.
+    _TEACHING_TURN_FILLERS = [
+        "Hmm, let me think about that for a second...",
+        "Okay, give me just a moment to work that out...",
+        "Let me put that together for you...",
+        "One sec, let me think this through...",
+    ]
 
     def _run_teaching_turn(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
@@ -1043,6 +1373,22 @@ class JarvisBot:
         is synthesized/played, using the same streaming TTS pipeline as
         normal turns (one text chunk per step, since each step's text is
         already complete - not token-by-token like a live LLM stream).
+
+        generate_teaching_plan() is a single blocking, NON-streaming call -
+        the whole JSON plan has to come back before anything can be
+        spoken, unlike a normal turn's token-by-token LLM->TTS streaming -
+        and can occasionally take 20-30+ seconds. Confirmed live, and
+        confirmed as the cause of a real repeated-question moment in
+        production logs: a student asked a curiosity question, heard
+        nothing for ~17s, assumed Jarvis hadn't heard them, and asked
+        again. Two fixes for that, both below: an immediate spoken filler
+        so the wait never reads as silence, and un-muting the STT gate
+        for the wait itself (re-muting once real explanation audio
+        starts) - the same "only gate right before real audio actually
+        plays" principle the normal turn path already uses (see its own
+        ECHO GUARD comment), so anything the student says during a slow
+        generation is heard and queued normally instead of needing to
+        fight through the barge-in gate or being silently dropped as echo.
         """
         self.audio_player.on_audio_played = continuous_vad.provide_reference_audio
         if self.ui_signals:
@@ -1059,6 +1405,31 @@ class JarvisBot:
             anonymized_text = self.privacy_manager.anonymize(user_text)
             self.conversation_manager.add_user_message(anonymized_text)
             messages = self.conversation_manager.get_messages()
+
+            filler = random.choice(self._TEACHING_TURN_FILLERS)
+            for audio_chunk in self.tts_client.synthesize_stream(iter([filler]), delivery=self.expression_controller.friendly()):
+                if self.audio_player._is_playing:
+                    try:
+                        self.audio_player.queue_audio(audio_chunk)
+                    except RuntimeError as e:
+                        logger.warning(f"⚠️ Filler playback queueing failed (likely stopped): {e}")
+                        break
+                else:
+                    break
+            # Logged AFTER `messages` was already captured above (it's
+            # irrelevant context for THIS generate_teaching_plan call) but
+            # still needs to happen - same gap _speak_system_message had
+            # before it was fixed: real spoken content that left no trace
+            # in history, making a later "what actually happened" log
+            # review (like the one that found this) harder than it should be.
+            self.conversation_manager.add_assistant_message(filler)
+
+            # Un-mute for the generation wait itself - only the filler has
+            # actually played so far, so there's nothing left to echo-guard
+            # against until the real explanation starts (re-muted below,
+            # right before that first real audio chunk is queued).
+            self._bot_is_speaking = False
+            continuous_vad.set_playback_state(False)
 
             # Decided up front (not from the LLM's own output) so a hint can
             # be passed INTO generate_teaching_plan telling it to skip its
@@ -1089,6 +1460,11 @@ class JarvisBot:
             concept = plan.get("concept") or "general_math"
             check_question = plan.get("check_question")
 
+            # Re-mute now that real explanation audio is about to start
+            # playing again - see the un-mute right after the filler above.
+            self._bot_is_speaking = True
+            continuous_vad.set_playback_state(True)
+
             # Sketches and animates the actual object the problem describes
             # (a car driving, a person walking, a plant growing) rather than
             # leaving the board to only the LLM's own equations/diagram.
@@ -1110,6 +1486,44 @@ class JarvisBot:
                         "speech_id": first_speech_id, "action": "animate_icon",
                         "id": icon_id, "animation": "grow", "to_scale": 1.0, "duration": 2.2,
                     })
+
+            # Real-world-example photos (see visuals.example_image_library
+            # and use case 1's "show real photos for real-world examples"
+            # ask) - a speech step's own "image_tag" field (set by
+            # generate_teaching_plan's prompt, chosen from the exact tag
+            # list the library offers) is resolved to an actual file HERE,
+            # not trusted as a path - the LLM only ever sees tag names.
+            # Appended the same way the scene icon actions above are; an
+            # unrecognized/missing tag just means no photo for that step,
+            # same as today.
+            #
+            # Position: confirmed live as a real bug - the old box
+            # (480, 150) sat directly inside the "diagrams in the middle
+            # zone: x 480-750" area that generate_teaching_plan's own
+            # prompt tells the LLM to use for ITS OWN content (equations,
+            # fraction bars, shapes), so any plan that used that zone for
+            # a diagram while also attaching a photo landed the photo
+            # right on top of its own text/diagram. The LLM is told to
+            # never draw past x=780 (that's the face-widget's reserved
+            # column, see tutor_scene.py) - but the face only actually
+            # occupies a small bottom-right bubble there
+            # (x:1060-1250, y:500-690, see TutorScene._BUBBLE_*), so the
+            # rest of that column is free. This code runs AFTER the plan
+            # is generated and isn't bound by the LLM's own layout rule,
+            # so it can safely use that otherwise-empty column instead -
+            # guaranteed clear of both the equation zone (x 60-420) and
+            # diagram zone (x 480-750), and well above the face bubble.
+            for step in plan.get("speech", []):
+                image_tag = step.get("image_tag")
+                if not image_tag:
+                    continue
+                photo_path = example_image_path(image_tag)
+                if not photo_path:
+                    continue
+                visuals.append({
+                    "speech_id": step.get("id"), "action": "show_photo",
+                    "path": photo_path, "x": 860, "y": 150, "w": 260, "h": 260,
+                })
 
             fast_blocked = False
             for step in plan.get("speech", []):
@@ -1136,7 +1550,9 @@ class JarvisBot:
                     self.ui_signals.draw_actions.emit(actions)
 
                 response_parts.append(step_text)
-                for audio_chunk in self.tts_client.synthesize_stream(iter([step_text])):
+                for audio_chunk in self.tts_client.synthesize_stream(
+                    iter([step_text]), delivery=self.expression_controller.friendly()
+                ):
                     if self._interruption_event.is_set():
                         break
                     if self.audio_player._is_playing:
@@ -1171,7 +1587,9 @@ class JarvisBot:
             # checking/history purposes (appended to response_parts).
             if not self._interruption_event.is_set() and check_question:
                 response_parts.append(check_question)
-                for audio_chunk in self.tts_client.synthesize_stream(iter([check_question])):
+                for audio_chunk in self.tts_client.synthesize_stream(
+                    iter([check_question]), delivery=self.expression_controller.encouraging()
+                ):
                     if self._interruption_event.is_set():
                         break
                     if self.audio_player._is_playing:
@@ -1214,7 +1632,9 @@ class JarvisBot:
                 # _handle_teaching_answer instead of being treated as a
                 # fresh, unrelated question.
                 if check_question:
-                    self._pending_teaching_check = {"concept": concept, "question": check_question, "attempts": 0}
+                    self._pending_teaching_check = {
+                        "concept": concept, "question": check_question, "attempts": 0, "off_topic_count": 0,
+                    }
             else:
                 partial = " ".join(response_parts)
                 if partial:
@@ -1227,11 +1647,25 @@ class JarvisBot:
             # Fall back to a spoken apology rather than leaving the student
             # in silence if the LLM didn't return a valid teaching plan.
             try:
+                # Re-mute in case this exception hit during the un-muted
+                # generation wait (see above) - real audio (the apology)
+                # is about to play, so it needs the same echo-guarding as
+                # any other bot speech, regardless of which phase failed.
+                self._bot_is_speaking = True
+                continuous_vad.set_playback_state(True)
                 apology = "Sorry, I had trouble working that one out. Could you try asking again?"
-                for audio_chunk in self.tts_client.synthesize_stream(iter([apology])):
+                for audio_chunk in self.tts_client.synthesize_stream(
+                    iter([apology]), delivery=self.expression_controller.refusal()
+                ):
                     if self.audio_player._is_playing:
                         self.audio_player.queue_audio(audio_chunk)
                 self._last_bot_response = apology
+                # Without this, a failed teaching-plan call leaves a
+                # silent gap in history: the student's question is
+                # logged, the apology they actually heard is not, and a
+                # later log review can't tell a failure happened here at
+                # all - confirmed this exact ambiguity live.
+                self.conversation_manager.add_assistant_message(apology)
             except Exception:
                 pass
         finally:
@@ -1256,6 +1690,14 @@ class JarvisBot:
         re.IGNORECASE,
     )
 
+    # How many CONSECUTIVE non-answer turns a pending comprehension check
+    # tolerates before letting go of it - see _handle_teaching_answer's
+    # "not is_answer_attempt" branch. Confirmed live as a real problem at
+    # the default of "never let go": a student who'd clearly moved on
+    # kept getting pulled back toward a stale question for six turns in
+    # a row before giving up on the conversation entirely.
+    _TEACHING_CHECK_PATIENCE = int(os.getenv('TEACHING_CHECK_PATIENCE', '2'))
+
     def _handle_teaching_answer(self, user_text: str, continuous_vad, output_device_index: int) -> None:
         """
         Handles the student's answer to a teaching turn's comprehension-
@@ -1272,6 +1714,18 @@ class JarvisBot:
         LLMClient.evaluate_answer(); self.tutor_decision_engine turns that
         into a concrete TutorDecision (see tutor/decision_engine.py) -
         this method applies it and updates persistent mastery tracking.
+
+        Regression guard: before evaluate_answer() gained "is_answer_attempt",
+        every utterance here was graded against the pending question no
+        matter what it actually was - confirmed live with "OK, uh, I'm
+        done." (trying to end the conversation) being marked a wrong
+        fraction answer. TutorAction.NOT_AN_ANSWER is that escape hatch:
+        it skips grading/mastery/attempt-count entirely and keeps the
+        question open instead of being silently consumed by a turn that
+        was never answering it - but only for _TEACHING_CHECK_PATIENCE
+        consecutive non-answers, not forever; see the off_topic_count
+        handling below for why unconditional preservation turned out to
+        be its own real bug.
         """
         pending = self._pending_teaching_check
 
@@ -1280,6 +1734,24 @@ class JarvisBot:
             # without touching attempts/mastery or the pending state.
             self._speak_fixed_phrase(pending["question"], continuous_vad, output_device_index)
             continuous_vad.reset_idle_timer()
+            return
+
+        if self._WANTS_TO_END_PATTERN.search(user_text):
+            # A clear "I want to leave" signal, not an answer attempt -
+            # end the conversation right away (use case 3 - see
+            # _end_conversation_with_goodbye) instead of letting this
+            # reach evaluate_answer()'s NOT_AN_ANSWER path, which
+            # correctly avoids grading it wrong but then just
+            # acknowledges it and leaves the question open, waiting for
+            # the student to say so again. Confirmed live: "I'm done" /
+            # "let's talk later" / "let's finish here" each got
+            # acknowledged exactly that way, repeated three times in a
+            # row in the same conversation, without ever actually ending
+            # it. Checked before an LLM round-trip since this is
+            # unambiguous - no need to ask evaluate_answer to judge it.
+            anonymized = self.privacy_manager.anonymize(user_text)
+            self.conversation_manager.add_user_message(anonymized)
+            self._end_conversation_with_goodbye(continuous_vad, output_device_index)
             return
 
         self._pending_teaching_check = None  # consumed either way below
@@ -1292,27 +1764,35 @@ class JarvisBot:
             anonymized_text = self.privacy_manager.anonymize(user_text)
             self.conversation_manager.add_user_message(anonymized_text)
 
-            evaluation = self.llm_client.evaluate_answer(question, concept, user_text, attempts_so_far)
+            evaluation = self.llm_client.evaluate_answer(
+                question, concept, user_text, attempts_so_far, last_bot_message=self._last_bot_response
+            )
             decision = self.tutor_decision_engine.decide(evaluation)
+            is_answer_attempt = decision.action != TutorAction.NOT_AN_ANSWER
 
             profile_id = self.profile_manager.get_active_profile_id()
-            if profile_id:
-                self.profile_manager.record_attempt(
-                    profile_id, concept, correct=decision.is_correct, used_hint=decision.used_hint, question=question
+            if is_answer_attempt:
+                if profile_id:
+                    self.profile_manager.record_attempt(
+                        profile_id, concept, correct=decision.is_correct, used_hint=decision.used_hint, question=question
+                    )
+                    self.profile_manager.record_learning_event(
+                        profile_id,
+                        session_id=self.current_session.session_id if self.current_session else None,
+                        concept=concept,
+                        result=evaluation.get("correctness"),
+                        action=decision.action.value,
+                        attempt_number=attempts_so_far + 1,
+                        misconception=evaluation.get("misconception"),
+                    )
+                logger.info(
+                    f"📊 Answer evaluation for '{concept}': {evaluation.get('correctness')} -> {decision.action.value}"
                 )
-                self.profile_manager.record_learning_event(
-                    profile_id,
-                    session_id=self.current_session.session_id if self.current_session else None,
-                    concept=concept,
-                    result=evaluation.get("correctness"),
-                    action=decision.action.value,
-                    attempt_number=attempts_so_far + 1,
-                    misconception=evaluation.get("misconception"),
-                )
-
-            logger.info(
-                f"📊 Answer evaluation for '{concept}': {evaluation.get('correctness')} -> {decision.action.value}"
-            )
+            else:
+                # Not actually an attempt at the question (e.g. trying to
+                # end the conversation, an unrelated question) - don't
+                # grade it, don't burn an attempt, don't touch mastery.
+                logger.info(f"📊 '{user_text[:60]}' wasn't an answer attempt - leaving the question open")
 
             signals = self.interaction_signal_engine.analyze(user_text, attempts_so_far)
 
@@ -1335,10 +1815,38 @@ class JarvisBot:
             self.conversation_manager.add_assistant_message(response_text)
             self._last_bot_response = response_text
 
-            if decision.action == TutorAction.HINT:
-                # One more attempt at the SAME question.
+            if not is_answer_attempt:
+                # Leave the SAME pending check in place, attempts
+                # unchanged - the question is still open to come back to,
+                # it just wasn't what this turn was about. But only up to
+                # a point: confirmed live, with no limit here, a student
+                # who'd clearly moved on (guitar, GitHub, plain confused
+                # pushback) kept getting pulled back toward a stale
+                # question for SIX non-answer turns in a row before
+                # giving up on the conversation entirely - evaluate_answer
+                # judges each reply against the pending question in
+                # isolation, so a tangent Jarvis itself started (like
+                # answering a guitar follow-up) can even get misjudged as
+                # "about" the pending question. _TEACHING_CHECK_PATIENCE
+                # consecutive non-answers and the question lets go, same
+                # spirit as "reteach" giving up on re-testing a wrong
+                # answer rather than looping forever - it doesn't need a
+                # separate announcement, the response already spoken
+                # above already engaged with whatever they actually said.
+                off_topic_count = pending.get("off_topic_count", 0) + 1
+                if off_topic_count >= self._TEACHING_CHECK_PATIENCE:
+                    self._pending_teaching_check = None
+                    logger.info(
+                        f"📊 Abandoning pending check on '{concept}' after "
+                        f"{off_topic_count} consecutive non-answers"
+                    )
+                else:
+                    self._pending_teaching_check = {**pending, "off_topic_count": off_topic_count}
+            elif decision.action == TutorAction.HINT:
+                # One more attempt at the SAME question - a real attempt
+                # just happened, so the off-topic streak resets.
                 self._pending_teaching_check = {
-                    "concept": concept, "question": question, "attempts": attempts_so_far + 1,
+                    "concept": concept, "question": question, "attempts": attempts_so_far + 1, "off_topic_count": 0,
                 }
             # "reteach"/"continue"/"challenge" all leave pending state
             # cleared (already done above): reteach stops re-testing this
@@ -1373,7 +1881,7 @@ class JarvisBot:
                     self._speak_fixed_phrase(bridge, continuous_vad, output_device_index)
                     self.conversation_manager.add_assistant_message(bridge)
                     self._pending_teaching_check = {
-                        "concept": review["concept"], "question": review["question"], "attempts": 0,
+                        "concept": review["concept"], "question": review["question"], "attempts": 0, "off_topic_count": 0,
                     }
 
             continuous_vad.reset_idle_timer()
@@ -1455,6 +1963,41 @@ class JarvisBot:
             logger.error(f"Listener error: {e}")
             self._conversation_active.clear()
 
+    def _drain_to_latest_request(self, first: str) -> str:
+        """
+        Given the oldest queued utterance `first` (already pulled off
+        _request_queue), checks for any NEWER ones that already arrived
+        and returns the latest instead - see _speaker_loop. Without this,
+        several utterances queued up while a previous turn was still
+        working (e.g. during generate_teaching_plan's long "thinking"
+        wait, now un-muted - see _run_teaching_turn) each got their own
+        full response, processed one at a time in order, even when the
+        student was really just clarifying or redirecting themselves.
+        Confirmed live as direct feedback: an interruption should mean
+        "stop and work on the latest part," not "queue it and get to it
+        eventually."
+
+        A None sentinel (termination) found while draining is put back
+        on the queue rather than consumed, so the caller's own
+        termination check catches it on its next iteration instead of
+        shutdown being silently swallowed while chasing a newer utterance.
+        """
+        latest = first
+        drained = 0
+        while True:
+            try:
+                newer = self._request_queue.get_nowait()
+            except queue.Empty:
+                break
+            if newer is None:
+                self._request_queue.put(None)
+                break
+            latest = newer
+            drained += 1
+        if drained:
+            logger.info(f"⏭️  Skipped {drained} superseded utterance(s), acting on the latest: '{latest[:60]}'")
+        return latest
+
     def _speaker_loop(self, continuous_vad, output_device_index):
         """Consumer: Processes requests and speaks."""
         logger.info("🔊 Speaker worker started")
@@ -1465,10 +2008,12 @@ class JarvisBot:
                     user_text = self._request_queue.get(timeout=1.0)
                 except queue.Empty:
                     continue
-                    
+
                 if user_text is None: # Termination sentinel
                     break
-                    
+
+                user_text = self._drain_to_latest_request(user_text)
+
                 # Signal we are busy
                 self._speaker_busy.set()
                 self._interruption_event.clear()
@@ -1484,6 +2029,27 @@ class JarvisBot:
                 # session (the normal-turn path below already has its own
                 # try/except and doesn't need this - only these four didn't).
                 try:
+                    # This turn is the yes/no answer to a pending shut-
+                    # down/restart confirmation - checked FIRST, ahead of
+                    # every other dispatch branch, since this is the one
+                    # path that can power off or reboot the physical
+                    # hardware. See _try_handle_system_command/
+                    # _handle_system_command_confirmation.
+                    if self._pending_system_command is not None:
+                        self._handle_system_command_confirmation(user_text, continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
+                    # "shut down" / "restart" - never reach the LLM, not
+                    # real tutoring questions, and never executed on this
+                    # turn alone (see _try_handle_system_command - it only
+                    # asks for confirmation, handled above on the NEXT turn).
+                    if self._try_handle_system_command(user_text, continuous_vad, output_device_index):
+                        self._speaker_busy.clear()
+                        continuous_vad.reset_idle_timer()
+                        continue
+
                     # "Jarvis Voice Recognition <name>", "go back to your
                     # last session" - never reach the LLM, not real
                     # tutoring questions.
@@ -1543,6 +2109,25 @@ class JarvisBot:
                         self._speaker_busy.clear()
                         continue
 
+                    # A clear "I'm done"/"goodbye" said with NO pending
+                    # sub-flow active (plain free-flowing conversation) -
+                    # the narrower _WANTS_TO_END_PATTERN checks above/below
+                    # only fire from inside a specific pending state
+                    # (warmup/discovery, a comprehension check), so this is
+                    # the catch-all for everywhere else. Confirmed live as a
+                    # real gap: a student saying "goodbye, bye, bye" mid
+                    # ordinary conversation got pleasant-sounding but
+                    # functionally inert replies from the normal LLM path
+                    # below (which has no way to actually end anything),
+                    # and the conversation only really ended much later via
+                    # the unrelated idle-timeout/check-in-grace cycle -
+                    # reading as "it just stayed there awake" even though
+                    # the student had already said goodbye several times.
+                    if self._WANTS_TO_END_PATTERN.search(user_text):
+                        self._end_conversation_with_goodbye(continuous_vad, output_device_index)
+                        self._speaker_busy.clear()
+                        continue
+
                     # A request to help with a physical homework paper gets
                     # its own flow (capture a photo, read it via vision,
                     # let the student try it) - checked before is_math_query
@@ -1553,10 +2138,12 @@ class JarvisBot:
                         self._speaker_busy.clear()
                         continue
 
-                    # Math/geometry questions get a teaching plan (speech
-                    # steps + synchronized whiteboard diagram) instead of a
-                    # plain answer.
-                    if self.is_math_query(user_text):
+                    # Math/geometry questions, and general "I want to know
+                    # about X" curiosity questions on any K-8 subject, get
+                    # a teaching plan (speech steps + synchronized
+                    # whiteboard diagram + real-world examples) instead of
+                    # a plain answer - see is_math_query/is_curiosity_question.
+                    if self.is_math_query(user_text) or self.is_curiosity_question(user_text):
                         self._run_teaching_turn(user_text, continuous_vad, output_device_index)
                         self._speaker_busy.clear()
                         continue
@@ -1616,7 +2203,9 @@ class JarvisBot:
                         student_context=self._build_student_context()
                     )
                     collected_stream = text_collector(llm_stream)
-                    tts_stream = audio_timing(self.tts_client.synthesize_stream(collected_stream))
+                    tts_stream = audio_timing(self.tts_client.synthesize_stream(
+                        collected_stream, delivery=self.expression_controller.friendly()
+                    ))
 
                     for audio_chunk in tts_stream:
                         if self._interruption_event.is_set():
@@ -1705,30 +2294,6 @@ class JarvisBot:
         except Exception as e:
             logger.error(f"Speaker loop error: {e}")
 
-    def _get_pulse_device_index(self, pa, direction: str = 'output') -> int:
-        """Find the index of the 'pulse' audio device.
-
-        PulseAudio (Linux/Pi) exposes a single bridging device that handles
-        both directions, so a single index normally works for input and
-        output alike. Platforms without PulseAudio (e.g. native Windows) have
-        no such device, so the fallback must use the correctly-directioned
-        env var instead of reusing the output device index for microphone
-        input (which has no input channels and silently mis-selects a mic).
-        """
-        try:
-            for i in range(pa.get_device_count()):
-                info = pa.get_device_info_by_index(i)
-                if info and 'pulse' in info.get('name', '').lower():
-                    logger.info(f"✅ Found PulseAudio device at index {i}: {info['name']}")
-                    return i
-        except Exception as e:
-            logger.warning(f"Error searching for PulseAudio device: {e}")
-
-        env_var = 'AUDIO_INPUT_DEVICE_INDEX' if direction == 'input' else 'AUDIO_OUTPUT_DEVICE_INDEX'
-        fallback = int(os.getenv(env_var, 1))
-        logger.warning(f"⚠️  PulseAudio not found - falling back to {env_var}={fallback} for {direction}")
-        return fallback
-
     @staticmethod
     def _set_display_power(on: bool) -> None:
         """
@@ -1767,6 +2332,8 @@ class JarvisBot:
         Speak a fixed, non-LLM-generated phrase (check-in prompt, goodbye,
         etc). Reuses the same TTS/playback/echo-guard pattern as a normal
         turn, just with fixed text instead of an LLM-generated response.
+        Uses FRIENDLY delivery (Jarvis's baseline conversational mood) -
+        see _speak_fixed_phrase's docstring for why, same reasoning here.
         """
         if self._speaker_busy.is_set():
             # Speaker thread is mid-turn (race with the idle-timeout/end firing
@@ -1782,7 +2349,7 @@ class JarvisBot:
             self._bot_is_speaking = True
             continuous_vad.set_playback_state(True)
 
-            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase]), delivery=self.expression_controller.friendly()):
                 if self.audio_player._is_playing:
                     self.audio_player.queue_audio(audio_chunk)
                 else:
@@ -1790,6 +2357,7 @@ class JarvisBot:
 
             self.audio_player.stop_streaming(immediate=False)
             self._last_bot_response = phrase
+            self.conversation_manager.add_assistant_message(phrase)
         except Exception as e:
             logger.error(f"Error speaking system message: {e}")
         finally:
@@ -1805,9 +2373,25 @@ class JarvisBot:
         )
         self._speak_system_message(phrase, continuous_vad, output_device_index)
 
+    # Rotated for variety on a casual conversation that never got to any
+    # teaching (no concepts_covered to build a real wrap-up from) - see
+    # _speak_goodbye. Warm and personal rather than purely instructional,
+    # per direct feedback that the goodbye should feel "really friendly
+    # and warm", not just a functional sign-off.
+    _GENERIC_GOODBYE_TEMPLATES = [
+        "Okay, sounds good! It was so nice chatting with you - I'll be right here whenever you want to talk again.",
+        "Alright, no worries at all! I had fun talking with you - just say Hey Jarvis whenever you want to chat.",
+        "Sounds good! Thanks for stopping by - come find me anytime you want to learn something new or just say hi.",
+    ]
+
     def _speak_goodbye(self, continuous_vad, output_device_index: int) -> None:
         """
-        Speak a farewell message when a conversation is about to end.
+        Speak a farewell message when a conversation is about to end -
+        either from the idle-timeout/check-in-grace cycle (see
+        _handle_wake_word), or right away when the student explicitly
+        declines at the discovery pivot (use case 3 - see
+        _end_conversation_with_goodbye). Both paths share this one method
+        so the goodbye is equally warm regardless of why it's happening.
 
         If the conversation included real teaching (current_session.
         concepts_covered is non-empty - see _run_teaching_turn) and no
@@ -1815,9 +2399,9 @@ class JarvisBot:
         wrap-up naming what was covered and one real takeaway, not a
         generic farewell - see LLMClient.generate_session_wrapup(), which
         already fails toward a simple templated summary on its own, so no
-        extra fallback handling is needed here. Falls back to the plain
-        generic goodbye for a casual conversation that never got to any
-        math.
+        extra fallback handling is needed here. Falls back to a warm,
+        rotated generic goodbye for a casual conversation that never got
+        to any teaching.
         """
         override = os.getenv('GOODBYE_MESSAGE')
         concepts = self.current_session.concepts_covered if self.current_session else []
@@ -1827,20 +2411,42 @@ class JarvisBot:
         elif concepts:
             phrase = self.llm_client.generate_session_wrapup(concepts)
         else:
-            phrase = "Okay, talk to you later! Just say Hey Jarvis whenever you want to continue."
+            phrase = random.choice(self._GENERIC_GOODBYE_TEMPLATES)
 
+        if self.ui_signals:
+            self.ui_signals.set_expression.emit(Expression.FRIENDLY.value)
         self._speak_system_message(phrase, continuous_vad, output_device_index)
+
+    def _end_conversation_with_goodbye(self, continuous_vad, output_device_index: int) -> None:
+        """
+        Use case 3 of the discovery pivot: the student explicitly doesn't
+        want anything right now ("no", "I'm good", declining a proactive
+        suggestion). Rather than sitting through the idle-timeout/
+        check-in-grace cycle in silence before _handle_wake_word's own
+        loop would eventually say goodbye, end the conversation right
+        away with that exact same warm goodbye (see _speak_goodbye) -
+        respecting what the student just said instead of waiting it out.
+
+        Clearing _conversation_active here is the same mechanism
+        _handle_wake_word's own idle-timeout path uses to end a
+        conversation - both _speaker_loop (this call's own thread) and
+        the main conversation-loop thread poll it and unwind through
+        their normal teardown/wake-word-restart on their own.
+        """
+        self._speak_goodbye(continuous_vad, output_device_index)
+        self._conversation_active.clear()
 
     def _speak_standalone(self, phrase: str, output_device_index: int) -> None:
         """
         Speak a fixed phrase with no active conversation (e.g. the
         going-to-sleep announcement). No echo-guard/continuous_vad needed
         here since wake-word detection uses its own model, not Azure STT.
+        Uses FRIENDLY delivery - see _speak_fixed_phrase's docstring.
         """
         logger.info(f"🗣️  {phrase}")
         try:
             self.audio_player.start_streaming(output_device_index=output_device_index)
-            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase])):
+            for audio_chunk in self.tts_client.synthesize_stream(iter([phrase]), delivery=self.expression_controller.friendly()):
                 if self.audio_player._is_playing:
                     self.audio_player.queue_audio(audio_chunk)
                 else:
@@ -1850,6 +2456,21 @@ class JarvisBot:
             logger.error(f"Error speaking standalone message: {e}")
         finally:
             self.audio_player.stop_streaming(immediate=True)
+
+    def _speak_boot_greeting(self) -> None:
+        """
+        Passed as WakeWordDetector.start()'s on_ready callback for the
+        very first startup (see run()) - fires once model loading + mic
+        setup are actually done, not before, so "I'm ready" is true when
+        said. Doubles as a startup health check: if this doesn't play,
+        the problem is upstream of wake-word listening entirely (TTS/
+        audio output, or startup never finished) rather than in wake-word
+        matching itself - two different problems that otherwise look
+        identical from the outside ("said Hey Jarvis, nothing happened").
+        """
+        phrase = os.getenv('BOOT_GREETING', "Hi! I'm ready - just say Hey Jarvis to get started.")
+        output_device_index = resolve_device_index(self.pa, 'output', 'AUDIO_OUTPUT_DEVICE_INDEX')
+        self._speak_standalone(phrase, output_device_index)
 
     def _handle_wake_word(self):
         """Handle wake word detection - enter continuous conversation mode."""
@@ -1892,10 +2513,11 @@ class JarvisBot:
                 f"then end after {check_in_grace}s more with no response"
             )
 
-            # DYNAMICALLY FIND PULSE DEVICE (falls back to the correctly-directioned
-            # env var per direction when no PulseAudio device exists, e.g. Windows)
-            pulse_input_index = self._get_pulse_device_index(self.pa, direction='input')
-            pulse_output_index = self._get_pulse_device_index(self.pa, direction='output')
+            # An explicit, valid .env index wins; otherwise falls back to
+            # PulseAudio auto-detection, then the system default - see
+            # audio/device_detection.py.
+            pulse_input_index = resolve_device_index(self.pa, 'input', 'AUDIO_INPUT_DEVICE_INDEX')
+            pulse_output_index = resolve_device_index(self.pa, 'output', 'AUDIO_OUTPUT_DEVICE_INDEX')
 
             # Initialize VAD with dedicated INPUT stream. Its own hard idle-stop
             # must cover the check-in grace period too, otherwise it kills the
@@ -1906,7 +2528,9 @@ class JarvisBot:
                 input_device_index=pulse_input_index,
                 player=self.audio_player
             )
-            
+            continuous_vad.on_input_level = self.ui_signals.mic_level_changed.emit if self.ui_signals else None
+            continuous_vad.on_barge_in_state = self.ui_signals.barge_in_state_changed.emit if self.ui_signals else None
+
             # Wire callback so VAD knows when bot is speaking (for AEC/Duck)
             self.audio_player.on_audio_played = continuous_vad.on_audio_played
             
@@ -1961,6 +2585,27 @@ class JarvisBot:
                 if self.audio_player.has_fatal_error:
                     logger.warning("♻️  FATAL AUDIO ERROR - Recreating system...")
                     self._recreate_audio_system()
+
+                # Never evaluate (or fire) the idle check-in while a turn is
+                # actively being processed - _speaker_busy spans the WHOLE
+                # turn, including generate_teaching_plan()'s "thinking" gap
+                # (confirmed live: that single blocking call can run
+                # 20-40+s with no audio playing yet, well past idle_timeout,
+                # since it un-mutes/un-marks-speaking for the wait - see
+                # _run_teaching_turn). Without this, this loop - unaware a
+                # real explanation was already on its way - would speak
+                # "Are you still there?" right as the teaching turn's own
+                # TTS started, stepping on it mid-explanation. Confirmed
+                # live as exactly this: a student heard Jarvis's fractions
+                # explanation get cut off by a check-in prompt mid-turn.
+                # Also resets checked_in rather than letting a stale
+                # prompt_finished_at silently blow through check_in_grace
+                # the moment the turn finishes, which would end the
+                # conversation right after a long explanation.
+                if self._speaker_busy.is_set():
+                    checked_in = False
+                    time.sleep(0.5)
+                    continue
 
                 if not checked_in:
                     idle_duration = time.time() - continuous_vad.last_speech_time
@@ -2032,11 +2677,26 @@ class JarvisBot:
             except:
                 pass
             
-            # 4. Always restart wake word detection
+            # 4. Always restart wake word detection - each step isolated
+            # in its own try/except. Confirmed live as a real gap: if
+            # _restart_wake_word() threw, _interaction_lock.release()
+            # below it never ran either, permanently holding the lock and
+            # blocking every future wake-word detection too - not just
+            # this one failing to restart. wake_word.py's own listen loop
+            # now also never lets an exception from this whole method
+            # escape and kill the detection thread outright (see
+            # WakeWordDetector._run_callback), but that alone doesn't
+            # guarantee detection actually resumes - this does.
             logger.info("▶️  Resuming wake word detection...")
             self._standby_since = time.time()
-            self._restart_wake_word()
-            self._interaction_lock.release()
+            try:
+                self._restart_wake_word()
+            except Exception as e:
+                logger.error(f"Failed to restart wake word detection: {e}")
+            try:
+                self._interaction_lock.release()
+            except Exception as e:
+                logger.error(f"Failed to release interaction lock: {e}")
     
     def _process_turn(self, audio_data: bytes, continuous_vad: ContinuousVADCapture) -> bool:
         """
@@ -2332,7 +2992,16 @@ class JarvisBot:
             # _restart_wake_word() which takes over in a daemon thread. After that,
             # start() returns here — but we must NOT call stop() at that point because
             # the daemon thread and all shared resources (self.pa, TTS) are still needed.
-            self.wake_word_detector.start(self._handle_wake_word)
+            #
+            # on_ready=_speak_boot_greeting ONLY on this very first call - model
+            # loading + mic setup can take several real seconds, and without any
+            # signal, someone powering it on has no way to tell "still booting"
+            # from "not working" (exactly what a team debugging session spent a
+            # while on). _restart_wake_word()'s own start() calls (every cycle
+            # after a conversation ends) deliberately leave on_ready unset - a
+            # "ready" announcement after every single conversation would be
+            # noise, not a signal.
+            self.wake_word_detector.start(self._handle_wake_word, on_ready=self._speak_boot_greeting)
 
             # Keep run() alive while wake-word/conversation cycles continue in daemon threads.
             # Only exit when _is_running is cleared by stop() or a signal arrives.
@@ -2345,7 +3014,7 @@ class JarvisBot:
                         and not self._conversation_active.is_set()
                         and (time.time() - self._standby_since) >= display_sleep_timeout):
                     logger.info(f"💤 {display_sleep_timeout}s idle - going to sleep")
-                    sleep_output_index = self._get_pulse_device_index(self.pa, direction='output')
+                    sleep_output_index = resolve_device_index(self.pa, 'output', 'AUDIO_OUTPUT_DEVICE_INDEX')
                     self._speak_standalone(
                         os.getenv('SLEEP_MESSAGE', "I'm going to sleep now. Just say Hey Jarvis to wake me up!"),
                         sleep_output_index
@@ -2401,44 +3070,19 @@ def main():
     is_windows = sys.platform == "win32"
 
     # ── Display configuration ──────────────────────────────────────────────────
-    # FACE_ENABLED=true          → show the face/teaching-canvas window
-    # FACE_ENABLED=false         → headless, no GUI (default when DISPLAY not set)
-    # unset                      → auto: on Windows, on (normal desktop session,
-    #                              Qt opens its own native window, no DISPLAY
-    #                              needed); on Linux/Pi, on only if DISPLAY/
-    #                              WAYLAND_DISPLAY is already set (matches a
-    #                              headless-SSH-session default)
-    #
-    # DISPLAY_BACKEND=physical   → HDMI monitor          (DISPLAY=:0)
-    # DISPLAY_BACKEND=vnc        → TigerVNC session      (DISPLAY=:1)
-    # DISPLAY_BACKEND=auto       → pick first available X11 socket (:1 then :0)
-    #
-    # You can also skip DISPLAY_BACKEND and set DISPLAY directly, e.g. DISPLAY=:0
-    #
-    # None of the above (DISPLAY/XAUTHORITY/X11 sockets) is a Linux/X11 concept
-    # that applies on native Windows — Qt opens a normal Win32 window directly
-    # there, so Windows gets its own simpler default/path below. On Linux, Qt
-    # still needs a real X11 DISPLAY the same way the old cv2-based face did.
-    # ──────────────────────────────────────────────────────────────────────────
     face_env = os.getenv("FACE_ENABLED", "").strip().lower()
     if face_env in ("true", "1", "yes"):
         face_enabled = True
     elif face_env in ("false", "0", "no"):
         face_enabled = False
     elif is_windows:
-        # No DISPLAY-style signal exists on Windows to auto-detect from -
-        # a normal interactive session always has a GUI available.
         face_enabled = True
     else:
-        # Linux/Pi auto: enable face only when DISPLAY is already set
         face_enabled = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
     if face_enabled and is_windows:
         logger.info("Face animation enabled (native Windows GUI, no X11 needed)")
     elif face_enabled:
-        # DISPLAY_BACKEND always wins when explicitly set — it overrides whatever
-        # DISPLAY was loaded from .env so that a single knob controls the display.
-        # Priority: DISPLAY_BACKEND (explicit) > DISPLAY (env/shell) > default :0
         backend = os.getenv("DISPLAY_BACKEND", "").strip().lower()
 
         if backend == "vnc":
@@ -2446,7 +3090,6 @@ def main():
         elif backend == "physical":
             os.environ["DISPLAY"] = ":0"
         elif backend == "auto":
-            # Pick the first X11 socket that actually exists
             for candidate in (":1", ":0"):
                 if os.path.exists(f"/tmp/.X11-unix/X{candidate[1:]}"):
                     os.environ["DISPLAY"] = candidate
@@ -2454,19 +3097,13 @@ def main():
             else:
                 os.environ["DISPLAY"] = ":0"
         elif not os.environ.get("DISPLAY"):
-            # No DISPLAY_BACKEND and no DISPLAY — last resort default
             os.environ["DISPLAY"] = ":0"
 
-        # Ensure X authentication is available.
-        # TigerVNC stores its cookie in the same ~/.Xauthority file as the
-        # physical display, just under a different display entry (:1 vs :0).
         if not os.environ.get("XAUTHORITY"):
             xauth_path = os.path.expanduser("~/.Xauthority")
             if os.path.exists(xauth_path):
                 os.environ["XAUTHORITY"] = xauth_path
 
-        # Pre-check: verify the X11 socket actually exists before letting Qt try.
-        # Qt calls abort() on a missing display — that can't be caught by Python.
         display = os.environ.get("DISPLAY", "")
         display_num = display.lstrip(":").split(".")[0]
         socket_path = f"/tmp/.X11-unix/X{display_num}"
@@ -2484,22 +3121,22 @@ def main():
 
     app = None
     ui_signals = None
+    window = None
+
     if face_enabled:
         try:
             from PyQt5.QtWidgets import QApplication
-            # QApplication must exist before any other Qt object (UISignals,
-            # MainWindow) is constructed, and must live on the main thread.
+            # 1. Initialize QApplication and MainWindow IMMEDIATELY 
+            # (It sits hidden behind the GTK splash screen)
             app = QApplication(sys.argv)
             ui_signals = UISignals()
 
-            # Resolve relative to this file's own location, not the process's
-            # CWD - "./visuals/faces" only works if launched as `cd src &&
-            # python main.py`, but breaks under `python3 src/main.py` from
-            # the repo root (the convention actually used to run this on the
-            # Pi), silently falling back to headless instead of erroring loudly.
             faces_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visuals", "faces")
             window = MainWindow(ui_signals, faces_dir, fullscreen=not is_windows)
             window.show()
+            
+            # Force PyQt to process events and paint the window frame underneath
+            app.processEvents()
 
             logger.info(
                 "Face animation enabled (native Windows GUI)" if is_windows
@@ -2510,15 +3147,28 @@ def main():
             app = None
             ui_signals = None
 
+    # 2. Initialize heavy JarvisBot components while the splash screen still covers the screen
+    logger.info("Initializing Jarvis backend behind splash screen...")
     jarvis = JarvisBot(ui_signals)
 
+    # 3. NOW that everything is fully loaded and drawn, instantly kill the splash screen!
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, "r") as f:
+                splash_pid = int(f.read().strip())
+            os.kill(splash_pid, signal.SIGTERM)
+            os.remove(PID_FILE)
+            logger.info("Splash screen dismissed seamlessly.")
+        except Exception as e:
+            logger.warning(f"Could not terminate splash process: {e}")
+
+    # 4. Start the event loops
     if app:
         worker = threading.Thread(target=jarvis.run, daemon=True)
         worker.start()
-        # Qt's event loop must run on the main thread
         sys.exit(app.exec_())
     else:
         jarvis.run()
-
+        
 if __name__ == "__main__":
     main()

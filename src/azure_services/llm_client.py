@@ -12,6 +12,7 @@ from typing import Callable, Iterator, List, Dict, Optional
 from openai import AzureOpenAI
 from dotenv import load_dotenv
 from azure_services.local_llm_client import LocalLLMClient
+from visuals.example_image_library import available_tags as available_example_image_tags
 
 load_dotenv()
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -266,7 +267,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.2,
-        max_tokens: int = 800,
+        max_tokens: int = 1200,
         student_context: Optional[str] = None,
         scene_hint: Optional[str] = None,
     ) -> Dict:
@@ -278,6 +279,18 @@ class LLMClient:
         Returns a dict: {"speech": [{"id": int, "text": str}, ...],
                           "visuals": [{"speech_id": int, "action": str, ...}, ...]}
         """
+        # Trimmed to the most recent messages only - confirmed live as a
+        # real, reproducible failure (0/5 even with the retry above) on
+        # a long conversation history full of plain conversational
+        # assistant turns from OTHER code paths (warmup chat, generic
+        # NOT_AN_ANSWER replies, etc., none of them JSON): the model
+        # pattern-matches to its own prior turns' plain-text style in
+        # the history and drops the JSON format for this call too,
+        # despite the system prompt's instruction. A short history
+        # (tested up to 8 messages, all reliable) still gives enough
+        # immediate context for a real follow-up without enough
+        # plain-text turns to anchor the model away from JSON.
+        messages = messages[-6:]
         try:
             # Deliberately NOT prepending self.system_prompt here - it's the
             # conversational K-8 tutoring persona ("keep responses to 2-4
@@ -298,7 +311,7 @@ class LLMClient:
     {
       "concept": "short_snake_case_identifier",
       "speech": [
-        {"id": 1, "text": "string"}
+        {"id": 1, "text": "string", "image_tag": "string from the list below, or null"}
       ],
       "check_question": "string or null",
       "visuals": [
@@ -312,7 +325,9 @@ class LLMClient:
         {"speech_id": 1, "action": "draw_polygon", "points": [[580,160],[780,160],[780,360],[580,360]]},
         {"speech_id": 1, "action": "draw_regular_polygon", "sides": 6, "cx": 620, "cy": 270, "radius": 110},
         {"speech_id": 1, "action": "draw_arc", "x": 510, "y": 160, "w": 200, "h": 200, "start_angle": 0, "span_angle": 360},
-        {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90}
+        {"speech_id": 1, "action": "squiggly_underline", "x": 160, "y": 358, "width": 90},
+        {"speech_id": 2, "action": "fraction_bar", "x": 100, "y": 200, "width": 600, "bar_height": 60,
+         "fractions": [{"numerator": 3, "denominator": 4}]}
       ]
     }
 
@@ -321,6 +336,20 @@ class LLMClient:
       taught (e.g. "Area of a Rectangle", "Equivalent Fractions") - written in Title
       Case, not snake_case. Always emit this once, with speech_id 1, right alongside
       the initial "clear" action for every new question.
+    - fraction_bar: draws one or more horizontal bars, each split into equal segments
+      with some of them shaded, for visualizing/comparing fractions. fractions = a
+      list of {"numerator": int, "denominator": int, "label": optional string} -
+      denominator must be between 1 and 12, numerator between 0 and denominator
+      (proper fractions or exactly a whole - not improper fractions/mixed numbers).
+      Give 2+ fractions (max 4) to compare them or show equivalence (e.g. 1/2 and
+      2/4 drawn at the same width will visibly shade the same span). label defaults
+      to "numerator/denominator" - only set it to something else (like "pizza eaten")
+      when that's clearer than the bare fraction. x,y = top-left anchor, width =
+      pixel width of each bar (all bars share the same width so equivalent/compared
+      fractions line up), bar_height = pixel height of each bar (omit for a sensible
+      default). Multiple bars stack automatically - don't set y per fraction. Every
+      segment boundary is computed and drawn for you - you supply ONLY the
+      numerator(s) and denominator(s), never a pixel coordinate for a segment.
     - draw_circle: x,y = CENTER of circle. r = radius (for circles). rx,ry = separate radii (for ellipses).
     - draw_rect: x,y = top-left corner. w,h = width and height.
     - draw_regular_polygon: sides=number of sides, cx/cy=center, radius=circumscribed radius.
@@ -349,11 +378,66 @@ class LLMClient:
       simple, already fully-answered question where a follow-up check would feel
       repetitive. Do NOT put the check question in speech - it is spoken separately,
       after the explanation.
-    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline
+    - Allowed actions: clear, set_title, draw_text, draw_line, draw_rect, draw_circle, draw_polygon, draw_regular_polygon, draw_arc, squiggly_underline, fraction_bar
     - Always include exactly one "set_title" action, speech_id 1, right after the
       initial "clear" - every question gets a title naming the topic.
-    - Use 2-5 speech steps
-    - Keep explanations short and teacher-like
+    - Use 2-6 speech steps (use the higher end for a concept-explanation
+      question - see REAL-WORLD EXAMPLES below - which needs room for a
+      second example; a specific problem with given numbers to solve
+      usually still only needs 2-4)
+    - SPEECH STYLE - this is what actually gets spoken out loud, so write it like
+      you're talking TO the student, not narrating a textbook at them:
+        * Use contractions - "that's", "we're", "let's", "you'll", "it's" - not
+          "that is", "we are", "let us".
+        * Vary your openers. Don't start every step the same stiff way ("To find
+          the area, we..."). Mix in natural ones: "Okay, so...", "Alright,
+          let's...", "So here's the thing -", "Now,...".
+        * If this is responding to something the student just asked or said,
+          briefly acknowledge it first ("Good question!", "Ooh, nice one,",
+          "Right, so...") before diving into the explanation - don't launch
+          straight into content like it's step one of a worksheet.
+        * Concrete example of the difference:
+            Too stiff (don't write this): "The area of a rectangle can be
+            calculated by multiplying its width by its height."
+            Conversational (write like this): "So to find the area, you just
+            multiply the width by the height - that's it!"
+        * Warm and detailed, not rushed: this is a K-8 student actually trying
+          to understand something, not a transcript to get through quickly.
+          Take the time to make it genuinely click - friendly, patient,
+          enthusiastic about the topic - rather than racing to the check
+          question. "This does NOT mean longer" below is about sentence
+          count per step, not about shortchanging the explanation itself.
+      This does NOT mean longer - still 2-3 sentences per step, just said like a
+      person talking, not a page being read aloud.
+    - REAL-WORLD EXAMPLES - for a concept-explanation question ("what is X",
+      "how does X work", "I want to know about X", "tell me about X" - as
+      opposed to a specific problem that already gives numbers to solve):
+        1. Explain the core idea with a real-world example or scenario woven
+           INTO the explanation itself, not an abstract definition on its own -
+           e.g. explain a fraction through "if a pizza has 8 slices and you eat
+           3 of them..." rather than just "a fraction is part of a whole."
+        2. After that, give AT LEAST ONE MORE different real-world example or
+           scenario illustrating the same idea from a different angle, as its
+           own speech step - this reinforces understanding before the
+           check_question, it does not replace it (e.g. if the first example
+           was pizza slices, the second could be sharing a candy bar, or
+           splitting a classroom into groups for a project).
+        3. A specific problem WITH given numbers to solve doesn't need this
+           extra example step - fully solve that problem as the rules below
+           already describe, though a brief real-world framing is still
+           welcome where it fits naturally (e.g. "area" as a room's floor).
+    - EXAMPLE PHOTOS: a speech step's "image_tag" field shows a real photo
+      instead of a sketch for that step's real-world example - see the
+      "AVAILABLE EXAMPLE PHOTOS" list appended at the end of this prompt.
+      Only use a tag from that EXACT list, and only when it's a genuinely
+      strong match for what that step's example is actually about (a step
+      whose example is "a pizza cut into slices" -> image_tag "pizza"; a
+      step about something not in the list, or only a loose/generic match
+      -> image_tag null - never invent a tag that isn't in the list).
+      When you DO use an image_tag, don't also draw a redundant diagram/
+      shape for that same step - the photo IS the illustration - but
+      still include the usual equations/draw_text if that step is also
+      solving a specific problem.
     - Every visual must map to a valid speech_id
     - Use integers for coordinates
     - Always include at least one visual action for each speech step after the first
@@ -366,6 +450,20 @@ class LLMClient:
         2. substituted values
         3. simplified result
         4. final answer
+    NEVER ASK A CLARIFYING QUESTION INSTEAD OF TEACHING - no matter how
+    broad or vague the request sounds ("something about software", "tell
+    me about computers", "I want to know about science"), you must still
+    return a full plan that teaches something, following every rule in
+    this prompt exactly as normal. Pick the single most common/useful
+    specific angle yourself (e.g. for "something about software": what
+    software actually is and the difference between an app and a
+    system) and teach THAT - a real tutor doesn't stop and interview the
+    student before saying anything useful, they start somewhere
+    reasonable and let the student redirect if they want something else
+    (which they can always do in a later turn). This is not optional and
+    has no exception: asking the student to narrow down first, in any
+    form, in or out of the JSON, is never an acceptable response.
+
     DIAGRAM RULES - MANDATORY, NO EXCEPTIONS:
     - You MUST include at least one diagram for EVERY question, regardless of subject.
       A text-only board (just equations or sentences, no picture) is never acceptable -
@@ -505,35 +603,70 @@ class LLMClient:
       label, never both
     """
             system_content = self._with_student_context(plan_system_prompt, student_context)
+            image_tags = available_example_image_tags()
+            if image_tags:
+                system_content = f"{system_content}\n\nAVAILABLE EXAMPLE PHOTOS: {', '.join(image_tags)}"
             if scene_hint:
                 system_content = f"{system_content}\n\nSCENE NOTE: {scene_hint}"
+            # Repeated here, as the LAST thing before the actual
+            # conversation - confirmed live as a real, reproducible
+            # failure (3/3 attempts): on a long, meandering conversation
+            # history (lots of off-topic back-and-forth), the model
+            # dropped the JSON format entirely and just wrote flowing
+            # prose instead, even after being told at the very top of
+            # this same prompt to return only JSON. A single instruction
+            # at the start, "far" from the actual decision in a long
+            # prompt plus a long history, wasn't enough on its own.
+            system_content = (
+                f"{system_content}\n\nFINAL REMINDER: whatever the conversation above contains - "
+                f"off-topic turns, a meandering history, anything - your reply must be ONLY the "
+                f"JSON object from the schema above. Never reply with plain conversational text, "
+                f"no matter how natural that would feel given the conversation so far."
+            )
             full_messages = [{"role": "system", "content": system_content}] + messages
 
-            response = self.client.chat.completions.create(
-                model=self.deployment,
-                messages=full_messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            # One retry before giving up on a parse failure - confirmed
+            # live as genuinely non-deterministic: on a long, meandering
+            # conversation history, the model dropped JSON for plain
+            # prose on 2 of 3 identical back-to-back attempts, succeeding
+            # on the other. With no local LLM configured in most
+            # deployments (the usual fallback below), a single failure
+            # otherwise goes straight to the student hearing an apology
+            # for something a second attempt would likely have gotten
+            # right - cheap insurance against a flaky single call.
+            parse_error = None
+            for attempt in range(2):
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.deployment,
+                        messages=full_messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
 
-            content = response.choices[0].message.content.strip()
-            logger.info(f"Raw teaching plan: {content[:300]}")
+                    content = response.choices[0].message.content.strip()
+                    logger.info(f"Raw teaching plan: {content[:300]}")
 
-            match = re.search(r"\{.*\}", content, re.DOTALL)
-            if not match:
-                raise ValueError("No JSON object found in response")
+                    match = re.search(r"\{.*\}", content, re.DOTALL)
+                    if not match:
+                        raise ValueError("No JSON object found in response")
 
-            plan = json.loads(match.group(0))
+                    plan = json.loads(match.group(0))
 
-            if "speech" not in plan or "visuals" not in plan:
-                raise ValueError("Invalid teaching plan format")
+                    if "speech" not in plan or "visuals" not in plan:
+                        raise ValueError("Invalid teaching plan format")
 
-            speech_ids = {s["id"] for s in plan["speech"]}
-            for v in plan["visuals"]:
-                if v.get("speech_id") not in speech_ids:
-                    raise ValueError(f"Invalid speech_id in visuals: {v}")
+                    speech_ids = {s["id"] for s in plan["speech"]}
+                    for v in plan["visuals"]:
+                        if v.get("speech_id") not in speech_ids:
+                            raise ValueError(f"Invalid speech_id in visuals: {v}")
 
-            return plan
+                    return plan
+                except Exception as e:
+                    parse_error = e
+                    if attempt == 0:
+                        logger.warning(f"Teaching plan attempt 1 failed ({type(e).__name__}: {e}), retrying once")
+            raise parse_error
 
         except Exception as e:
             logger.warning(f"Azure teaching plan failed ({type(e).__name__}: {e}), trying local model")
@@ -549,6 +682,7 @@ class LLMClient:
         concept: str,
         student_answer: str,
         attempts_so_far: int,
+        last_bot_message: Optional[str] = None,
         temperature: float = 0.0,
         max_tokens: int = 300,
     ) -> Dict:
@@ -557,6 +691,18 @@ class LLMClient:
         from a teaching turn (see JarvisBot._handle_teaching_answer).
         Never reduces to exact-string matching - a K-8 student's spoken
         answer ("um, I think it's a half?") needs real judgment.
+
+        last_bot_message: the last thing Jarvis actually said right
+        before this reply (JarvisBot._last_bot_response) - NOT always the
+        pending question itself. Confirmed live as a real gap without
+        this: when a student went off-topic ("let's talk about guitar")
+        and Jarvis's own not-an-answer reply asked a genuine follow-up
+        about THAT ("what do you like most about playing it?"), the
+        student's next reply ("I don't know, explain more") got judged
+        with zero visibility into what it was actually replying to -
+        only the stale pending math question - and came back as a hint
+        about fractions. Optional (None is fine) since not every caller
+        tracks this, but strongly recommended whenever available.
 
         Returns {correctness, misconception, recommended_action} - see the
         schema in the prompt below. Unlike generate_teaching_plan(), this
@@ -572,6 +718,19 @@ class LLMClient:
         consequence here is mild (one redundant hint, not a safety issue),
         so this is an accepted limitation, not something fixed here.
         """
+        context_note = ""
+        if last_bot_message and last_bot_message.strip() != question.strip():
+            context_note = f"""
+IMPORTANT CONTEXT: the LAST thing Jarvis actually said to the student,
+right before their reply below, was: "{last_bot_message}"
+This is NOT the pending question above - the conversation may have
+drifted (e.g. Jarvis itself asked a follow-up about something else the
+student brought up). Judge the student's reply against what was
+ACTUALLY just said/asked, not blindly against the original pending
+question, when they clearly differ. If the reply is clearly answering
+THAT instead, is_answer_attempt is false, same as any other off-topic
+reply."""
+
         full_messages = [
             {
                 "role": "system",
@@ -582,29 +741,82 @@ question, as part of a live tutoring conversation.
 Question asked: "{question}"
 Concept being checked: {concept}
 This is the student's attempt number {attempts_so_far + 1} at this question.
+{context_note}
 
-Return ONLY valid JSON, no markdown, no explanation outside the JSON.
+Return ONLY valid JSON, no markdown, no explanation outside the JSON. This
+applies no matter what the student said - even if they're ending the
+conversation or asking something unrelated, your ENTIRE reply must still be
+the single JSON object below, with your natural reply inside its
+"response" field. Never reply with plain conversational text by itself.
 
 Schema:
 {{
+  "is_answer_attempt": true | false,
   "correct_answer": "work out the actual correct answer to the question yourself, step by step, BEFORE judging the student - this catches cases where a reflexive judgment would be wrong",
-  "correctness": "correct" | "partial" | "incorrect",
+  "correctness": "correct" | "partial" | "incorrect" | null,
   "misconception": "short description of the specific misunderstanding, or null if none",
-  "recommended_action": "continue" | "hint" | "reteach" | "challenge",
+  "recommended_action": "continue" | "hint" | "reteach" | "challenge" | "not_an_answer",
   "response": "the exact words to say to the student next, 1-2 short sentences, warm and age-appropriate"
 }}
 
-Fill in "correct_answer" FIRST, by actually solving the question yourself -
-only then compare the student's answer against it for "correctness". Do not
-judge correctness from a first impression before you've worked it out.
+First decide "is_answer_attempt". The test is narrow: is the student
+trying to leave the question/conversation, or talking about something
+else entirely, instead of engaging with the question at all? That is the
+ONLY case for "false". Saying "I don't know" / "I'm not sure" / "no idea"
+is the student engaging with THIS question - just reporting they can't
+solve it - so that is "true", not "false".
 
-Rules for recommended_action:
+Worked examples (follow these exactly):
+- "3/8"                              -> true  (names a value)
+- "um, maybe a half?"                -> true  (names a value, even hedging)
+- "is it 3?"                         -> true  (names a value)
+- "I don't know"                     -> true  (engaging with the question, just stuck - grade "incorrect", action "hint")
+- "I'm not sure"                     -> true  (same as above)
+- "no idea"                          -> true  (same as above)
+- "I'm done" / "that's okay, bye"    -> false (leaving the conversation, not the question)
+- "can we talk about something else" -> false (changing the subject entirely)
+- "what's for lunch today"           -> false (unrelated to the question)
+
+EXCEPTION to the "I don't know" rule above: if the "IMPORTANT CONTEXT"
+note (below, when present) says Jarvis's last message was something
+OTHER than the pending question, and the student's reply is clearly
+continuing THAT instead - even if it's phrased exactly like "I don't
+know" / "could you explain more" / "I'm not sure" - this is false, not
+true. Those phrases only default to true when there's no such context,
+or when the last thing Jarvis said WAS the pending question itself.
+Example: Jarvis's last message was "What do you like most about guitar?"
+(not the math question) and the student replies "I don't know, could you
+explain more?" -> false (they're asking about guitar, not stuck on the
+math question - responding with a math hint here would be ignoring what
+they actually asked).
+
+If genuinely torn between true and false for a reply that isn't in the
+examples above, choose true and grade it normally - "false" is reserved
+for replies that are not a response to the question in any way at all.
+
+If is_answer_attempt is false: set "correctness" to null, "recommended_action"
+to "not_an_answer", "misconception" to null, and "correct_answer" to null -
+do not judge or grade anything. "response" should address what they
+actually said directly and naturally (acknowledge ending the conversation,
+answer their unrelated question briefly, etc.) - do not mention the pending
+question, do not evaluate it as right or wrong, and do not re-ask it
+yourself (the question stays available to come back to on its own). This
+"response" still goes inside the JSON object exactly like every other case.
+
+If is_answer_attempt is true, fill in "correct_answer" FIRST, by actually
+solving the question yourself - only then compare the student's answer
+against it for "correctness". Do not judge correctness from a first
+impression before you've worked it out.
+
+Rules for recommended_action (only when is_answer_attempt is true):
 - "continue": the answer was correct - move on, maybe offer a harder challenge
 - "hint": the answer was incorrect or partial and this is the student's first attempt - give one small hint, don't re-explain everything
 - "reteach": the answer was incorrect AND this is the student's second or later attempt at this question - stop asking, explain the concept a different way instead
 - "challenge": the answer was correct and shows strong understanding - offer something harder
 
 Rules for "response":
+- If recommended_action is "not_an_answer": see above - respond directly and
+  naturally to what they actually said, nothing about the question.
 - If recommended_action is "hint": give ONE small, specific hint related to their
   specific mistake - do not just repeat the question or give away the answer.
 - If recommended_action is "reteach": briefly explain the concept a different way
@@ -612,6 +824,10 @@ Rules for "response":
 - If recommended_action is "continue" or "challenge": brief genuine praise. Do not
   ask a new question here - a new one will be asked separately.
 - Keep it to 1-2 sentences, spoken out loud to a K-8 student - no formatting.
+- Write it like you're actually talking to them, not grading a worksheet: use
+  contractions ("that's", "you're", "let's"), and react to THEIR specific answer
+  first ("Close!", "Yes, exactly!", "Hmm, not quite,") before the hint/praise/
+  re-explanation - not a flat statement of fact.
 """
             },
             {"role": "user", "content": student_answer},
@@ -722,6 +938,9 @@ Write a short, warm spoken goodbye for the student (2-3 sentences):
 - State ONE genuine "big idea" takeaway - something true and specific about what was learned, not a generic platitude
 - End with encouragement and an invitation to come back
 - No formatting, no lists - this is spoken out loud
+- Really friendly and warm, like a parent telling their kid "I'm proud of
+  you" before they head off - not a flat status report. Use contractions
+  ("that's", "you're", "we'll") and genuine warmth, not a formal recap.
 """
                 }
             ]
@@ -735,6 +954,83 @@ Write a short, warm spoken goodbye for the student (2-3 sentences):
             return text or fallback
         except Exception as e:
             logger.error(f"Error generating session wrap-up ({type(e).__name__}: {e}) - using fallback")
+            return fallback
+
+    def generate_warmup_reply(
+        self,
+        topic: str,
+        student_answer: str,
+        next_topic: Optional[str],
+        temperature: float = 0.7,
+        max_tokens: int = 100,
+    ) -> str:
+        """
+        One warm, reactive line for the post-wake-word small-talk check-in
+        (see JarvisBot._handle_warmup_step) - the "how was your day /
+        school / friends" mom-style catch-up before pivoting to tutoring.
+        Reacts to something SPECIFIC the student actually said (a name, an
+        event, a feeling) rather than a flat "that's nice", then either
+        asks about next_topic or, once topics run out (next_topic=None),
+        pivots naturally into asking if there's something they'd like
+        help with or are curious about today.
+
+        Returns plain spoken text, not JSON - this is a single
+        conversational line, nothing to parse beyond the text itself.
+        Falls back to a plain canned line on any failure, so a slow or
+        broken call never leaves the check-in stuck mid-conversation.
+        """
+        topic_label = {"day": "their day", "school": "school", "friends": "their friends"}.get(next_topic, next_topic)
+        if next_topic:
+            instruction = f'Then naturally ask how {topic_label} was/is going.'
+            fallback = {
+                "school": "Nice! How was school today?",
+                "friends": "Good to hear. How are your friends doing?",
+            }.get(next_topic, f"Nice! How's {topic_label} going?")
+        else:
+            instruction = (
+                "Then, warmly and sweetly - like a mom checking in with her "
+                "kid, not a neutral assistant - ask if there's something "
+                "they'd love some help with today, or something new they're "
+                "curious to learn about. This is the moment the check-in "
+                "turns into tutoring, so make it feel caring, not clinical."
+            )
+            fallback = os.getenv(
+                'DISCOVERY_MESSAGE',
+                "Aww, sounds like a good day. Is there something you'd love a little help with today, sweetheart, or something new you're curious to learn about?"
+            )
+
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": f"""
+You are Jarvis, warmly checking in with a K-8 student right after they
+got home, the way an attentive parent would - not a generic assistant.
+
+You just asked about {topic} and the student said: "{student_answer}"
+
+Write ONE short (1-2 sentence) reply: react genuinely to something
+SPECIFIC they actually mentioned (a name, an event, a feeling) - not a
+generic "that's nice" - then {instruction}
+
+Only react to details that are ACTUALLY in what they said. If their
+answer is short or vague ("nothing much", "it was fine") with nothing
+specific to point to, react warmly to the general feeling instead
+("Sounds like a nice, relaxed one!") - never invent a name, event, or
+detail they didn't actually say.
+
+Use contractions, a warm/casual spoken tone, no markdown, no emojis, no
+quotation marks around your reply. Return ONLY the line itself, nothing else.
+"""
+                }
+            ]
+            response = self.client.chat.completions.create(
+                model=self.deployment, messages=messages, temperature=temperature, max_tokens=max_tokens,
+            )
+            text = (response.choices[0].message.content or "").strip().strip('"')
+            return text or fallback
+        except Exception as e:
+            logger.error(f"Error generating warmup reply ({type(e).__name__}: {e}) - using fallback")
             return fallback
 
     def generate_response(

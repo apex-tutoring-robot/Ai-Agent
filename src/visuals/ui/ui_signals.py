@@ -35,6 +35,26 @@ class UISignals(QObject):
     # set_volume tool actually changes it - see JarvisBot._tool_set_volume.
     volume_changed = pyqtSignal(float)
 
+    # (mic_name, speaker_name) - emitted once device resolution actually
+    # runs (see JarvisBot.__init__/_recreate_audio_system and
+    # audio.device_detection.resolve_device_index) so the physical screen
+    # can show which devices were picked, as a visible health check.
+    audio_devices_resolved = pyqtSignal(str, str)
+
+    # Raw mic input RMS level, emitted continuously from both
+    # WakeWordDetector.on_level and ContinuousVADCapture.on_input_level -
+    # a live "is the mic actually picking anything up" meter (see
+    # visuals/ui/mic_level_indicator.py), for diagnosing a remote device
+    # when nobody there can run a terminal diagnostic script.
+    mic_level_changed = pyqtSignal(float)
+
+    # True/False exactly when ContinuousVADCapture's barge-in gate opens/
+    # closes (see its on_barge_in_state) - a precise "did an interruption
+    # actually register" signal, distinct from the raw level above, which
+    # reads as noisy/ambiguous during playback since the mic also picks
+    # up the bot's own voice through imperfect echo cancellation.
+    barge_in_state_changed = pyqtSignal(bool)
+
     # Display-sleep cycle after prolonged idle (see JarvisBot.run()'s main
     # loop) - Qt-side equivalent of the old cv2 FaceAnimator's
     # enter_sleep()/wake_up(), paired with an actual HDMI power toggle via

@@ -7,7 +7,11 @@ the main thread instead of FaceAnimator.render_forever()'s blocking cv2 loop
 
 import os
 from PyQt5.QtWidgets import QMainWindow, QWidget
+from utils.version_info import get_current_commit
+from visuals.ui.audio_device_indicator import AudioDeviceIndicator
+from visuals.ui.commit_indicator import CommitIndicator
 from visuals.ui.face_widget import FaceWidget
+from visuals.ui.mic_level_indicator import MicLevelIndicator
 from visuals.ui.teaching_canvas import TeachingCanvas
 from visuals.ui.tutor_scene import TutorScene
 from visuals.ui.tutor_view import TutorView
@@ -23,6 +27,10 @@ class MainWindow(QMainWindow):
         self.canvas = TeachingCanvas()
         self.scene = TutorScene(self.face_widget, self.canvas)
         self.view = TutorView(self.scene)
+        # TutorScene's own __init__ already calls show_face_fullscreen(),
+        # so the view's fill mode needs to start matching that (stretch to
+        # fill, no letterbox) rather than its own class-level default.
+        self.view.set_fill_mode(stretch_to_fill=True)
 
         self.setCentralWidget(self.view)
         self.setWindowTitle("Jarvis AI Tutor")
@@ -31,6 +39,26 @@ class MainWindow(QMainWindow):
         # on top of the face/canvas as a corner HUD, like a phone's on-screen
         # volume overlay - positioned in _position_volume_indicator().
         self.volume_indicator = VolumeIndicator(self)
+
+        # Opposite corner from the volume indicator - a persistent (not
+        # auto-hiding) health-check readout of which mic/speaker Jarvis
+        # actually picked, see audio_device_indicator.py's own docstring.
+        self.audio_device_indicator = AudioDeviceIndicator(self)
+
+        # Same corner as the volume indicator, stacked below it - a
+        # persistent readout of which commit is actually running, see
+        # commit_indicator.py's own docstring. Populated once at startup
+        # (the running commit doesn't change mid-session) rather than
+        # via a ui_signals round-trip like the mic/speaker readout,
+        # which genuinely can change after _recreate_audio_system.
+        self.commit_indicator = CommitIndicator(self)
+        self.commit_indicator.show_commit(get_current_commit())
+
+        # Bottom-left (clear of the bottom-right face bubble used in
+        # teaching layout - see TutorScene) - a live "is the mic actually
+        # picking anything up" meter, see mic_level_indicator.py's own
+        # docstring for why this exists.
+        self.mic_level_indicator = MicLevelIndicator(self)
 
         # Plain black overlay shown during the display-sleep cycle (after
         # prolonged idle - see JarvisBot's run() loop). Qt-side equivalent
@@ -50,6 +78,9 @@ class MainWindow(QMainWindow):
             self.resize(1280, 720)
 
         self._position_volume_indicator()
+        self._position_audio_device_indicator()
+        self._position_commit_indicator()
+        self._position_mic_level_indicator()
         self._position_sleep_overlay()
         self._connect_signals()
         self.show_idle_mode()
@@ -66,16 +97,58 @@ class MainWindow(QMainWindow):
 
         self.signals.draw_actions.connect(self.canvas.handle_draw_actions)
         self.signals.clear_canvas.connect(self.canvas.clear_canvas)
-        self.signals.show_face_fullscreen.connect(self.scene.show_face_fullscreen)
-        self.signals.show_teaching_layout.connect(self.scene.show_teaching_layout)
+        self.signals.show_face_fullscreen.connect(self._show_face_fullscreen)
+        self.signals.show_teaching_layout.connect(self._show_teaching_layout)
         self.signals.volume_changed.connect(self.volume_indicator.show_level)
+        self.signals.audio_devices_resolved.connect(self.audio_device_indicator.show_devices)
+        self.signals.mic_level_changed.connect(self.mic_level_indicator.show_level)
+        self.signals.barge_in_state_changed.connect(self.mic_level_indicator.show_barge_in_state)
         self.signals.enter_sleep.connect(self.show_sleep_mode)
         self.signals.wake_up.connect(self.show_wake_mode)
+
+    def _show_face_fullscreen(self) -> None:
+        self.scene.show_face_fullscreen()
+        # Stretch to fill - no content with geometry that matters is
+        # visible in this mode, so an exact edge-to-edge fill (over a
+        # letterboxed one) is the better tradeoff - see TutorView.
+        self.view.set_fill_mode(stretch_to_fill=True)
+
+    def _show_teaching_layout(self) -> None:
+        self.scene.show_teaching_layout()
+        # Keep the scene's own aspect ratio here - the whiteboard's
+        # shapes/text would otherwise be skewed on a screen whose aspect
+        # ratio isn't exactly the scene's fixed 1280:720.
+        self.view.set_fill_mode(stretch_to_fill=False)
 
     def _position_volume_indicator(self) -> None:
         margin = 24
         self.volume_indicator.move(
             self.width() - self.volume_indicator.width() - margin, margin
+        )
+
+    def _position_audio_device_indicator(self) -> None:
+        margin = 24
+        self.audio_device_indicator.move(margin, margin)
+
+    def _position_commit_indicator(self) -> None:
+        # Directly below the volume indicator's slot, with a gap wide
+        # enough that a transient volume pop-up never overlaps it even
+        # though the two aren't both visible at the same time in the
+        # common case.
+        margin = 24
+        gap = 8
+        self.commit_indicator.move(
+            self.width() - self.commit_indicator.width() - margin,
+            margin + self.volume_indicator.height() + gap,
+        )
+
+    def _position_mic_level_indicator(self) -> None:
+        # Bottom-left, mirroring the audio device indicator's side but
+        # at the opposite vertical edge - clear of the bottom-right face
+        # bubble used in teaching layout (see TutorScene).
+        margin = 24
+        self.mic_level_indicator.move(
+            margin, self.height() - self.mic_level_indicator.height() - margin
         )
 
     def _position_sleep_overlay(self) -> None:
@@ -84,6 +157,9 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._position_volume_indicator()
+        self._position_audio_device_indicator()
+        self._position_commit_indicator()
+        self._position_mic_level_indicator()
         self._position_sleep_overlay()
 
     def show_idle_mode(self):
