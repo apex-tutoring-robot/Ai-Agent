@@ -3064,38 +3064,8 @@ class JarvisBot:
 
 def main():
     import sys
-    import time  # Ensure time is imported for sleep
 
     is_windows = sys.platform == "win32"
-
-    # ── Wait for Updates / Splash Screen to Complete ──────────────────────────
-    logger.info("Checking for active loading/update splash screen...")
-    while os.path.exists(PID_FILE):
-        try:
-            with open(PID_FILE, "r") as f:
-                target_pid = int(f.read().strip())
-            
-            # Check if the process with target_pid is still alive (signal 0 is a no-op check)
-            os.kill(target_pid, 0)
-            logger.info("Updates still in progress, waiting...")
-        except (ProcessLookupError, ValueError):
-            # Process is already dead, or PID file is stale/malformed
-            logger.warning("Stale splash PID found. Cleaning up...")
-            if os.path.exists(PID_FILE):
-                try:
-                    os.remove(PID_FILE)
-                except Exception:
-                    pass
-            break
-        except PermissionError:
-            # Process is running under another user (e.g. root/sudo vs tutor), meaning it's still alive
-            pass
-        except FileNotFoundError:
-            break
-        
-        time.sleep(1)
-    
-    logger.info("Updates complete. Proceeding with Jarvis startup...")
 
     # ── Display configuration ──────────────────────────────────────────────────
     face_env = os.getenv("FACE_ENABLED", "").strip().lower()
@@ -3149,15 +3119,22 @@ def main():
 
     app = None
     ui_signals = None
+    window = None
+
     if face_enabled:
         try:
             from PyQt5.QtWidgets import QApplication
+            # 1. Initialize QApplication and MainWindow IMMEDIATELY 
+            # (It sits hidden behind the GTK splash screen)
             app = QApplication(sys.argv)
             ui_signals = UISignals()
 
             faces_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visuals", "faces")
             window = MainWindow(ui_signals, faces_dir, fullscreen=not is_windows)
             window.show()
+            
+            # Force PyQt to process events and paint the window frame underneath
+            app.processEvents()
 
             logger.info(
                 "Face animation enabled (native Windows GUI)" if is_windows
@@ -3168,8 +3145,22 @@ def main():
             app = None
             ui_signals = None
 
+    # 2. Initialize heavy JarvisBot components while the splash screen still covers the screen
+    logger.info("Initializing Jarvis backend behind splash screen...")
     jarvis = JarvisBot(ui_signals)
 
+    # 3. NOW that everything is fully loaded and drawn, instantly kill the splash screen!
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, "r") as f:
+                splash_pid = int(f.read().strip())
+            os.kill(splash_pid, signal.SIGTERM)
+            os.remove(PID_FILE)
+            logger.info("Splash screen dismissed seamlessly.")
+        except Exception as e:
+            logger.warning(f"Could not terminate splash process: {e}")
+
+    # 4. Start the event loops
     if app:
         worker = threading.Thread(target=jarvis.run, daemon=True)
         worker.start()
