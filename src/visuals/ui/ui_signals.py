@@ -44,8 +44,8 @@ class UISignals(QObject):
     # Raw mic input RMS level, emitted continuously from both
     # WakeWordDetector.on_level and ContinuousVADCapture.on_input_level -
     # a live "is the mic actually picking anything up" meter (see
-    # visuals/ui/mic_level_indicator.py), for diagnosing a remote device
-    # when nobody there can run a terminal diagnostic script.
+    # visuals/ui/status_bar.py), for diagnosing a remote device when
+    # nobody there can run a terminal diagnostic script.
     mic_level_changed = pyqtSignal(float)
 
     # True/False exactly when ContinuousVADCapture's barge-in gate opens/

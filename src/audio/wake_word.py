@@ -81,7 +81,7 @@ class WakeWordDetector:
         # Optional callback(rms: float), fired on every captured chunk
         # regardless of whether it scores as a wake word - lets the UI
         # show a live "is the mic actually picking anything up" meter
-        # (see visuals/ui/mic_level_indicator.py). Added after a remote
+        # (see visuals/ui/status_bar.py). Added after a remote
         # deployment where device detection, output audio, and the UI
         # labels were all confirmed working, but the wake word itself
         # never fired - with no console access to the physical device,

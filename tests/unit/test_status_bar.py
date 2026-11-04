@@ -1,14 +1,16 @@
 """
 Tests for StatusBar - the thin, phone-style strip across the top of the
-screen showing mic/speaker and the running commit (see status_bar.py's
-own module docstring for why this replaced AudioDeviceIndicator's and
-CommitIndicator's floating pill widgets).
+screen showing mic/speaker, a live "is the mic actually picking
+anything up" meter, the barge-in INTERRUPTED! alert, and the running
+commit (see status_bar.py's own module docstring for why this replaced
+AudioDeviceIndicator's, CommitIndicator's, and MicLevelIndicator's
+floating pill widgets).
 
-Pure logic (visibility + text layout), no paintEvent exercised - same
-convention as test_error_banner.py/test_mic_level_indicator.py
-(verified live via rendered screenshots instead). _left_text/_right_text
-are pulled out of paintEvent specifically so this is possible, same
-reasoning as ErrorBanner._relayout.
+Pure logic (visibility + text layout + level/barge-in state), no
+paintEvent exercised - same convention as test_error_banner.py
+(verified live via rendered screenshots instead). _left_text/
+_right_text/_meter_left_x are pulled out of paintEvent specifically so
+this is possible, same reasoning as ErrorBanner._relayout.
 """
 
 from PyQt5.QtGui import QFontMetrics
@@ -56,6 +58,21 @@ class TestRightText:
         assert widget._right_text() == "vunknown"
 
 
+class TestMeterLeftX:
+    def test_leaves_room_for_the_meter_with_no_commit_text(self):
+        widget = StatusBar()
+        widget.set_width(400)
+        x = widget._meter_left_x(right_width=0)
+        assert x == 400 - widget._PADDING - widget._METER_WIDTH
+
+    def test_shifts_left_to_clear_wider_commit_text(self):
+        widget = StatusBar()
+        widget.set_width(400)
+        narrow = widget._meter_left_x(right_width=10)
+        wide = widget._meter_left_x(right_width=100)
+        assert wide < narrow
+
+
 class TestLeftText:
     def _metrics(self, widget):
         return QFontMetrics(widget._font())
@@ -63,13 +80,15 @@ class TestLeftText:
     def test_no_devices_is_empty(self):
         widget = StatusBar()
         widget.set_width(800)
-        assert widget._left_text(self._metrics(widget), right_width=0) == ""
+        meter_x = widget._meter_left_x(right_width=0)
+        assert widget._left_text(self._metrics(widget), meter_x) == ""
 
     def test_includes_both_mic_and_speaker(self):
         widget = StatusBar()
         widget.set_width(800)
         widget.show_devices("USB Mic", "pulse")
-        text = widget._left_text(self._metrics(widget), right_width=0)
+        meter_x = widget._meter_left_x(right_width=0)
+        text = widget._left_text(self._metrics(widget), meter_x)
         assert "USB Mic" in text
         assert "pulse" in text
 
@@ -77,44 +96,111 @@ class TestLeftText:
         widget = StatusBar()
         widget.set_width(800)
         widget.show_devices("", "")
-        text = widget._left_text(self._metrics(widget), right_width=0)
+        meter_x = widget._meter_left_x(right_width=0)
+        text = widget._left_text(self._metrics(widget), meter_x)
         assert "(none found)" in text
 
     def test_elides_when_too_narrow_to_fit(self):
         widget = StatusBar()
-        widget.set_width(120)  # deliberately too narrow for the full text
+        widget.set_width(180)  # deliberately too narrow for the full text
         widget.show_devices(
             "A Fairly Long USB Audio Device Name",
             "Another Fairly Long Output Device Name",
         )
         metrics = self._metrics(widget)
-        text = widget._left_text(metrics, right_width=0)
+        meter_x = widget._meter_left_x(right_width=0)
+        text = widget._left_text(metrics, meter_x)
         full = "Mic: A Fairly Long USB Audio Device Name    Spk: Another Fairly Long Output Device Name"
         assert text != full
         assert len(text) < len(full)
 
-    def test_reserves_space_for_the_right_text(self):
-        # A wider right_width must leave less room for the left text -
-        # otherwise the two would overlap instead of sharing the one line.
+    def test_reserves_space_for_the_meter_and_commit_cluster(self):
+        # A wider right_width (longer commit text) pushes the meter - and
+        # therefore the left text's stop point - further left, leaving
+        # less room for it - otherwise they'd overlap instead of sharing
+        # the one line.
         widget = StatusBar()
         widget.set_width(300)
         widget.show_devices("A Fairly Long USB Audio Device Name", "pulse")
         metrics = self._metrics(widget)
 
-        narrow_reserved = widget._left_text(metrics, right_width=10)
-        wide_reserved = widget._left_text(metrics, right_width=150)
+        narrow = widget._left_text(metrics, widget._meter_left_x(right_width=10))
+        wide = widget._left_text(metrics, widget._meter_left_x(right_width=150))
 
-        assert len(wide_reserved) <= len(narrow_reserved)
+        assert len(wide) <= len(narrow)
 
-    def test_does_not_crash_on_zero_width(self):
+    def test_does_not_crash_on_a_negative_meter_position(self):
         widget = StatusBar()
         widget.set_width(200)  # set_width() already clamps to a minimum
         widget.show_devices("USB Mic", "pulse")
         metrics = self._metrics(widget)
-        # A right_width larger than the whole bar shouldn't raise -
-        # available space clamps to zero instead of going negative.
-        text = widget._left_text(metrics, right_width=10_000)
+        # An unreasonably large right_width pushes meter_left_x negative -
+        # available space must clamp to zero instead of going negative.
+        text = widget._left_text(metrics, widget._meter_left_x(right_width=10_000))
         assert isinstance(text, str)
+
+
+class TestShowLevel:
+    def test_silence_keeps_the_level_near_zero(self):
+        widget = StatusBar()
+        widget.show_level(0.0)
+        assert widget._level < 0.01
+
+    def test_loud_rms_moves_the_level_up(self):
+        widget = StatusBar()
+        widget.show_level(StatusBar._MAX_RMS)
+        assert widget._level > 0.0
+
+    def test_rms_above_max_is_clamped_to_one(self):
+        widget = StatusBar()
+        for _ in range(50):  # enough smoothing steps to settle near the ceiling
+            widget.show_level(StatusBar._MAX_RMS * 10)
+        assert widget._level <= 1.0
+
+    def test_negative_rms_is_clamped_to_zero(self):
+        widget = StatusBar()
+        widget.show_level(-500.0)
+        assert widget._level >= 0.0
+
+    def test_repeated_loud_input_converges_toward_full(self):
+        widget = StatusBar()
+        for _ in range(50):
+            widget.show_level(StatusBar._MAX_RMS)
+        assert widget._level > 0.95
+
+    def test_first_call_shows_the_widget(self):
+        widget = StatusBar()
+        assert not widget.isVisible()
+        widget.show_level(1000.0)
+        assert widget.isVisible()
+
+    def test_a_single_loud_chunk_does_not_instantly_max_the_bar(self):
+        widget = StatusBar()
+        widget.show_level(StatusBar._MAX_RMS)
+        assert widget._level < 1.0
+
+
+class TestShowBargeInState:
+    def test_defaults_to_inactive(self):
+        widget = StatusBar()
+        assert widget._barge_in_active is False
+
+    def test_true_sets_active(self):
+        widget = StatusBar()
+        widget.show_barge_in_state(True)
+        assert widget._barge_in_active is True
+
+    def test_false_clears_active(self):
+        widget = StatusBar()
+        widget.show_barge_in_state(True)
+        widget.show_barge_in_state(False)
+        assert widget._barge_in_active is False
+
+    def test_first_call_shows_the_widget(self):
+        widget = StatusBar()
+        assert not widget.isVisible()
+        widget.show_barge_in_state(True)
+        assert widget.isVisible()
 
 
 class TestSizing:

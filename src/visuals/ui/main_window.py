@@ -10,7 +10,6 @@ from PyQt5.QtWidgets import QMainWindow, QWidget
 from utils.version_info import get_current_commit
 from visuals.ui.error_banner import ErrorBanner
 from visuals.ui.face_widget import FaceWidget
-from visuals.ui.mic_level_indicator import MicLevelIndicator
 from visuals.ui.status_bar import StatusBar
 from visuals.ui.teaching_canvas import TeachingCanvas
 from visuals.ui.tutor_scene import TutorScene
@@ -36,12 +35,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Jarvis AI Tutor")
 
         # Thin, persistent strip across the very top of the screen,
-        # phone-style - mic/speaker and the running commit, see
-        # status_bar.py's own docstring for why this replaced two
-        # floating pill widgets. Populated with the commit once at
-        # startup (it doesn't change mid-session) rather than via a
-        # ui_signals round-trip like the mic/speaker readout, which
-        # genuinely can change after _recreate_audio_system.
+        # phone-style - mic/speaker, the live "is the mic actually
+        # picking anything up" meter, the barge-in INTERRUPTED! alert,
+        # and the running commit, see status_bar.py's own docstring for
+        # why this replaced three floating pill widgets. Commit is
+        # populated once at startup (it doesn't change mid-session)
+        # rather than via a ui_signals round-trip like the mic/speaker
+        # readout, which genuinely can change after _recreate_audio_system.
         self.status_bar = StatusBar(self)
         self.status_bar.show_commit(get_current_commit())
 
@@ -49,12 +49,6 @@ class MainWindow(QMainWindow):
         # on top of the face/canvas as a corner HUD, like a phone's on-screen
         # volume overlay - positioned in _position_volume_indicator().
         self.volume_indicator = VolumeIndicator(self)
-
-        # Bottom-left (clear of the bottom-right face bubble used in
-        # teaching layout - see TutorScene) - a live "is the mic actually
-        # picking anything up" meter, see mic_level_indicator.py's own
-        # docstring for why this exists.
-        self.mic_level_indicator = MicLevelIndicator(self)
 
         # Full-width, persistent "something is fundamentally broken"
         # banner - see error_banner.py's own docstring for the real
@@ -80,7 +74,6 @@ class MainWindow(QMainWindow):
 
         self._position_status_bar()
         self._position_volume_indicator()
-        self._position_mic_level_indicator()
         self._position_error_banner()
         self._position_sleep_overlay()
         self._connect_signals()
@@ -102,8 +95,8 @@ class MainWindow(QMainWindow):
         self.signals.show_teaching_layout.connect(self._show_teaching_layout)
         self.signals.volume_changed.connect(self.volume_indicator.show_level)
         self.signals.audio_devices_resolved.connect(self.status_bar.show_devices)
-        self.signals.mic_level_changed.connect(self.mic_level_indicator.show_level)
-        self.signals.barge_in_state_changed.connect(self.mic_level_indicator.show_barge_in_state)
+        self.signals.mic_level_changed.connect(self.status_bar.show_level)
+        self.signals.barge_in_state_changed.connect(self.status_bar.show_barge_in_state)
         self.signals.enter_sleep.connect(self.show_sleep_mode)
         self.signals.wake_up.connect(self.show_wake_mode)
         self.signals.fatal_error.connect(self.error_banner.show_error)
@@ -135,14 +128,6 @@ class MainWindow(QMainWindow):
             self.status_bar.height() + margin,
         )
 
-    def _position_mic_level_indicator(self) -> None:
-        # Bottom-left, clear of the bottom-right face bubble used in
-        # teaching layout (see TutorScene).
-        margin = 24
-        self.mic_level_indicator.move(
-            margin, self.height() - self.mic_level_indicator.height() - margin
-        )
-
     def _position_error_banner(self) -> None:
         margin = 24
         gap = 12
@@ -156,7 +141,6 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._position_status_bar()
         self._position_volume_indicator()
-        self._position_mic_level_indicator()
         self._position_error_banner()
         self._position_sleep_overlay()
 

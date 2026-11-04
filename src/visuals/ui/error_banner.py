@@ -1,8 +1,8 @@
 """
 Full-width, persistent error banner - the "something is fundamentally
-broken" counterpart to the status bar and small corner HUD widgets
-(StatusBar, MicLevelIndicator), which all assume the robot is
-basically working and just offer extra detail. This is for the opposite
+broken" counterpart to the status bar (StatusBar), which assumes the
+robot is basically working and just offers extra detail. This is for
+the opposite
 case: a fatal, otherwise-silent failure (see ui_signals.fatal_error) that
 would otherwise leave the robot looking "on" but doing nothing - no boot
 greeting, no response to the wake word, no visible symptom at all - with
