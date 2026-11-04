@@ -2967,11 +2967,30 @@ class JarvisBot:
         # Start wake word detector in a new thread
         logger.info("Starting new wake word detection thread...")
         wake_thread = threading.Thread(
-            target=self.wake_word_detector.start,
-            args=(self._handle_wake_word,),
+            target=self._run_wake_word_detector_catching_errors,
             daemon=True
         )
         wake_thread.start()
+
+    def _run_wake_word_detector_catching_errors(self) -> None:
+        """
+        Thread target for _restart_wake_word - wraps
+        WakeWordDetector.start() the same way run()'s own call to it is
+        wrapped (see that method). Without this, a failure here (same
+        failure modes as the very first start() call - model load or
+        mic-stream-open) killed this daemon thread silently: Python's
+        default unhandled-thread-exception behavior is a console
+        traceback nobody at a remote deployment can see, and unlike
+        run()'s own call, nothing upstream of this thread would ever
+        notice or report it - the robot would just stop listening again
+        after every single conversation, with no visible symptom at all.
+        """
+        try:
+            self.wake_word_detector.start(self._handle_wake_word)
+        except Exception as e:
+            logger.error(f"Wake word detector failed to restart: {e}")
+            if self.ui_signals:
+                self.ui_signals.fatal_error.emit(f"Wake word listening stopped: {e}")
     
     def run(self):
         """Start Jarvis and run the main loop."""
@@ -3028,6 +3047,15 @@ class JarvisBot:
 
         except Exception as e:
             logger.error(f"Error in main loop: {e}")
+            # Without this, a startup failure here (most likely
+            # WakeWordDetector.start() failing to load its model or open
+            # the mic stream - see that method) left the robot looking
+            # "on" but doing nothing: no boot greeting, no response to
+            # the wake word, nothing - with the actual reason only ever
+            # reaching a log file nobody at a remote deployment can
+            # read. See ui_signals.fatal_error / ErrorBanner.
+            if self.ui_signals:
+                self.ui_signals.fatal_error.emit(f"Startup failed: {e}")
 
         finally:
             self.stop()

@@ -55,6 +55,16 @@ class UISignals(QObject):
     # up the bot's own voice through imperfect echo cancellation.
     barge_in_state_changed = pyqtSignal(bool)
 
+    # Emitted with a human-readable message when a fatal, otherwise-
+    # silent failure leaves the robot doing nothing with no visible
+    # symptom at all - see JarvisBot.run()/_restart_wake_word, both of
+    # which wrap WakeWordDetector.start() and previously only logged a
+    # failure there (model load or mic-stream-open) before going quiet.
+    # Drives ErrorBanner, a full-width persistent overlay - distinct
+    # from the small corner HUD widgets above, which all assume the
+    # robot is basically working.
+    fatal_error = pyqtSignal(str)
+
     # Display-sleep cycle after prolonged idle (see JarvisBot.run()'s main
     # loop) - Qt-side equivalent of the old cv2 FaceAnimator's
     # enter_sleep()/wake_up(), paired with an actual HDMI power toggle via

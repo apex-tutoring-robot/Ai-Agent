@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import QMainWindow, QWidget
 from utils.version_info import get_current_commit
 from visuals.ui.audio_device_indicator import AudioDeviceIndicator
 from visuals.ui.commit_indicator import CommitIndicator
+from visuals.ui.error_banner import ErrorBanner
 from visuals.ui.face_widget import FaceWidget
 from visuals.ui.mic_level_indicator import MicLevelIndicator
 from visuals.ui.teaching_canvas import TeachingCanvas
@@ -60,6 +61,11 @@ class MainWindow(QMainWindow):
         # docstring for why this exists.
         self.mic_level_indicator = MicLevelIndicator(self)
 
+        # Full-width, persistent "something is fundamentally broken"
+        # banner - see error_banner.py's own docstring for the real
+        # failure (a silent startup crash) it exists to make visible.
+        self.error_banner = ErrorBanner(self)
+
         # Plain black overlay shown during the display-sleep cycle (after
         # prolonged idle - see JarvisBot's run() loop). Qt-side equivalent
         # of the old cv2 FaceAnimator's blanked frame; paired with an actual
@@ -81,6 +87,7 @@ class MainWindow(QMainWindow):
         self._position_audio_device_indicator()
         self._position_commit_indicator()
         self._position_mic_level_indicator()
+        self._position_error_banner()
         self._position_sleep_overlay()
         self._connect_signals()
         self.show_idle_mode()
@@ -105,6 +112,7 @@ class MainWindow(QMainWindow):
         self.signals.barge_in_state_changed.connect(self.mic_level_indicator.show_barge_in_state)
         self.signals.enter_sleep.connect(self.show_sleep_mode)
         self.signals.wake_up.connect(self.show_wake_mode)
+        self.signals.fatal_error.connect(self.error_banner.show_error)
 
     def _show_face_fullscreen(self) -> None:
         self.scene.show_face_fullscreen()
@@ -151,6 +159,19 @@ class MainWindow(QMainWindow):
             margin, self.height() - self.mic_level_indicator.height() - margin
         )
 
+    def _position_error_banner(self) -> None:
+        # Top-center, below the tallest top-corner widget (the audio
+        # device pill) so it never overlaps either corner's indicators
+        # regardless of which happen to be visible at the same time.
+        margin = 24
+        gap = 12
+        top_row_height = max(
+            self.audio_device_indicator.height(),
+            self.volume_indicator.height() + 8 + self.commit_indicator.height(),
+        )
+        self.error_banner.set_width(self.width() - 2 * margin)
+        self.error_banner.move(margin, margin + top_row_height + gap)
+
     def _position_sleep_overlay(self) -> None:
         self.sleep_overlay.setGeometry(0, 0, self.width(), self.height())
 
@@ -160,6 +181,7 @@ class MainWindow(QMainWindow):
         self._position_audio_device_indicator()
         self._position_commit_indicator()
         self._position_mic_level_indicator()
+        self._position_error_banner()
         self._position_sleep_overlay()
 
     def show_idle_mode(self):
