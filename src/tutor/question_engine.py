@@ -2,8 +2,23 @@
 ProactiveQuestionEngine - lets Jarvis suggest something to work on when a
 student doesn't ask a specific question themselves (see JarvisBot.
 _handle_warmup_step's discovery step), instead of only ever waiting to be
-asked. Picks the student's weakest concept if they have review history,
-or a sensible "next" concept from CurriculumGraph otherwise.
+asked. Suggests a sensible "next" concept from CurriculumGraph - forward
+progress, not a callout of past struggles.
+
+Deliberately does NOT suggest the student's weakest/most-often-missed
+concept (get_weak_concept_for_review) the way an earlier version of this
+did - confirmed live as a real problem: concept_mastery accumulates
+across every session for the life of a profile, including old dev/
+testing attempts, so a concept that picked up a few wrong attempts early
+on stays "the weakest" more or less permanently and keeps getting
+proactively re-surfaced ("I remember that gave you some trouble") long
+after it stopped reflecting anything real about the student. Once
+spoken, that suggestion also sits in conversation history and can pull a
+LATER, unrelated vague request ("I want to know about math") back toward
+it too, since generate_teaching_plan sees the full history. Retrieval
+practice (tutor/review_scheduler.py, used mid-conversation right after a
+genuine success - see JarvisBot._handle_teaching_answer) is a different,
+narrower mechanism and is unaffected by this.
 """
 
 import logging
@@ -23,16 +38,8 @@ class ProactiveQuestionEngine:
         """
         Returns {"concept", "prompt"} - a concept to suggest and a short
         spoken invitation - or None if nothing sensible can be suggested
-        (a new student with no grade on file and no review history).
+        (no grade on file and CurriculumGraph has nothing left to offer).
         """
-        weak = self._profile_manager.get_weak_concept_for_review(profile_id)
-        if weak:
-            readable = weak["concept"].replace("_", " ")
-            return {
-                "concept": weak["concept"],
-                "prompt": f"Want to practice {readable} together? I remember that one gave you some trouble.",
-            }
-
         grade = self._profile_manager.get_grade(profile_id)
         mastered = self._profile_manager.get_mastered_concepts(profile_id)
         next_concept = self._curriculum_graph.suggest_next(grade, mastered=mastered)

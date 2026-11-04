@@ -97,6 +97,46 @@ class TestStopClosesAudioStream:
         assert detector.audio_stream is None
 
 
+class TestRunCallback:
+    """
+    Regression tests for a real production bug: the wake-word-detected
+    callback (JarvisBot._handle_wake_word - an entire conversation) used
+    to be invoked with no exception handling at all in start()'s listen
+    loop, unlike the on_ready callback right next to it. An uncaught
+    exception anywhere in a conversation's handling silently killed the
+    whole detection thread - the app kept running (Qt's main thread is
+    untouched), but nothing was ever listening for "Hey Jarvis" again,
+    with no visible error unless someone was watching the console at
+    that exact moment. _run_callback is the fix: same "log and swallow"
+    protection on_ready already had.
+    """
+
+    def test_calls_the_callback(self):
+        calls = []
+        WakeWordDetector._run_callback(lambda: calls.append(1))
+        assert calls == [1]
+
+    def test_does_not_propagate_an_exception_from_the_callback(self):
+        def raises():
+            raise RuntimeError("conversation handling blew up")
+
+        # Must not raise - this is the whole point of the fix.
+        WakeWordDetector._run_callback(raises)
+
+    def test_a_failed_callback_does_not_prevent_a_later_successful_one(self):
+        # Confirms the listen loop can keep calling this on every
+        # subsequent wake word detection after one callback failed -
+        # not just that a single bad call is swallowed in isolation.
+        calls = []
+
+        def raises():
+            raise RuntimeError("boom")
+
+        WakeWordDetector._run_callback(raises)
+        WakeWordDetector._run_callback(lambda: calls.append("ok"))
+        assert calls == ["ok"]
+
+
 class TestRepeatedStopStartCycleKeepsSharedInstance:
     """Simulates JarvisBot._restart_wake_word()'s actual pattern: the same
     detector instance gets stop() then start()-equivalent reuse across

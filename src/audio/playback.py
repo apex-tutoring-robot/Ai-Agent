@@ -5,6 +5,7 @@ PipeWire / PulseAudio compatible.
 
 import os
 import logging
+import sys
 import time
 import queue
 import threading
@@ -49,6 +50,13 @@ class AudioPlayer:
         
         logger.info(f"AudioPlayer initialized: {self.sample_rate}Hz, {self.channels} channel(s), device {self.output_device_index}")
         
+        # The rate audio is actually written to the stream at - starts
+        # equal to sample_rate (TTS's native output rate) and may be
+        # overridden per-device in start_streaming() if the opened
+        # device's own native rate differs - see that method and
+        # _resample_pcm16()'s docstring for why this exists at all.
+        self._playback_rate = self.sample_rate
+
         self.pa = pa
         self._owns_pa = (pa is None)
         self.audio_stream = None
@@ -90,8 +98,15 @@ class AudioPlayer:
             logger.error(f"Error playing audio: {e}")
             raise
     
-    # Frames per callback buffer: 320 frames @ 16kHz = 20ms
-    # Matches VAD and Speex AEC frame size for perfect synchronization.
+    # Frames per callback buffer: 320 frames @ 16kHz = 20ms - matches VAD
+    # and Speex AEC frame size for perfect synchronization (the mic-side
+    # input stream, handled entirely separately in continuous_vad.py,
+    # always stays at 16kHz - only THIS output stream's rate can change,
+    # see start_streaming's _playback_rate). The 20ms figure only holds
+    # exactly when the output stream itself is also opened at 16kHz
+    # (the normal case, and always true on Windows); on a device whose
+    # native rate differs, each callback still covers this many FRAMES,
+    # just not 20ms of wall-clock audio.
     _FRAMES_PER_BUFFER = 320
 
     def start_streaming(self, output_device_index: int = None) -> None:
@@ -126,11 +141,41 @@ class AudioPlayer:
                     pass
                 self.audio_stream = None
 
+            # Rate to actually open the stream at and write audio in -
+            # normally == self.sample_rate (16000, TTS's native output),
+            # but see _resample_pcm16()'s docstring: on Linux/the Pi, some
+            # audio backends don't correctly resample a stream opened at
+            # a rate different from the device's OWN native rate, despite
+            # PortAudio nominally accepting any rate - confirmed live,
+            # audio played back ~3-4x too fast ("like a sped-up cartoon"
+            # for a second or two), then went silent once the output
+            # queue couldn't be refilled as fast as it was being drained.
+            # Resample ourselves instead of trusting the OS to - NOT
+            # applied on Windows, where requesting 16000Hz directly has
+            # been verified working correctly throughout this project's
+            # development (WASAPI/DirectSound handle the conversion
+            # natively there) - only correcting the platform where this
+            # is actually confirmed broken, not changing behavior that
+            # already works.
+            self._playback_rate = self.sample_rate
+            if sys.platform != "win32":
+                try:
+                    device_info = self.pa.get_device_info_by_index(target_device_index)
+                    native_rate = int(round(float(device_info.get('defaultSampleRate', self.sample_rate))))
+                    if native_rate != self.sample_rate:
+                        logger.info(
+                            f"🔧 Device {target_device_index}'s native rate is {native_rate}Hz "
+                            f"(TTS audio is {self.sample_rate}Hz) - resampling playback to match."
+                        )
+                        self._playback_rate = native_rate
+                except Exception as e:
+                    logger.warning(f"Could not query device {target_device_index}'s native rate: {e}")
+
             # Open in CALLBACK mode — PortAudio drives timing, no Python write() blocks
             self.audio_stream = self.pa.open(
                 format=pyaudio.paInt16,
                 channels=self.channels,
-                rate=self.sample_rate,
+                rate=self._playback_rate,
                 output=True,
                 output_device_index=target_device_index,
                 frames_per_buffer=self._FRAMES_PER_BUFFER,
@@ -139,8 +184,8 @@ class AudioPlayer:
             self.audio_stream.start_stream()
             self.playback_thread = None  # No worker thread — callback drives everything
 
-            logger.info(f"🔊 Audio stream opened (callback mode): {self.sample_rate}Hz, "
-                        f"buffer={self._FRAMES_PER_BUFFER}, device={target_device_index}")
+            logger.info(f"🔊 Audio stream opened (callback mode): {self._playback_rate}Hz "
+                        f"(source {self.sample_rate}Hz), buffer={self._FRAMES_PER_BUFFER}, device={target_device_index}")
             logger.info("Streaming playback started")
 
         except Exception as e:
@@ -254,9 +299,37 @@ class AudioPlayer:
 
         return (original_output, pyaudio.paContinue)
 
+    @staticmethod
+    def _resample_pcm16(data: bytes, from_rate: int, to_rate: int) -> bytes:
+        """
+        Linear-interpolation resample of 16-bit mono PCM - see
+        start_streaming()'s _playback_rate comment for why this exists:
+        some Linux audio backends don't correctly resample a stream
+        opened at a rate other than the device's own native rate, so
+        this resamples the bytes themselves instead of relying on that.
+
+        Linear interpolation, not a proper sinc/polyphase resampler -
+        fine for correcting a gross rate mismatch in spoken-word audio
+        (the actual bug this fixes), and dependency-free: numpy is
+        already a hard dependency project-wide, scipy/soxr aren't
+        installed anywhere in this project.
+        """
+        if from_rate == to_rate or not data:
+            return data
+        samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+        if len(samples) < 2:
+            return data
+        new_length = max(1, int(round(len(samples) * to_rate / from_rate)))
+        old_indices = np.linspace(0, len(samples) - 1, num=len(samples))
+        new_indices = np.linspace(0, len(samples) - 1, num=new_length)
+        resampled = np.interp(new_indices, old_indices, samples)
+        return resampled.astype(np.int16).tobytes()
+
     def queue_audio(self, audio_chunk: bytes) -> None:
         if not self._is_playing:
             raise RuntimeError("Streaming not started.")
+        if self._playback_rate != self.sample_rate:
+            audio_chunk = self._resample_pcm16(audio_chunk, self.sample_rate, self._playback_rate)
         self.audio_queue.put(audio_chunk)
 
     def set_volume(self, volume: float) -> None:

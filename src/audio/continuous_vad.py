@@ -11,7 +11,7 @@ import logging
 from collections import deque
 import queue
 import threading
-from typing import Generator, Optional, Dict
+from typing import Callable, Generator, Optional, Dict
 from dotenv import load_dotenv
 import webrtcvad
 import pyaudio
@@ -137,11 +137,61 @@ class ContinuousVADCapture:
         self._interrupted_this_turn = False
         self.interruption_buffer = []
         
+        # Optional callback(rms: float), fired on every captured chunk in
+        # always_streaming() regardless of mute/speech state - the same
+        # "is the mic actually picking anything up" live meter hook as
+        # WakeWordDetector.on_level (see that attribute's docstring for
+        # why this exists), kept live through the rest of a conversation
+        # too, not just the pre-wake-word phase.
+        self.on_input_level: Optional[Callable[[float], None]] = None
+
+        # Optional callback(active: bool), fired whenever the barge-in
+        # gate actually opens/closes (see always_streaming's MUTE-THE-PIPE
+        # section) - a precise "did an interruption actually register"
+        # signal, distinct from on_input_level's raw RMS. Added after a
+        # remote report that the raw level meter was ambiguous for
+        # diagnosing a stuck "robot never gets interrupted" complaint -
+        # the mic picks up the bot's OWN voice continuously through
+        # imperfect echo cancellation, so the raw bar reads "loud" during
+        # ordinary playback regardless of whether a real interruption is
+        # happening, with no way to tell the two apart by eye. This
+        # callback reflects the actual post-AEC-and-VAD gate decision
+        # instead, which is unaffected by that ambiguity.
+        self.on_barge_in_state: Optional[Callable[[bool], None]] = None
+
         # ── Playback-aware gating (mute-the-pipe) ──
         self._is_bot_playing = False           # Set by main.py via set_playback_state()
         self._barge_in_event = None            # threading.Event from JarvisBot (set on barge-in)
         self._barge_in_energy_threshold = int(os.getenv('BARGE_IN_ENERGY_THRESHOLD', '1500'))
-        self._barge_in_consecutive_needed = int(os.getenv('BARGE_IN_CHUNKS_NEEDED', '3'))
+        # Lowered from 3 - confirmed live as a real source of lost words:
+        # every chunk spent confirming a barge-in is a chunk of SILENCE
+        # fed to STT instead of the student's real voice (see
+        # always_streaming's mute-the-pipe), so a shorter confirmation
+        # window means less of the interruption's very start is lost
+        # before the gate opens. The pre-roll buffer below (see
+        # always_streaming) recovers what's still lost during that
+        # window regardless, so this is a latency win on top of that,
+        # not the only thing standing between "lost" and "caught."
+        self._barge_in_consecutive_needed = int(os.getenv('BARGE_IN_CHUNKS_NEEDED', '2'))
+        # How much REAL audio to keep buffered, continuously, even while
+        # muted - replayed into STT the instant a barge-in is confirmed
+        # (see always_streaming) so the student's interruption is heard
+        # from where they actually started talking, not from whenever
+        # the gate happened to finish confirming. 500ms comfortably
+        # covers a soft-onset first syllable plus the ~40-60ms
+        # confirmation window itself.
+        self._barge_in_pre_roll_chunks = max(1, int(os.getenv('BARGE_IN_PRE_ROLL_MS', '500')) // self.frame_duration_ms)
+        # Throttle for _barge_in_near_miss_reason's log line (see
+        # always_streaming) - a failed interruption attempt on a remote
+        # device otherwise leaves no record of WHY it failed (too quiet
+        # vs loud-but-not-speech-shaped), since the existing BARGE-IN log
+        # line only fires once the gate actually opens. 0.25s keeps this
+        # readable instead of one line per 20ms chunk.
+        self._last_barge_in_debug_time = 0.0
+        # Below this, a chunk is ordinary silence/room noise between
+        # words, not a failed attempt worth logging - same floor used by
+        # _barge_in_near_miss_reason.
+        self._BARGE_IN_SILENCE_FLOOR_RMS = 300.0
         # AEC Ring Buffer (Hardware-Aligned Reference Audio)
         # 1-second circular buffer for reference audio
         self.ref_ring_buffer = np.zeros(self.sample_rate, dtype=np.int16)
@@ -567,27 +617,98 @@ class ContinuousVADCapture:
             # The lifecycle is managed by the ContinuousVADCapture instance
             pass
             
+    def _is_barge_in_trigger_chunk(self, audio_chunk: bytes) -> tuple[bool, float]:
+        """
+        Whether this one (post-AEC) audio chunk should count toward
+        confirming a barge-in - see always_streaming's gate, the only
+        caller. Returns (triggers, rms) - rms is still returned even
+        when it doesn't trigger, purely for the caller's own log line.
+
+        Requires BOTH a loud chunk (RMS above _barge_in_energy_threshold)
+        AND one WebRTC VAD actually classifies as speech. Energy alone
+        can't tell a person talking apart from any other loud, sustained
+        sound in the room - a dropped book, a dog bark, a door slam -
+        which would false-positive a "barge-in" and cut off the bot's
+        audio for no real reason. Found live: the original implementation
+        was pure energy-thresholding with no speech check at all, despite
+        this same class already using webrtcvad.Vad.is_speech() for every
+        other speech-detection decision in this file (see
+        _capture_one_utterance/stream_audio_chunks) - just not this one.
+        """
+        mic_samples = np.frombuffer(audio_chunk, dtype=np.int16)
+        rms = float(np.sqrt(np.mean(mic_samples.astype(np.float32) ** 2)))
+
+        if rms <= self._barge_in_energy_threshold:
+            return False, rms
+
+        try:
+            is_speech = self.vad.is_speech(audio_chunk, self.sample_rate)
+        except Exception:
+            # Malformed/short frame (e.g. AEC briefly returning an
+            # unexpected length) - fail safe (not a trigger) rather than
+            # let a one-off glitch count toward a false barge-in.
+            is_speech = False
+
+        return bool(is_speech), rms
+
+    def _barge_in_near_miss_reason(self, is_trigger_chunk: bool, rms: float) -> Optional[str]:
+        """
+        Classifies WHY a chunk during bot playback didn't trigger a
+        barge-in - "too_quiet" (never cleared the energy threshold, so
+        WebRTC VAD was never even consulted - see
+        _is_barge_in_trigger_chunk's short-circuit) or "not_speech"
+        (cleared it, but VAD didn't classify it as speech) - or None for
+        an actual trigger or ordinary silence between words, neither of
+        which is worth logging.
+
+        Built to answer a real remote-device complaint ("wait"/"excuse
+        me" don't interrupt playback, but a longer/louder phrase does)
+        without live telemetry access - the existing BARGE-IN log line
+        only fires once the gate opens, so a failed attempt previously
+        left no trace of which half of the AND (see
+        _is_barge_in_trigger_chunk) actually failed. Pure classification
+        with no logging/timing of its own, so it's unit-testable without
+        mocking always_streaming's live audio stream - see
+        always_streaming for the throttled log line that uses this.
+        """
+        if is_trigger_chunk or rms <= self._BARGE_IN_SILENCE_FLOOR_RMS:
+            return None
+        return "too_quiet" if rms <= self._barge_in_energy_threshold else "not_speech"
+
     def always_streaming(self) -> Generator[bytes, None, None]:
         """
-        Continuous generator that yields audio chunks indefinitely 
+        Continuous generator that yields audio chunks indefinitely
         until explicitly stopped or idle timeout is reached.
-        
+
         ECHO DEFENSE (mute-the-pipe):
         While bot is playing back audio, this yields SILENCE to STT.
-        Only switches to real mic audio when a barge-in is detected
-        (high energy for N consecutive chunks after AEC processing).
+        Only switches to real mic audio when a barge-in is detected -
+        both loud AND speech-shaped for N consecutive chunks after AEC
+        processing, see _is_barge_in_trigger_chunk.
+
+        PRE-ROLL: every chunk's real (post-AEC) audio is kept in a short
+        rolling buffer regardless of mute state. The instant a barge-in
+        is confirmed, that buffer is replayed into STT before switching
+        to live chunks - without this, whatever the student said during
+        the confirmation window (and the often-quieter/less-speech-shaped
+        first instant of their interruption before that) was never sent
+        to STT at all, not just discarded after transcription - the very
+        start of what they said was unrecoverably gone. Confirmed live
+        as a real complaint: the listener was missing the beginning of
+        interruptions.
         """
         self.ensure_stream_open()
         self._is_monitoring = True
         self.last_speech_time = time.time()
-        
+
         # Silence chunk for muting (same size as one frame)
         silence_chunk = b'\x00' * (self.chunk_size * 2)  # int16 = 2 bytes per sample
-        
+
         # Barge-in detection state
         barge_in_consecutive = 0
         barge_in_active = False  # Once true, stays true until playback ends
-        
+        pre_roll_buffer = deque(maxlen=self._barge_in_pre_roll_chunks)
+
         logger.info("📡 Continuous audio streaming started")
         
         while self._is_monitoring:
@@ -683,29 +804,75 @@ class ContinuousVADCapture:
                     except Exception as e:
                         logger.error(f"AEC Error: {e}")
 
+                # Keep a short rolling buffer of REAL (post-AEC) audio at
+                # all times, muted or not - see PRE-ROLL in this method's
+                # docstring. Appended before the mute decision below so a
+                # chunk that triggers the gate this same iteration is
+                # already in the buffer when it gets flushed.
+                pre_roll_buffer.append(audio_chunk)
+
+                if self.on_input_level is not None:
+                    try:
+                        mic_samples = np.frombuffer(audio_chunk, dtype=np.int16)
+                        mic_rms = float(np.sqrt(np.mean(mic_samples.astype(np.float32) ** 2))) if len(mic_samples) else 0.0
+                        self.on_input_level(mic_rms)
+                    except Exception:
+                        pass
+
                 # ════════════════════════════════════════════════════════
                 # MUTE-THE-PIPE: Decide whether to yield real audio or silence
                 # ════════════════════════════════════════════════════════
                 if self._is_bot_playing:
                     # Bot speaking counts as activity — keep conversation alive
                     self.last_speech_time = time.time()
-                    
-                    # Measure mic energy AFTER AEC to detect user speech above residual echo
-                    mic_samples = np.frombuffer(audio_chunk, dtype=np.int16)
-                    rms = np.sqrt(np.mean(mic_samples.astype(np.float32)**2))
-                    
-                    if rms > self._barge_in_energy_threshold:
+
+                    is_trigger_chunk, rms = self._is_barge_in_trigger_chunk(audio_chunk)
+
+                    near_miss = self._barge_in_near_miss_reason(is_trigger_chunk, rms)
+                    if near_miss is not None:
+                        now_dbg = time.time()
+                        if now_dbg - self._last_barge_in_debug_time > 0.25:
+                            self._last_barge_in_debug_time = now_dbg
+                            if near_miss == "too_quiet":
+                                logger.info(
+                                    f"🔎 barge-in watch: rms={rms:.0f} below threshold "
+                                    f"({self._barge_in_energy_threshold:.0f}) — too quiet"
+                                )
+                            else:
+                                logger.info(
+                                    f"🔎 barge-in watch: rms={rms:.0f} cleared threshold "
+                                    f"({self._barge_in_energy_threshold:.0f}) but VAD says not-speech"
+                                )
+
+                    if is_trigger_chunk:
                         barge_in_consecutive += 1
                     else:
                         barge_in_consecutive = 0
-                    
+
                     if barge_in_consecutive >= self._barge_in_consecutive_needed and not barge_in_active:
                         # BARGE-IN DETECTED! Open the gate.
                         barge_in_active = True
-                        logger.info(f"🎤🔥 BARGE-IN detected! RMS={rms:.0f} for {barge_in_consecutive} chunks — opening STT gate")
+                        logger.info(
+                            f"🎤🔥 BARGE-IN detected! RMS={rms:.0f} for {barge_in_consecutive} chunks — "
+                            f"opening STT gate, replaying {len(pre_roll_buffer)} pre-roll chunks"
+                        )
                         if self._barge_in_event:
                             self._barge_in_event.set()
-                    
+                        if self.on_barge_in_state is not None:
+                            try:
+                                self.on_barge_in_state(True)
+                            except Exception:
+                                pass
+                        # Catch STT up on the audio it missed while the gate
+                        # was confirming - this chunk (already appended
+                        # above) is the newest entry in the buffer, so it
+                        # gets yielded here as part of the replay; skip the
+                        # duplicate yield below for this same iteration.
+                        for buffered_chunk in pre_roll_buffer:
+                            yield buffered_chunk
+                        pre_roll_buffer.clear()
+                        continue
+
                     if barge_in_active:
                         # Gate is open — feed real audio to STT
                         yield audio_chunk
@@ -719,7 +886,12 @@ class ContinuousVADCapture:
                     if barge_in_active:
                         barge_in_active = False
                         barge_in_consecutive = 0
-                    
+                        if self.on_barge_in_state is not None:
+                            try:
+                                self.on_barge_in_state(False)
+                            except Exception:
+                                pass
+
                     # VAD check to update idle timer
                     try:
                         is_speech = self.vad.is_speech(audio_chunk, self.sample_rate)

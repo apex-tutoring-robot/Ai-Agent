@@ -69,7 +69,11 @@ class FaceWidget(QWidget):
 
         self.label = QLabel(self)
         self.label.setAlignment(Qt.AlignCenter)
-        self.label.setStyleSheet("background: black;")
+        # White, not black - matches the face art's own white background
+        # (see _load), so when the square art is letterboxed into a wider
+        # widget (see _tick()'s KeepAspectRatio scaling) the side bars
+        # blend in seamlessly instead of reading as a visible seam/bug.
+        self.label.setStyleSheet("background: white;")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.label)
@@ -214,8 +218,22 @@ class FaceWidget(QWidget):
         # QPixmap.fromImage() deep-copies the pixel data, so it's safe even
         # though `rgb` (the numpy buffer QImage was built on) goes out of
         # scope right after this line.
+        #
+        # IgnoreAspectRatio ("stretch") - per explicit direction after
+        # seeing both alternatives tried live on the real Pi screen:
+        # KeepAspectRatioByExpanding ("cover") crops the face's top/bottom
+        # to fill the screen; KeepAspectRatio ("fit") leaves blank margins
+        # on the sides (made white to blend in, but still visible as a
+        # seam in a photo of the physical screen). Stretching the fixed
+        # 600x600 square source (see _load) to exactly match this
+        # widget's own (non-square, in full-screen mode) bounds fills the
+        # screen edge to edge with neither cropping nor a margin, at the
+        # cost of a slight proportion distortion - the explicitly
+        # requested tradeoff. In the circular "bubble" mode (TutorScene.
+        # show_teaching_layout), the widget is ALSO square, so this is a
+        # no-op there (600x600 -> e.g. 190x190 stretches evenly either way).
         pixmap = QPixmap.fromImage(qimg).scaled(
             self.width() or w, self.height() or h,
-            Qt.KeepAspectRatio, Qt.SmoothTransformation
+            Qt.IgnoreAspectRatio, Qt.SmoothTransformation
         )
         self.label.setPixmap(pixmap)

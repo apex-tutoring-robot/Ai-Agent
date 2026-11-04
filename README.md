@@ -75,11 +75,14 @@ Required: `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`, `AZURE_OPENAI_API_KEY`, `AZ
 
 ### 5. Configure Audio Devices
 
-List available audio devices:
+Every available device is logged at startup ("Available audio devices" in the
+first few lines of output), or list them yourself ahead of time:
 ```bash
 python -c "import pyaudio; p = pyaudio.PyAudio(); [print(f'{i}: {p.get_device_info_by_index(i)[\"name\"]}') for i in range(p.get_device_count())]"
 ```
-Set `AUDIO_INPUT_DEVICE_INDEX` / `AUDIO_OUTPUT_DEVICE_INDEX` in `.env` if PulseAudio auto-detection doesn't pick the right device.
+Set `AUDIO_INPUT_DEVICE_INDEX` / `AUDIO_OUTPUT_DEVICE_INDEX` in `.env` if PulseAudio
+auto-detection doesn't pick the right device - an explicit, valid index always takes
+priority over auto-detection (see `src/audio/device_detection.py`).
 
 ### 6. Configure the System Prompt
 
@@ -201,7 +204,7 @@ Ai-Agent/
 | `LOCAL_LLM_MODEL_PATH` | `.gguf` model path, enables the local-LLM fallback if Azure is down | No |
 | `LOG_LEVEL` | Logging level (INFO) | No |
 
-A number of spoken-phrase overrides (`WARMUP_CHECKIN_MESSAGE`, `DISCOVERY_MESSAGE`, `IDENTITY_CHECKIN_MESSAGE`, `GOODBYE_MESSAGE`, `SLEEP_MESSAGE`) and a few more timing/threshold knobs also exist with sane defaults - see `os.getenv(...)` calls in `src/main.py` for the full list.
+A number of spoken-phrase overrides (`BOOT_GREETING`, `WARMUP_CHECKIN_MESSAGE`, `DISCOVERY_MESSAGE`, `IDENTITY_CHECKIN_MESSAGE`, `GOODBYE_MESSAGE`, `SLEEP_MESSAGE`) and a few more timing/threshold knobs also exist with sane defaults - see `os.getenv(...)` calls in `src/main.py` for the full list.
 
 ## 🛡️ Privacy
 

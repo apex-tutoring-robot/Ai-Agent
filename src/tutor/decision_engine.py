@@ -23,6 +23,7 @@ class TutorAction(Enum):
     HINT = "hint"
     RETEACH = "reteach"
     CHALLENGE = "challenge"
+    NOT_AN_ANSWER = "not_an_answer"
 
 
 # Actions the student was right for (used to update mastery) - the same

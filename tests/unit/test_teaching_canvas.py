@@ -20,6 +20,14 @@ from PyQt5.QtWidgets import QApplication
 _app = QApplication.instance() or QApplication([])
 
 from visuals.ui.teaching_canvas import TeachingCanvas, _SHAPE_ANIM_SECONDS
+from visuals.example_image_library import image_path as _example_image_path
+
+
+def _real_example_image_path() -> str:
+    """A guaranteed-valid local image path for show_photo tests - any
+    tag from the real library works equally well here, this test suite
+    doesn't care which."""
+    return _example_image_path("pizza")
 
 
 class TestProgress:
@@ -49,6 +57,30 @@ class TestProgress:
     def test_zero_duration_is_always_complete(self):
         now = time.monotonic()
         assert TeachingCanvas._progress(start_time=now, now=now, duration=0) == 1.0
+
+
+class TestEaseOutCubic:
+    """Used by _current_icon_state to make icon move/grow animations
+    feel like something arriving and settling, not a constant-velocity
+    slide - confirmed live as a real quality fix (the knowledge-
+    celebration's brain travelling to the book looked stiff/mechanical
+    before this)."""
+
+    def test_start_is_zero(self):
+        assert TeachingCanvas._ease_out_cubic(0.0) == 0.0
+
+    def test_end_is_one(self):
+        assert abs(TeachingCanvas._ease_out_cubic(1.0) - 1.0) < 1e-9
+
+    def test_midpoint_is_ahead_of_linear(self):
+        # The whole point of an ease-OUT curve: faster at the start,
+        # decelerating into the finish - so at the halfway point in
+        # TIME, it's already past the halfway point in progress.
+        assert TeachingCanvas._ease_out_cubic(0.5) > 0.5
+
+    def test_monotonically_increasing(self):
+        values = [TeachingCanvas._ease_out_cubic(p / 10) for p in range(11)]
+        assert values == sorted(values)
 
 
 class TestMutators:
@@ -199,6 +231,44 @@ class TestHandleDrawActions:
         canvas.handle_draw_actions([{"action": "clear"}])
         assert canvas.icons == []
 
+    def test_show_photo_action_adds_a_photo(self):
+        canvas = TeachingCanvas()
+        path = _real_example_image_path()
+        canvas.handle_draw_actions([
+            {"action": "show_photo", "path": path, "x": 480, "y": 150, "w": 260, "h": 260}
+        ])
+        photo = canvas.photo_items[0]
+        assert (photo.path, photo.x, photo.y, photo.w, photo.h) == (path, 480, 150, 260, 260)
+
+    def test_show_photo_with_an_unloadable_path_is_a_no_op(self):
+        # A missing/corrupt image file must never crash the turn - same
+        # defensive pattern as add_fraction_bar's invalid-spec handling.
+        canvas = TeachingCanvas()
+        canvas.handle_draw_actions([
+            {"action": "show_photo", "path": "/no/such/file.jpg", "x": 0, "y": 0, "w": 10, "h": 10}
+        ])
+        assert canvas.photo_items == []
+
+    def test_clear_action_also_clears_photos(self):
+        canvas = TeachingCanvas()
+        canvas.add_photo(_real_example_image_path(), 480, 150, 260, 260)
+        canvas.handle_draw_actions([{"action": "clear"}])
+        assert canvas.photo_items == []
+
+    def test_a_second_photo_replaces_the_first_instead_of_stacking(self):
+        # Regression guard for a real bug: a curiosity-question
+        # explanation routinely has TWO real-world examples in separate
+        # speech steps, and when both matched a library tag, both photos
+        # got drawn at the same fixed position main.py always uses,
+        # stacking directly on top of each other. Each photo illustrates
+        # whatever's being discussed right now - only the latest should
+        # ever be on screen.
+        canvas = TeachingCanvas()
+        canvas.add_photo(_example_image_path("pizza"), 480, 150, 260, 260)
+        canvas.add_photo(_example_image_path("apple"), 480, 150, 260, 260)
+        assert len(canvas.photo_items) == 1
+        assert canvas.photo_items[0].path == _example_image_path("apple")
+
 
 class TestIconAnimationState:
     def test_static_icon_reports_its_own_position_and_scale(self):
@@ -207,7 +277,32 @@ class TestIconAnimationState:
         icon = canvas.icons[0]
         assert canvas._current_icon_state(icon, now=time.monotonic()) == (560, 0.9)
 
-    def test_move_animation_interpolates_x_over_its_duration(self):
+    def test_move_animation_starts_at_the_from_position(self):
+        canvas = TeachingCanvas()
+        canvas.add_icon("car1", "car", 560, 360)
+        now = time.monotonic()
+        canvas.animate_icon("car1", "move", duration=2.0, to_x=760)
+        icon = canvas.icons[0]
+        icon.anim_start_time = now  # just starting
+        x, _ = canvas._current_icon_state(icon, now=now)
+        assert abs(x - 560) < 1e-6
+
+    def test_move_animation_ends_at_the_to_position(self):
+        canvas = TeachingCanvas()
+        canvas.add_icon("car1", "car", 560, 360)
+        now = time.monotonic()
+        canvas.animate_icon("car1", "move", duration=2.0, to_x=760)
+        icon = canvas.icons[0]
+        icon.anim_start_time = now - 2.0  # fully complete
+        x, _ = canvas._current_icon_state(icon, now=now)
+        assert abs(x - 760) < 1e-6
+
+    def test_move_animation_is_eased_not_linear_at_the_midpoint(self):
+        # Ease-out-cubic moves FASTER early and decelerates into the
+        # finish, so halfway through the DURATION it's already past the
+        # halfway POSITION - confirmed live as a real quality fix, a
+        # flat linear slide read as stiff/mechanical for the knowledge-
+        # celebration's brain travelling to the book.
         canvas = TeachingCanvas()
         canvas.add_icon("car1", "car", 560, 360)
         now = time.monotonic()
@@ -215,7 +310,9 @@ class TestIconAnimationState:
         icon = canvas.icons[0]
         icon.anim_start_time = now - 1.0  # halfway through a 2s animation
         x, _ = canvas._current_icon_state(icon, now=now)
-        assert abs(x - 660) < 1e-6  # halfway between 560 and 760
+        linear_midpoint = 660
+        assert x > linear_midpoint
+        assert x < 760
 
     def test_grow_animation_interpolates_scale_over_its_duration(self):
         canvas = TeachingCanvas()
