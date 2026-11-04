@@ -5,8 +5,8 @@ docstring and error_banner.py's module docstring for the real silent-
 startup-failure case this exists to make visible).
 
 Pure logic (visibility + sizing), no paintEvent exercised - same
-convention as test_mic_level_indicator.py/test_audio_device_indicator.py
-(verified live via rendered screenshots instead).
+convention as test_mic_level_indicator.py/test_status_bar.py (verified
+live via rendered screenshots instead).
 """
 
 from PyQt5.QtWidgets import QApplication

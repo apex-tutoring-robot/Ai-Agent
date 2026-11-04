@@ -1,8 +1,8 @@
 """
-Tests for utils.version_info.get_current_commit - what the
-CommitIndicator HUD (visuals/ui/commit_indicator.py) shows, so someone
-at the physical robot can tell whether it actually picked up a pushed
-fix instead of guessing from an ambiguous "it's not working" report.
+Tests for utils.version_info.get_current_commit - what the status bar
+(visuals/ui/status_bar.py) shows, so someone at the physical robot can
+tell whether it actually picked up a pushed fix instead of guessing
+from an ambiguous "it's not working" report.
 """
 
 import subprocess

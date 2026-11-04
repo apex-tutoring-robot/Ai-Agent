@@ -1,6 +1,6 @@
 """
 Reads the currently checked-out git commit so the running app can show
-what code it's actually running - see visuals/ui/commit_indicator.py.
+what code it's actually running - see visuals/ui/status_bar.py.
 Exists because of a real deployment confusion: after pushing a fix to
 `dev`, there was no way to glance at the physical robot and tell whether
 it had actually picked up the new code (pulled + restarted) or was still

@@ -8,11 +8,10 @@ the main thread instead of FaceAnimator.render_forever()'s blocking cv2 loop
 import os
 from PyQt5.QtWidgets import QMainWindow, QWidget
 from utils.version_info import get_current_commit
-from visuals.ui.audio_device_indicator import AudioDeviceIndicator
-from visuals.ui.commit_indicator import CommitIndicator
 from visuals.ui.error_banner import ErrorBanner
 from visuals.ui.face_widget import FaceWidget
 from visuals.ui.mic_level_indicator import MicLevelIndicator
+from visuals.ui.status_bar import StatusBar
 from visuals.ui.teaching_canvas import TeachingCanvas
 from visuals.ui.tutor_scene import TutorScene
 from visuals.ui.tutor_view import TutorView
@@ -36,24 +35,20 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self.setWindowTitle("Jarvis AI Tutor")
 
+        # Thin, persistent strip across the very top of the screen,
+        # phone-style - mic/speaker and the running commit, see
+        # status_bar.py's own docstring for why this replaced two
+        # floating pill widgets. Populated with the commit once at
+        # startup (it doesn't change mid-session) rather than via a
+        # ui_signals round-trip like the mic/speaker readout, which
+        # genuinely can change after _recreate_audio_system.
+        self.status_bar = StatusBar(self)
+        self.status_bar.show_commit(get_current_commit())
+
         # Plain child widget (not part of the QGraphicsScene) so it floats
         # on top of the face/canvas as a corner HUD, like a phone's on-screen
         # volume overlay - positioned in _position_volume_indicator().
         self.volume_indicator = VolumeIndicator(self)
-
-        # Opposite corner from the volume indicator - a persistent (not
-        # auto-hiding) health-check readout of which mic/speaker Jarvis
-        # actually picked, see audio_device_indicator.py's own docstring.
-        self.audio_device_indicator = AudioDeviceIndicator(self)
-
-        # Same corner as the volume indicator, stacked below it - a
-        # persistent readout of which commit is actually running, see
-        # commit_indicator.py's own docstring. Populated once at startup
-        # (the running commit doesn't change mid-session) rather than
-        # via a ui_signals round-trip like the mic/speaker readout,
-        # which genuinely can change after _recreate_audio_system.
-        self.commit_indicator = CommitIndicator(self)
-        self.commit_indicator.show_commit(get_current_commit())
 
         # Bottom-left (clear of the bottom-right face bubble used in
         # teaching layout - see TutorScene) - a live "is the mic actually
@@ -83,9 +78,8 @@ class MainWindow(QMainWindow):
             # Windows-fixes branch.
             self.resize(1280, 720)
 
+        self._position_status_bar()
         self._position_volume_indicator()
-        self._position_audio_device_indicator()
-        self._position_commit_indicator()
         self._position_mic_level_indicator()
         self._position_error_banner()
         self._position_sleep_overlay()
@@ -107,7 +101,7 @@ class MainWindow(QMainWindow):
         self.signals.show_face_fullscreen.connect(self._show_face_fullscreen)
         self.signals.show_teaching_layout.connect(self._show_teaching_layout)
         self.signals.volume_changed.connect(self.volume_indicator.show_level)
-        self.signals.audio_devices_resolved.connect(self.audio_device_indicator.show_devices)
+        self.signals.audio_devices_resolved.connect(self.status_bar.show_devices)
         self.signals.mic_level_changed.connect(self.mic_level_indicator.show_level)
         self.signals.barge_in_state_changed.connect(self.mic_level_indicator.show_barge_in_state)
         self.signals.enter_sleep.connect(self.show_sleep_mode)
@@ -128,58 +122,40 @@ class MainWindow(QMainWindow):
         # ratio isn't exactly the scene's fixed 1280:720.
         self.view.set_fill_mode(stretch_to_fill=False)
 
+    def _position_status_bar(self) -> None:
+        # Edge-to-edge across the very top, like a phone's status bar -
+        # not inset with a margin the way the floating widgets below are.
+        self.status_bar.set_width(self.width())
+        self.status_bar.move(0, 0)
+
     def _position_volume_indicator(self) -> None:
         margin = 24
         self.volume_indicator.move(
-            self.width() - self.volume_indicator.width() - margin, margin
-        )
-
-    def _position_audio_device_indicator(self) -> None:
-        margin = 24
-        self.audio_device_indicator.move(margin, margin)
-
-    def _position_commit_indicator(self) -> None:
-        # Directly below the volume indicator's slot, with a gap wide
-        # enough that a transient volume pop-up never overlaps it even
-        # though the two aren't both visible at the same time in the
-        # common case.
-        margin = 24
-        gap = 8
-        self.commit_indicator.move(
-            self.width() - self.commit_indicator.width() - margin,
-            margin + self.volume_indicator.height() + gap,
+            self.width() - self.volume_indicator.width() - margin,
+            self.status_bar.height() + margin,
         )
 
     def _position_mic_level_indicator(self) -> None:
-        # Bottom-left, mirroring the audio device indicator's side but
-        # at the opposite vertical edge - clear of the bottom-right face
-        # bubble used in teaching layout (see TutorScene).
+        # Bottom-left, clear of the bottom-right face bubble used in
+        # teaching layout (see TutorScene).
         margin = 24
         self.mic_level_indicator.move(
             margin, self.height() - self.mic_level_indicator.height() - margin
         )
 
     def _position_error_banner(self) -> None:
-        # Top-center, below the tallest top-corner widget (the audio
-        # device pill) so it never overlaps either corner's indicators
-        # regardless of which happen to be visible at the same time.
         margin = 24
         gap = 12
-        top_row_height = max(
-            self.audio_device_indicator.height(),
-            self.volume_indicator.height() + 8 + self.commit_indicator.height(),
-        )
         self.error_banner.set_width(self.width() - 2 * margin)
-        self.error_banner.move(margin, margin + top_row_height + gap)
+        self.error_banner.move(margin, self.status_bar.height() + gap)
 
     def _position_sleep_overlay(self) -> None:
         self.sleep_overlay.setGeometry(0, 0, self.width(), self.height())
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._position_status_bar()
         self._position_volume_indicator()
-        self._position_audio_device_indicator()
-        self._position_commit_indicator()
         self._position_mic_level_indicator()
         self._position_error_banner()
         self._position_sleep_overlay()

@@ -2,8 +2,8 @@
 Tests for MicLevelIndicator.show_level() - the RMS normalization +
 smoothing logic behind the live "is the mic actually picking anything
 up" meter (see ui_signals.mic_level_changed). Pure numeric logic, no
-paintEvent exercised - same convention as test_audio_device_indicator.py
-(verified live via rendered screenshots instead).
+paintEvent exercised - same convention as test_status_bar.py (verified
+live via rendered screenshots instead).
 """
 
 from PyQt5.QtWidgets import QApplication

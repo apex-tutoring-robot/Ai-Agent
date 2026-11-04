@@ -15,9 +15,9 @@ that stays flat while clearly audible speech is happening points
 straight at the microphone/driver/gain instead, no further guessing
 needed.
 
-Always visible once started (same as AudioDeviceIndicator/
-CommitIndicator), not a transient popup like VolumeIndicator - the
-whole point is being able to watch it continuously while testing.
+Always visible once started (same as the status bar), not a transient
+popup like VolumeIndicator - the whole point is being able to watch it
+continuously while testing.
 
 Also shows barge-in GATE state (show_barge_in_state, fed by
 ContinuousVADCapture.on_barge_in_state via ui_signals.

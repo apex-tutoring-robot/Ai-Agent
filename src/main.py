@@ -404,9 +404,9 @@ class JarvisBot:
             logger.error(f"Failed to recreate audio system: {e}")
 
     def _announce_resolved_audio_devices(self, input_index: int, output_index: int) -> None:
-        """Pushes the resolved mic/speaker names to the on-screen health-
-        check indicator (see ui_signals.audio_devices_resolved and
-        visuals/ui/audio_device_indicator.py) - a no-op headless (no
+        """Pushes the resolved mic/speaker names to the on-screen status
+        bar (see ui_signals.audio_devices_resolved and
+        visuals/ui/status_bar.py) - a no-op headless (no
         ui_signals) or if either index somehow doesn't resolve to a real
         device (defensive only; resolve_device_index always returns SOME
         int, but this never needs to be fatal either way)."""
