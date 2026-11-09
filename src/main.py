@@ -274,6 +274,24 @@ class JarvisBot:
         self._playback_ended_time = 0.0        # time.time() when playback stopped
         self._barge_in_detected = threading.Event()  # Set by VAD when real user speech detected
 
+        # time.time() deadline until which the idle/check-in loop in
+        # _handle_wake_word must stay quiet even though _speaker_busy has
+        # already cleared - set by _listener_loop the instant a barge-in
+        # aborts playback. _speaker_busy alone only covers a turn that's
+        # actively being processed; it clears immediately on interruption,
+        # before the student's follow-up utterance has even finished
+        # being transcribed, let alone queued. Without this, that gap
+        # relied entirely on frame-by-frame VAD to keep last_speech_time
+        # fresh, which a student pausing mid-sentence to think - exactly
+        # what tends to happen right after interrupting - can blow
+        # through well inside idle_timeout. Confirmed live via Discord
+        # testing: "Are you still there?" firing on essentially every
+        # interruption, stepping on the student's own follow-up. 0.0
+        # (the default) never satisfies `now < deadline`, so this is a
+        # no-op until the first real interruption sets it.
+        self._interruption_recovery_deadline = 0.0
+        self._idle_timeout = int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
+
         # ── New-profile onboarding state ──
         # A short Q&A after a brand new profile is created - doubles as
         # useful context-gathering and (later) enrollment audio for voice
@@ -1936,6 +1954,10 @@ class JarvisBot:
                             logger.info(f"🎤 BARGE-IN: '{text}' (Stopping playback)")
                             self._interruption_event.set()
                             self.audio_player.stop_streaming(immediate=True)
+                            # Protect the gap until the follow-up utterance
+                            # this interruption is for gets finalized and
+                            # re-queued - see _interruption_recovery_deadline.
+                            self._interruption_recovery_deadline = now + self._idle_timeout
                 
                 # ── LAYER 3: Echo cooldown ──
                 # Short grace period after playback ends to catch echo tail
@@ -1956,6 +1978,7 @@ class JarvisBot:
                     logger.info(f"📌 User finalized: '{text}'")
                     self._interruption_event.clear()
                     self._barge_in_detected.clear()
+                    self._interruption_recovery_deadline = 0.0
                     request_queue.put(text)
                     
             logger.info("📡 Listener worker stopped cleanly")
@@ -1997,6 +2020,21 @@ class JarvisBot:
         if drained:
             logger.info(f"⏭️  Skipped {drained} superseded utterance(s), acting on the latest: '{latest[:60]}'")
         return latest
+
+    def _should_defer_idle_check(self) -> bool:
+        """True while the idle/check-in loop in _handle_wake_word must
+        stay quiet - either a turn is actively being processed
+        (_speaker_busy), or we're still within the grace window opened
+        by _listener_loop the instant a barge-in aborted playback (see
+        _interruption_recovery_deadline). The second case covers the gap
+        _speaker_busy alone misses: it clears the moment playback stops,
+        before the student's follow-up utterance - the whole reason
+        playback stopped - has even finished being transcribed. Without
+        it, "Are you still there?" could fire on top of that follow-up
+        the moment the student paused mid-sentence to think, which is
+        exactly when they're most likely to pause (confirmed live via
+        Discord testing: this fired on essentially every interruption)."""
+        return self._speaker_busy.is_set() or time.time() < self._interruption_recovery_deadline
 
     def _speaker_loop(self, continuous_vad, output_device_index):
         """Consumer: Processes requests and speaks."""
@@ -2508,6 +2546,7 @@ class JarvisBot:
             # Enter continuous conversation mode
             idle_timeout = int(os.getenv('CONVERSATION_IDLE_TIMEOUT_SECONDS', 10))
             check_in_grace = int(os.getenv('CHECK_IN_GRACE_SECONDS', 60))
+            self._idle_timeout = idle_timeout  # read by _listener_loop - see _interruption_recovery_deadline
             logger.info(
                 f"⏱️  Will check in after {idle_timeout}s of silence, "
                 f"then end after {check_in_grace}s more with no response"
@@ -2602,7 +2641,13 @@ class JarvisBot:
                 # prompt_finished_at silently blow through check_in_grace
                 # the moment the turn finishes, which would end the
                 # conversation right after a long explanation.
-                if self._speaker_busy.is_set():
+                #
+                # _speaker_busy alone doesn't cover an interruption though:
+                # it clears the instant playback stops, before the
+                # follow-up utterance that triggered the interruption has
+                # even finished being transcribed - see
+                # _should_defer_idle_check/_interruption_recovery_deadline.
+                if self._should_defer_idle_check():
                     checked_in = False
                     time.sleep(0.5)
                     continue
